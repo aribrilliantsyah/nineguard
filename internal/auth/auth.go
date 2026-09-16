@@ -1,0 +1,302 @@
+package auth
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"net/http"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+	"nineguard/internal/db"
+)
+
+type contextKey string
+
+const userContextKey contextKey = "user"
+const SessionCookieName = "nineguard_session"
+
+type User struct {
+	ID          int64     `json:"id"`
+	Username    string    `json:"username"`
+	DisplayName string    `json:"display_name"`
+	Role        string    `json:"role"` // admin | operator
+	CreatedAt   time.Time `json:"created_at"`
+	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
+}
+
+type Manager struct {
+	db          *db.DB
+	authEnabled bool
+}
+
+func NewManager(database *db.DB, authEnabled bool) *Manager {
+	return &Manager{
+		db:          database,
+		authEnabled: authEnabled,
+	}
+}
+
+func (m *Manager) IsAuthEnabled() bool {
+	return m.authEnabled
+}
+
+func (m *Manager) NeedsSetup() (bool, error) {
+	var count int
+	err := m.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count == 0, nil
+}
+
+func (m *Manager) Setup(username, password string) (*User, string, error) {
+	needs, err := m.NeedsSetup()
+	if err != nil {
+		return nil, "", err
+	}
+	if !needs {
+		return nil, "", errors.New("setup has already been completed")
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, "", err
+	}
+
+	res, err := m.db.Exec(`
+		INSERT INTO users (username, display_name, password_hash, role, last_login_at)
+		VALUES (?, ?, ?, 'admin', CURRENT_TIMESTAMP)
+	`, username, username, string(hash))
+	if err != nil {
+		return nil, "", err
+	}
+
+	uid, err := res.LastInsertId()
+	if err != nil {
+		return nil, "", err
+	}
+
+	token, err := m.createSession(uid)
+	if err != nil {
+		return nil, "", err
+	}
+
+	user := &User{
+		ID:          uid,
+		Username:    username,
+		DisplayName: username,
+		Role:        "admin",
+		CreatedAt:   time.Now(),
+	}
+
+	return user, token, nil
+}
+
+func (m *Manager) Login(username, password string) (*User, string, error) {
+	var user User
+	var hash string
+	var lastLogin sql.NullTime
+
+	err := m.db.QueryRow(`
+		SELECT id, username, display_name, password_hash, role, created_at, last_login_at
+		FROM users WHERE username = ?
+	`, username).Scan(&user.ID, &user.Username, &user.DisplayName, &hash, &user.Role, &user.CreatedAt, &lastLogin)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, "", errors.New("invalid username or password")
+		}
+		return nil, "", err
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
+		return nil, "", errors.New("invalid username or password")
+	}
+
+	if lastLogin.Valid {
+		user.LastLoginAt = &lastLogin.Time
+	}
+
+	_, _ = m.db.Exec("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", user.ID)
+
+	token, err := m.createSession(user.ID)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return &user, token, nil
+}
+
+func (m *Manager) Logout(token string) error {
+	_, err := m.db.Exec("DELETE FROM sessions WHERE token = ?", token)
+	return err
+}
+
+func (m *Manager) createSession(userID int64) (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(bytes)
+	expiresAt := time.Now().Add(30 * 24 * time.Hour) // 30 days session
+
+	_, err := m.db.Exec("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)", token, userID, expiresAt)
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func (m *Manager) ValidateSession(token string) (*User, error) {
+	var user User
+	var expiresAt time.Time
+	var lastLogin sql.NullTime
+
+	err := m.db.QueryRow(`
+		SELECT u.id, u.username, u.display_name, u.role, u.created_at, u.last_login_at, s.expires_at
+		FROM sessions s
+		JOIN users u ON s.user_id = u.id
+		WHERE s.token = ?
+	`, token).Scan(&user.ID, &user.Username, &user.DisplayName, &user.Role, &user.CreatedAt, &lastLogin, &expiresAt)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if time.Now().After(expiresAt) {
+		_, _ = m.db.Exec("DELETE FROM sessions WHERE token = ?", token)
+		return nil, errors.New("session expired")
+	}
+
+	if lastLogin.Valid {
+		user.LastLoginAt = &lastLogin.Time
+	}
+
+	return &user, nil
+}
+
+func (m *Manager) ListUsers() ([]User, error) {
+	rows, err := m.db.Query("SELECT id, username, display_name, role, created_at, last_login_at FROM users ORDER BY id ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []User
+	for rows.Next() {
+		var u User
+		var lastLogin sql.NullTime
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.CreatedAt, &lastLogin); err != nil {
+			return nil, err
+		}
+		if lastLogin.Valid {
+			u.LastLoginAt = &lastLogin.Time
+		}
+		list = append(list, u)
+	}
+	return list, nil
+}
+
+func (m *Manager) CreateUser(username, displayName, password, role string) (*User, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
+	if role != "admin" {
+		role = "operator"
+	}
+	res, err := m.db.Exec("INSERT INTO users (username, display_name, password_hash, role) VALUES (?, ?, ?, ?)", username, displayName, string(hash), role)
+	if err != nil {
+		return nil, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	return &User{
+		ID:          id,
+		Username:    username,
+		DisplayName: displayName,
+		Role:        role,
+		CreatedAt:   time.Now(),
+	}, nil
+}
+
+func (m *Manager) UpdateUser(id int64, username, displayName, role string) (*User, error) {
+	if role != "admin" {
+		role = "operator"
+	}
+	_, err := m.db.Exec("UPDATE users SET username = ?, display_name = ?, role = ? WHERE id = ?", username, displayName, role, id)
+	if err != nil {
+		return nil, err
+	}
+	var u User
+	var lastLogin sql.NullTime
+	err = m.db.QueryRow("SELECT id, username, display_name, role, created_at, last_login_at FROM users WHERE id = ?", id).
+		Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.CreatedAt, &lastLogin)
+	if err != nil {
+		return nil, err
+	}
+	if lastLogin.Valid {
+		u.LastLoginAt = &lastLogin.Time
+	}
+	return &u, nil
+}
+
+func (m *Manager) ChangePassword(userID int64, newPassword string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	_, err = m.db.Exec("UPDATE users SET password_hash = ? WHERE id = ?", string(hash), userID)
+	return err
+}
+
+func (m *Manager) DeleteUser(id int64) error {
+	var count int
+	_ = m.db.QueryRow("SELECT COUNT(*) FROM users WHERE role = 'admin'").Scan(&count)
+	var role string
+	_ = m.db.QueryRow("SELECT role FROM users WHERE id = ?", id).Scan(&role)
+	if role == "admin" && count <= 1 {
+		return errors.New("cannot delete the last administrator")
+	}
+	_, err := m.db.Exec("DELETE FROM users WHERE id = ?", id)
+	return err
+}
+
+func UserFromContext(ctx context.Context) *User {
+	if u, ok := ctx.Value(userContextKey).(*User); ok {
+		return u
+	}
+	return nil
+}
+
+func (m *Manager) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !m.authEnabled {
+			// Auth disabled: inject dummy admin
+			dummy := &User{ID: 1, Username: "admin", DisplayName: "Administrator", Role: "admin"}
+			ctx := context.WithValue(r.Context(), userContextKey, dummy)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		cookie, err := r.Cookie(SessionCookieName)
+		if err != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		user, err := m.ValidateSession(cookie.Value)
+		if err == nil && user != nil {
+			ctx := context.WithValue(r.Context(), userContextKey, user)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
