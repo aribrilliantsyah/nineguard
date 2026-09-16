@@ -22,7 +22,6 @@ VOLUME ["/data"]
 ENV NINEGUARD_PORT=8080 \
     NINEGUARD_AUTH_ENABLED=true \
     NINEGUARD_DB_FILE=/data/nineguard.db \
-    NINEGUARD_AUTH_FILE=/data/auth.json \
-    NINEGUARD_ROUTER_TARGET=http://localhost:20128/
+    NINEGUARD_AUTH_FILE=/data/auth.json
 
 ENTRYPOINT ["/app/nineguard"]

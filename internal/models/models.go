@@ -24,19 +24,13 @@ type ModelInfo struct {
 }
 
 type Manager struct {
-	db           *db.DB
-	routerTarget string
+	db *db.DB
 }
 
-func NewManager(database *db.DB, routerTarget string) *Manager {
+func NewManager(database *db.DB) *Manager {
 	return &Manager{
-		db:           database,
-		routerTarget: routerTarget,
+		db: database,
 	}
-}
-
-func (m *Manager) SetRouterTarget(target string) {
-	m.routerTarget = strings.TrimRight(strings.TrimSpace(target), "/")
 }
 
 // IsModelEnabled checks if a model is allowed. Returns true by default if not explicitly disabled.

@@ -52,7 +52,7 @@ export function mount(root) {
     h('div', { class: 'page-head' },
       h('div', null,
         h('h1', null, 'Models Management'),
-        h('p', null, 'Control model firewall rules and access. Models are grouped by provider prefix (e.g. dak/model-id).')
+        h('p', null, 'Control model firewall rules and access. Models are grouped by provider prefix (e.g. openrouter/model-id).')
       ),
       h('div', { class: 'page-actions' },
         searchInput,
@@ -91,7 +91,7 @@ export function mount(root) {
         {
           name: 'model',
           label: 'Model Identifier',
-          placeholder: 'e.g. dak/ag/gemini-3.8-flash or gpt-4o',
+          placeholder: 'e.g. openrouter/anthropic/claude-3.5-sonnet or gpt-4o',
           required: true
         }
       ],

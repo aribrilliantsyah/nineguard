@@ -10,8 +10,8 @@ Buka antarmuka NineGuard pada browser di menu **Gateway $\rightarrow$ Providers*
 
 1. Klik tombol **+ Add Provider**.
 2. Isi formulir konfigurasi:
-   * **Provider Name:** Nama penyedia (contoh: `DAK Upstream`, `Local Ollama`, `OpenRouter Cloud`).
-   * **Model Routing Prefix:** Prefix pembeda (contoh: `dak`, `local`, `openrouter`).
+   * **Provider Name:** Nama penyedia (contoh: `OpenRouter Cloud`, `Local Ollama`, `vLLM Server`).
+   * **Model Routing Prefix:** Prefix pembeda (contoh: `openrouter`, `local`, `ollama`).
      * *Catatan:* Biarkan kosong jika provider ini dijadikan root tanpa prefix.
    * **Route / Target URL:** Endpoint dasar HTTP provider:
      * 9router: `http://localhost:20128`
@@ -28,14 +28,14 @@ Buka antarmuka NineGuard pada browser di menu **Gateway $\rightarrow$ Providers*
 ## 2. Bagaimana Prefix Routing Bekerja?
 
 Misalkan Anda memiliki 2 provider terdaftar:
-1. **Provider 1:** Prefix `dak`, Route `http://localhost:20128`
+1. **Provider 1:** Prefix `openrouter`, Route `https://openrouter.ai/api/v1`
 2. **Provider 2:** Prefix `local`, Route `http://localhost:11434`
 
 ### Contoh Panggilan Model dari Client:
-* Jika client memanggil model: **`dak/ag/gemini-3.8-flash`**
-  * NineGuard mendeteksi prefix `dak/`.
-  * NineGuard memotong prefix menjadi `ag/gemini-3.8-flash`.
-  * NineGuard meneruskan request ke `http://localhost:20128` dengan master key Provider 1.
+* Jika client memanggil model: **`openrouter/anthropic/claude-3.5-sonnet`**
+  * NineGuard mendeteksi prefix `openrouter/`.
+  * NineGuard memotong prefix menjadi `anthropic/claude-3.5-sonnet`.
+  * NineGuard meneruskan request ke `https://openrouter.ai/api/v1` dengan master key Provider 1.
 * Jika client memanggil model: **`local/llama3:8b`**
   * NineGuard mendeteksi prefix `local/`.
   * NineGuard memotong prefix menjadi `llama3:8b`.

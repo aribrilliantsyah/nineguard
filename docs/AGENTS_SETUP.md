@@ -17,7 +17,7 @@ Setiap agen **wajib menggunakan NineGuard Client API Key** (`sk-ng-...`) yang di
    * Aktifkan toggle **Override OpenAI Base URL**.
    * Isi **Base URL**: `http://localhost:8080/v1`
    * Masukkan **API Key**: `sk-ng-...` (key NineGuard Anda).
-4. Di daftar model di bawahnya, tambahkan model yang Anda inginkan (misalnya `dak/ag/gemini-3.8-flash` atau model default).
+4. Di daftar model di bawahnya, tambahkan model yang Anda inginkan (misalnya `openrouter/anthropic/claude-3.5-sonnet` atau model default).
 
 ---
 
@@ -29,7 +29,7 @@ Setiap agen **wajib menggunakan NineGuard Client API Key** (`sk-ng-...`) yang di
 4. Isi konfigurasi:
    * **Base URL:** `http://localhost:8080/v1`
    * **API Key:** `sk-ng-...`
-   * **Model ID:** `dak/ag/gemini-3.8-flash` (atau model aktif lainnya).
+   * **Model ID:** `openrouter/anthropic/claude-3.5-sonnet` (atau model aktif lainnya).
 5. Klik **Save**.
 
 ---
@@ -42,9 +42,9 @@ Edit file konfigurasi Continue di `~/.continue/config.json`:
 {
   "models": [
     {
-      "title": "NineGuard Gemini",
+      "title": "NineGuard Claude",
       "provider": "openai",
-      "model": "dak/ag/gemini-3.8-flash",
+      "model": "openrouter/anthropic/claude-3.5-sonnet",
       "apiBase": "http://localhost:8080/v1",
       "apiKey": "sk-ng-YOUR_NINEGUARD_KEY"
     }
@@ -84,7 +84,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="dak/ag/gemini-3.8-flash",
+    model="openrouter/anthropic/claude-3.5-sonnet",
     messages=[{"role": "user", "content": "Halo NineGuard!"}],
     stream=True
 )
@@ -110,7 +110,7 @@ const openai = new OpenAI({
 
 async function main() {
   const stream = await openai.chat.completions.create({
-    model: 'dak/ag/gemini-3.8-flash',
+    model: 'openrouter/anthropic/claude-3.5-sonnet',
     messages: [{ role: 'user', content: 'Halo NineGuard!' }],
     stream: true,
   });
@@ -133,7 +133,7 @@ curl -X POST "http://localhost:8080/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-ng-YOUR_NINEGUARD_KEY" \
   -d '{
-    "model": "dak/ag/gemini-3.8-flash",
+    "model": "openrouter/anthropic/claude-3.5-sonnet",
     "messages": [{"role": "user", "content": "Ping test"}]
   }'
 ```

@@ -45,8 +45,8 @@ func main() {
 	authMgr := auth.NewManager(database, cfg.AuthEnabled)
 	keysMgr := keys.NewManager(database, cfg.RouterAPIKey)
 	routerTarget := keysMgr.GetUpstreamTarget(cfg.RouterTarget)
-	providersMgr := providers.NewManager(database, routerTarget, cfg.RouterAPIKey)
-	modelsMgr := models.NewManager(database, routerTarget)
+	providersMgr := providers.NewManager(database)
+	modelsMgr := models.NewManager(database)
 	trafficMgr := traffic.NewManager(database)
 
 	// 3. Initialize Reverse Proxy
@@ -159,6 +159,8 @@ func main() {
 
 	mux.HandleFunc("GET /api/v1/keys", h.ListKeys)
 	mux.HandleFunc("POST /api/v1/keys", h.CreateKey)
+	mux.HandleFunc("PUT /api/v1/keys/{id}", h.UpdateKey)
+	mux.HandleFunc("POST /api/v1/keys/{id}", h.UpdateKey)
 	mux.HandleFunc("POST /api/v1/keys/{id}/toggle", h.ToggleKey)
 	mux.HandleFunc("DELETE /api/v1/keys/{id}", h.DeleteKey)
 
@@ -200,7 +202,11 @@ func main() {
 	// Wrap root with auth session middleware
 	finalHandler := authMgr.Middleware(rootHandler)
 
-	slog.Info("NineGuard started", "port", cfg.Port, "target", cfg.RouterTarget, "auth", cfg.AuthEnabled)
+	if cfg.RouterTarget != "" {
+		slog.Info("NineGuard started", "port", cfg.Port, "target", cfg.RouterTarget, "auth", cfg.AuthEnabled)
+	} else {
+		slog.Info("NineGuard started", "port", cfg.Port, "auth", cfg.AuthEnabled)
+	}
 	if err := http.ListenAndServe(":"+cfg.Port, finalHandler); err != nil {
 		slog.Error("server error", "error", err)
 		os.Exit(1)

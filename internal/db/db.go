@@ -86,6 +86,7 @@ func (d *DB) migrate() error {
 		prefix TEXT NOT NULL,
 		name TEXT NOT NULL,
 		is_active INTEGER DEFAULT 1,
+		allowed_models TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
@@ -134,10 +135,13 @@ func (d *DB) migrate() error {
 	}
 
 	// For existing databases, ensure columns exist
+	_, _ = d.Exec("ALTER TABLE api_keys ADD COLUMN allowed_models TEXT DEFAULT ''")
 	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN api_key_name TEXT")
 	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN provider_id TEXT")
 	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN level TEXT DEFAULT ''")
 	_, _ = d.Exec("ALTER TABLE models ADD COLUMN provider_id TEXT DEFAULT ''")
+	_, _ = d.Exec("DELETE FROM providers WHERE id = 'dak' AND name = 'DAK Upstream'")
+	_, _ = d.Exec("DELETE FROM models WHERE provider_id = 'dak' OR id LIKE 'dak/%'")
 	_, _ = d.Exec("CREATE INDEX IF NOT EXISTS idx_traffic_key_name ON traffic_logs(api_key_name)")
 	_, _ = d.Exec("CREATE INDEX IF NOT EXISTS idx_traffic_level ON traffic_logs(level)")
 	_, _ = d.Exec("CREATE INDEX IF NOT EXISTS idx_traffic_status ON traffic_logs(status_code)")

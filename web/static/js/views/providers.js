@@ -18,7 +18,7 @@ export function mount(root) {
   const header = h('div', { class: 'page-head' },
     h('div', null,
       h('h1', null, 'Upstream Providers (OpenAI-Compatible)'),
-      h('p', null, 'Configure multiple OpenAI-compatible upstream providers. Set custom prefixes (e.g. dak) to group models as dak/model-name.')
+      h('p', null, 'Configure multiple OpenAI-compatible upstream providers. Set custom prefixes (e.g. openrouter, local) to group models as prefix/model-name.')
     ),
     h('div', { class: 'page-actions' }, addBtn)
   );
@@ -39,7 +39,7 @@ export function mount(root) {
           ),
           h('p', { class: 'muted', style: { fontSize: '11.5px', margin: 0, lineHeight: '1.5' } },
             'NineGuard aggregates models from all providers. A provider with prefix ',
-            h('code', null, 'dak'), ' exposes models as ', h('code', { style: { color: 'var(--accent)' } }, 'dak/ag/gemini-3.8-flash'), '.'
+            h('code', null, 'openrouter'), ' exposes models as ', h('code', { style: { color: 'var(--accent)' } }, 'openrouter/anthropic/claude-3.5-sonnet'), '.'
           )
         ),
         h('div', { style: { padding: '12px', borderRadius: '8px', border: '1.5px solid var(--accent)', background: 'var(--hover)' } },
@@ -47,7 +47,7 @@ export function mount(root) {
             icon('shield'), '2. Intelligent Router'
           ),
           h('p', { style: { fontSize: '11.5px', margin: 0, lineHeight: '1.5' } },
-            'When an agent calls ', h('code', null, 'dak/...'), ', NineGuard strips ', h('code', null, 'dak/'), ', injects that provider\'s API key, and routes to its endpoint.'
+            'When an agent calls ', h('code', null, 'openrouter/...'), ', NineGuard strips ', h('code', null, 'openrouter/'), ', injects that provider\'s API key, and routes to its endpoint.'
           )
         ),
         h('div', { style: { padding: '12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--panel)' } },
@@ -186,22 +186,22 @@ export function mount(root) {
     const nameInput = h('input', {
       class: 'input',
       type: 'text',
-      placeholder: 'e.g. DAK Upstream, Ollama Server, vLLM',
+      placeholder: 'e.g. OpenRouter, Ollama Server, vLLM',
       value: existing ? existing.name : ''
     });
 
     const prefixInput = h('input', {
       class: 'input',
       type: 'text',
-      placeholder: 'e.g. dak, local, openrouter (leave blank for root)',
-      value: existing ? existing.prefix : (providersList.length === 0 ? 'dak' : '')
+      placeholder: 'e.g. openrouter, local, ollama (leave blank for root)',
+      value: existing ? existing.prefix : ''
     });
 
     const routeInput = h('input', {
       class: 'input',
       type: 'text',
-      placeholder: 'e.g. http://localhost:20128',
-      value: existing ? existing.route : 'http://localhost:20128'
+      placeholder: 'e.g. https://api.openai.com or http://localhost:11434',
+      value: existing ? existing.route : ''
     });
 
     const keyField = passwordField({
@@ -235,7 +235,7 @@ export function mount(root) {
             prefixInput,
             h('p', { class: 'muted', style: { fontSize: '11px', margin: '2px 0 0' } },
               'Models from this provider will be grouped with this prefix, e.g. ',
-              h('code', null, 'dak/ag/gemini-3.8-flash'), '. When an agent calls that model, NineGuard routes here.'
+              h('code', null, 'openrouter/anthropic/claude-3.5-sonnet'), '. When an agent calls that model, NineGuard routes here.'
             )
           )
         },
@@ -244,7 +244,7 @@ export function mount(root) {
             h('span', null, 'Route / Target URL'),
             routeInput,
             h('p', { class: 'muted', style: { fontSize: '11px', margin: '2px 0 0' } },
-              'The HTTP base endpoint where this OpenAI-compatible server is listening (e.g. http://localhost:20128).'
+              'The HTTP base endpoint where this OpenAI-compatible server is listening (e.g. https://api.openai.com or http://localhost:11434).'
             )
           )
         },

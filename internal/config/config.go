@@ -50,7 +50,7 @@ func loadDotEnv(filenames ...string) {
 func LoadFromEnv() *Config {
 	loadDotEnv(".env")
 
-	rawTarget := getEnv("NINEGUARD_ROUTER_TARGET", "http://localhost:20128")
+	rawTarget := getEnv("NINEGUARD_ROUTER_TARGET", "")
 	routerTarget := strings.TrimRight(rawTarget, "/")
 
 	cfg := &Config{

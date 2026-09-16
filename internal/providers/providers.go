@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -33,10 +32,8 @@ type Manager struct {
 	mu sync.RWMutex
 }
 
-func NewManager(database *db.DB, defaultRoute, defaultAPIKey string) *Manager {
-	m := &Manager{db: database}
-	m.seedDefaultProvider(defaultRoute, defaultAPIKey)
-	return m
+func NewManager(database *db.DB) *Manager {
+	return &Manager{db: database}
 }
 
 func maskKey(key string) string {
@@ -51,32 +48,6 @@ func maskKey(key string) string {
 		return "sk-..." + key[len(key)-2:]
 	}
 	return key[:6] + "..." + key[len(key)-4:]
-}
-
-func (m *Manager) seedDefaultProvider(defaultRoute, defaultAPIKey string) {
-	var count int
-	_ = m.db.QueryRow("SELECT COUNT(*) FROM providers").Scan(&count)
-	if count > 0 {
-		return
-	}
-
-	route := strings.TrimRight(strings.TrimSpace(defaultRoute), "/")
-	if route == "" {
-		route = "http://localhost:20128"
-	}
-
-	key := strings.TrimSpace(defaultAPIKey)
-	if key == "" {
-		_ = m.db.QueryRow("SELECT value FROM settings WHERE key = 'router_api_key' LIMIT 1").Scan(&key)
-	}
-
-	_, err := m.db.Exec(`
-		INSERT INTO providers (id, name, route, api_key, prefix, is_default, is_active, created_at, updated_at)
-		VALUES ('dak', 'DAK Upstream', ?, ?, 'dak', 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-	`, route, key)
-	if err == nil {
-		slog.Info("initialized default OpenAI-compatible provider", "id", "dak", "prefix", "dak", "route", route)
-	}
 }
 
 func (m *Manager) ListProviders() ([]Provider, error) {
@@ -271,8 +242,8 @@ func (m *Manager) DeleteProvider(id string) error {
 }
 
 // FindProviderForModel routes a requested model to the right upstream provider.
-// If model is "dak/ag/gemini-3.8-flash" and provider "dak" has prefix "dak",
-// it strips the prefix and returns the provider with actual model "ag/gemini-3.8-flash".
+// If model is "openrouter/anthropic/claude-3.5-sonnet" and provider "openrouter" has prefix "openrouter",
+// it strips the prefix and returns the provider with actual model "anthropic/claude-3.5-sonnet".
 func (m *Manager) FindProviderForModel(modelName string) (*Provider, string, error) {
 	providers, err := m.ListProviders()
 	if err != nil {
@@ -321,7 +292,7 @@ func (m *Manager) FindProviderForModel(modelName string) (*Provider, string, err
 }
 
 // AggregateModels queries all active upstream providers and returns a merged list of OpenAI models.
-// If a provider has a prefix like "dak", models are prefixed with "dak/model-id" for clear grouping.
+// If a provider has a prefix like "openrouter", models are prefixed with "openrouter/model-id" for clear grouping.
 func (m *Manager) AggregateModels(ctx context.Context) ([]map[string]interface{}, error) {
 	providers, err := m.ListProviders()
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -20,11 +21,123 @@ type KeyInfo struct {
 	Prefix        string    `json:"prefix"`
 	Name          string    `json:"name"`
 	IsActive      bool      `json:"is_active"`
+	AllowedModels []string  `json:"allowed_models"`
 	TotalRequests int       `json:"total_requests"`
 	TotalTokens   int       `json:"total_tokens"`
 	LastUsedAt    *string   `json:"last_used_at,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+func ParseAllowedModels(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []string{}
+	}
+	var list []string
+	if strings.HasPrefix(raw, "[") {
+		if err := json.Unmarshal([]byte(raw), &list); err == nil {
+			var clean []string
+			for _, m := range list {
+				m = strings.TrimSpace(m)
+				if m != "" {
+					clean = append(clean, m)
+				}
+			}
+			return clean
+		}
+	}
+	parts := strings.Split(raw, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			list = append(list, p)
+		}
+	}
+	return list
+}
+
+func SerializeAllowedModels(models []string) string {
+	if len(models) == 0 {
+		return ""
+	}
+	var clean []string
+	for _, m := range models {
+		m = strings.TrimSpace(m)
+		if m != "" {
+			clean = append(clean, m)
+		}
+	}
+	if len(clean) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(clean)
+	if err != nil {
+		return strings.Join(clean, ",")
+	}
+	return string(b)
+}
+
+func (ki *KeyInfo) IsAllModelsAllowed() bool {
+	if ki == nil || len(ki.AllowedModels) == 0 {
+		return true
+	}
+	for _, m := range ki.AllowedModels {
+		if m == "*" || strings.EqualFold(m, "all") {
+			return true
+		}
+	}
+	return false
+}
+
+func (ki *KeyInfo) IsModelAllowed(model string) bool {
+	if ki == nil || ki.IsAllModelsAllowed() {
+		return true
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return true
+	}
+	for _, allowed := range ki.AllowedModels {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "*" || allowed == "" || strings.EqualFold(allowed, "all") {
+			return true
+		}
+		// Exact match (case-insensitive)
+		if strings.EqualFold(allowed, model) {
+			return true
+		}
+		// Wildcard match e.g. "prefix/*"
+		if strings.HasSuffix(allowed, "/*") {
+			prefix := strings.TrimSuffix(allowed, "/*")
+			if strings.HasPrefix(strings.ToLower(model), strings.ToLower(prefix)+"/") {
+				return true
+			}
+		}
+		// Suffix match e.g. "*.flash"
+		if strings.HasPrefix(allowed, "*.") {
+			suffix := strings.TrimPrefix(allowed, "*")
+			if strings.HasSuffix(strings.ToLower(model), strings.ToLower(suffix)) {
+				return true
+			}
+		}
+		// Provider prefix matching:
+		// 1. Key allows "gpt-4o", but request is "provider/gpt-4o"
+		if strings.Contains(model, "/") {
+			parts := strings.SplitN(model, "/", 2)
+			if strings.EqualFold(parts[1], allowed) {
+				return true
+			}
+		}
+		// 2. Key allows "provider/gpt-4o", but request is "gpt-4o"
+		if strings.Contains(allowed, "/") {
+			parts := strings.SplitN(allowed, "/", 2)
+			if strings.EqualFold(parts[1], model) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type Manager struct {
@@ -147,7 +260,7 @@ func (m *Manager) GetUpstreamInfo() map[string]interface{} {
 // ── NineGuard Client API Keys Management ──
 
 func (m *Manager) loadLocalCache() {
-	rows, err := m.db.Query("SELECT id, key, prefix, name, is_active FROM api_keys")
+	rows, err := m.db.Query("SELECT id, key, prefix, name, is_active, COALESCE(allowed_models, '') FROM api_keys")
 	if err != nil {
 		return
 	}
@@ -159,9 +272,11 @@ func (m *Manager) loadLocalCache() {
 	for rows.Next() {
 		var ki KeyInfo
 		var isAct int
-		if err := rows.Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct); err == nil {
+		var rawModels string
+		if err := rows.Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct, &rawModels); err == nil {
 			ki.IsActive = (isAct == 1)
 			ki.Key = MaskKey(ki.RawKey)
+			ki.AllowedModels = ParseAllowedModels(rawModels)
 			m.cache[ki.RawKey] = &ki
 		}
 	}
@@ -171,13 +286,13 @@ func (m *Manager) ensureDefaultKey() {
 	var count int
 	_ = m.db.QueryRow("SELECT COUNT(*) FROM api_keys").Scan(&count)
 	if count == 0 {
-		_, _ = m.CreateKey("Default Agent Key")
+		_, _ = m.CreateKey("Default Agent Key", nil)
 		slog.Info("created initial default NineGuard API key")
 	}
 }
 
-// CreateKey issues a new NineGuard API key
-func (m *Manager) CreateKey(name string) (*KeyInfo, error) {
+// CreateKey issues a new NineGuard API key with customizable allowed models
+func (m *Manager) CreateKey(name string, allowedModels []string) (*KeyInfo, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "Agent Key"
@@ -192,11 +307,14 @@ func (m *Manager) CreateKey(name string) (*KeyInfo, error) {
 	_, _ = rand.Read(idBytes)
 	id := hex.EncodeToString(idBytes)
 
+	serializedModels := SerializeAllowedModels(allowedModels)
+	cleanModels := ParseAllowedModels(serializedModels)
+
 	now := time.Now()
 	_, err = m.db.Exec(`
-		INSERT INTO api_keys (id, key, prefix, name, is_active, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-	`, id, rawKey, prefix, name)
+		INSERT INTO api_keys (id, key, prefix, name, is_active, allowed_models, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`, id, rawKey, prefix, name, serializedModels)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save new key: %w", err)
 	}
@@ -208,6 +326,7 @@ func (m *Manager) CreateKey(name string) (*KeyInfo, error) {
 		Prefix:        prefix,
 		Name:          name,
 		IsActive:      true,
+		AllowedModels: cleanModels,
 		TotalRequests: 0,
 		TotalTokens:   0,
 		CreatedAt:     now,
@@ -221,6 +340,52 @@ func (m *Manager) CreateKey(name string) (*KeyInfo, error) {
 	return ki, nil
 }
 
+// UpdateKey updates key name and allowed models
+func (m *Manager) UpdateKey(id, name string, allowedModels []string) (*KeyInfo, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("key name cannot be empty")
+	}
+
+	serializedModels := SerializeAllowedModels(allowedModels)
+
+	res, err := m.db.Exec(`
+		UPDATE api_keys
+		SET name = ?, allowed_models = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, name, serializedModels, id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, fmt.Errorf("api key not found")
+	}
+
+	m.loadLocalCache()
+
+	return m.GetKey(id)
+}
+
+// GetKey retrieves a key by ID
+func (m *Manager) GetKey(id string) (*KeyInfo, error) {
+	var ki KeyInfo
+	var rawKey string
+	var isActiveInt int
+	var rawModels string
+	err := m.db.QueryRow(`
+		SELECT id, key, prefix, name, is_active, COALESCE(allowed_models, ''), created_at, updated_at
+		FROM api_keys WHERE id = ?
+	`, id).Scan(&ki.ID, &rawKey, &ki.Prefix, &ki.Name, &isActiveInt, &rawModels, &ki.CreatedAt, &ki.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	ki.IsActive = (isActiveInt == 1)
+	ki.Key = MaskKey(rawKey)
+	ki.RawKey = rawKey
+	ki.AllowedModels = ParseAllowedModels(rawModels)
+	return &ki, nil
+}
+
 // ListKeys returns all NineGuard API keys with request and token stats
 func (m *Manager) ListKeys() ([]KeyInfo, error) {
 	query := `
@@ -230,6 +395,7 @@ func (m *Manager) ListKeys() ([]KeyInfo, error) {
 			k.prefix,
 			k.name,
 			k.is_active,
+			COALESCE(k.allowed_models, ''),
 			k.created_at,
 			k.updated_at,
 			COUNT(t.id) as total_requests,
@@ -251,6 +417,7 @@ func (m *Manager) ListKeys() ([]KeyInfo, error) {
 		var ki KeyInfo
 		var rawKey string
 		var isActiveInt int
+		var rawModels string
 		var lastUsed sql.NullString
 		if err := rows.Scan(
 			&ki.ID,
@@ -258,6 +425,7 @@ func (m *Manager) ListKeys() ([]KeyInfo, error) {
 			&ki.Prefix,
 			&ki.Name,
 			&isActiveInt,
+			&rawModels,
 			&ki.CreatedAt,
 			&ki.UpdatedAt,
 			&ki.TotalRequests,
@@ -269,6 +437,7 @@ func (m *Manager) ListKeys() ([]KeyInfo, error) {
 		ki.IsActive = (isActiveInt == 1)
 		ki.Key = MaskKey(rawKey)
 		ki.RawKey = rawKey
+		ki.AllowedModels = ParseAllowedModels(rawModels)
 		if lastUsed.Valid {
 			ki.LastUsedAt = &lastUsed.String
 		}
@@ -336,14 +505,16 @@ func (m *Manager) ValidateClientKey(rawKey string) (*KeyInfo, bool) {
 	// Fallback to checking SQLite
 	var ki KeyInfo
 	var isAct int
-	err := m.db.QueryRow("SELECT id, key, prefix, name, is_active FROM api_keys WHERE key = ? LIMIT 1", rawKey).
-		Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct)
+	var rawModels string
+	err := m.db.QueryRow("SELECT id, key, prefix, name, is_active, COALESCE(allowed_models, '') FROM api_keys WHERE key = ? LIMIT 1", rawKey).
+		Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct, &rawModels)
 	if err != nil {
 		return nil, false
 	}
 
 	ki.IsActive = (isAct == 1)
 	ki.Key = MaskKey(ki.RawKey)
+	ki.AllowedModels = ParseAllowedModels(rawModels)
 
 	m.mu.Lock()
 	m.cache[rawKey] = &ki

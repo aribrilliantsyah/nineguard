@@ -89,11 +89,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if p.providers != nil {
 			modelsList, err := p.providers.AggregateModels(r.Context())
 			if err == nil {
+				dataList := modelsList
+				if keyInfo != nil && !keyInfo.IsAllModelsAllowed() {
+					filtered := make([]map[string]interface{}, 0)
+					for _, mItem := range modelsList {
+						mID, _ := mItem["id"].(string)
+						if keyInfo.IsModelAllowed(mID) {
+							filtered = append(filtered, mItem)
+						}
+					}
+					dataList = filtered
+				}
+
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"object": "list",
-					"data":   modelsList,
+					"data":   dataList,
 				})
 				return
 			}
@@ -111,6 +123,36 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	_ = json.Unmarshal(bodyBytes, &req)
 	modelName := strings.TrimSpace(req.Model)
+
+	// Check Allowed Models for this API Key
+	if modelName != "" && keyInfo != nil && !keyInfo.IsModelAllowed(modelName) {
+		slog.Warn("model forbidden for api key", "key", keyInfo.Name, "model", modelName, "ip", clientIP)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		errJSON := fmt.Sprintf(`{
+			"error": {
+				"message": "Model '%s' is not allowed for API key '%s'.",
+				"type": "permission_error",
+				"param": "model",
+				"code": "model_not_allowed"
+			}
+		}`, modelName, keyInfo.Name)
+		_, _ = w.Write([]byte(errJSON))
+
+		errMsg := fmt.Sprintf("model '%s' is not allowed for API key '%s'", modelName, keyInfo.Name)
+		_ = p.traffic.Record(&traffic.LogEntry{
+			APIKey:       maskedKey,
+			APIKeyName:   keyName,
+			Model:        modelName,
+			DurationMs:   int(time.Since(start).Milliseconds()),
+			StatusCode:   http.StatusForbidden,
+			ClientIP:     clientIP,
+			Stream:       req.Stream,
+			ErrorMessage: &errMsg,
+			Level:        "ERROR",
+		})
+		return
+	}
 
 	// Check Model Blocking Rule in NineGuard
 	if modelName != "" && !p.models.IsModelEnabled(modelName) {
@@ -142,7 +184,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve Upstream Provider based on model prefix (e.g. dak/ag/gemini-3.8-flash -> provider dak, model ag/gemini-3.8-flash)
+	// Resolve Upstream Provider based on model prefix (e.g. openrouter/anthropic/claude-3.5-sonnet -> provider openrouter, model anthropic/claude-3.5-sonnet)
 	provider, actualModel, err := p.providers.FindProviderForModel(modelName)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")

@@ -27,7 +27,8 @@ Dalam ekosistem AI engineering, tim dan developer sering menggunakan berbagai mo
 
 **NineGuard menyelesaikan masalah tersebut sebagai Single Gateway:**
 * **Gerbang Autentikasi Mandiri (*Strict Gatekeeper*)** — Client (Cursor, Cline, Pi, script) mengakses NineGuard menggunakan API key NineGuard (`sk-ng-...`). Tanpa key yang sah, request langsung ditolak dengan HTTP 401.
-* **Multi-Provider Routing dengan Prefix** — Daftarkan berbagai provider upstream dengan prefix kustom (misal `dak`, `local`, `openrouter`). NineGuard menggabungkan model menjadi `dak/ag/gemini-3.8-flash`, secara otomatis memotong prefix saat meneruskan ke upstream provider yang sesuai.
+* **Multi-Provider Routing dengan Prefix** — Daftarkan berbagai provider upstream dengan prefix kustom (misal `openrouter`, `local`, `ollama`). NineGuard menggabungkan model menjadi `openrouter/claude-3.5-sonnet`, secara otomatis memotong prefix saat meneruskan ke upstream provider yang sesuai.
+* **Per-Key Model Access Control** — Tentukan model apa saja yang diizinkan untuk masing-masing API key (whitelist kustom atau wildcard `*`). Request model di luar daftar izin ditolak seketika (HTTP 403).
 * **Firewall Model Permanen** — Mencegat request sebelum masuk ke upstream. Model yang di-disable langsung ditolak seketika dengan HTTP 403 Forbidden.
 * **Audit & Pelacakan Token Akurat** — Mencatat request, nama key client, nama model, prompt tokens, completion tokens, latency, dan IP client secara detail ke SQLite.
 * **Streaming Transparan Tanpa Latensi Tambahan** — Response Server-Sent Events (SSE) di-*flush* secara instan ke client.
@@ -51,10 +52,10 @@ NineGuard bertindak sebagai gateway tunggal antara AI Coding Agents dan Upstream
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │ 1. Gatekeeper: Validasi NineGuard Client API Key      │  │
 │  │    • Tidak Valid? ──► Tolak (HTTP 401 Unauthorized)   │  │
-│  │ 2. Firewall: Cek Status Model di Database             │  │
-│  │    • Disabled?    ──► Tolak (HTTP 403 Forbidden)      │  │
+│  │ 2. Firewall & Access Control: Cek Izin Model Per-Key  │  │
+│  │    • Model Tidak Diizinkan? ──► Tolak (403 Forbidden) │  │
 │  │ 3. Prefix Router: Identifikasi Provider Berdasarkan   │  │
-│  │    Prefix Model (contoh: dak/... atau local/...)      │  │
+│  │    Prefix Model (contoh: openrouter/... atau local/..)│  │
 │  │ 4. Telemetry: Rekam Log, Latensi, & Token Usage       │  │
 │  └───────────────────────────────────────────────────────┘  │
 └──────────────────────────────┬──────────────────────────────┘
@@ -62,9 +63,9 @@ NineGuard bertindak sebagai gateway tunggal antara AI Coding Agents dan Upstream
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Upstream OpenAI-Compatible Providers                       │
-│  ├── Provider A (dak):   http://localhost:20128             │
-│  ├── Provider B (local): http://localhost:11434             │
-│  └── Provider C:         https://api.openai.com/v1          │
+│  ├── Provider A (openrouter): https://openrouter.ai/api/v1  │
+│  ├── Provider B (local):      http://localhost:11434        │
+│  └── Provider C:              https://api.openai.com/v1     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -74,8 +75,9 @@ NineGuard bertindak sebagai gateway tunggal antara AI Coding Agents dan Upstream
 
 | Fitur | Penjelasan |
 |---|---|
-| **Multi-Provider Routing** | Daftarkan rute upstream OpenAI-compatible dan kelompokkan model dengan prefix (e.g. `dak/model-id`). |
+| **Multi-Provider Routing** | Daftarkan rute upstream OpenAI-compatible dan kelompokkan model dengan prefix (e.g. `openrouter/model-id`). |
 | **Client Key Management** | Terbitkan dan cabut API key NineGuard (`sk-ng-...`) untuk melacak konsumsi tiap agent. |
+| **Per-Key Model Access Control** | Atur whitelist model apa saja yang diizinkan per API key (atau akses penuh `*`). |
 | **Model Firewall** | Aktifkan/nonaktifkan model secara instan dengan HTTP 403 Forbidden. |
 | **Auto & Manual Model Fetch** | Ambil daftar model otomatis dari semua provider aktif dan tampilkan secara terpusat. |
 | **Interactive Trend Line Chart** | Visualisasi throughput request, volume token, dan latensi respons dengan grafik interaktif. |
@@ -120,15 +122,16 @@ docker run -d \
 
 ## Konfigurasi Lingkungan (Environment Variables)
 
-File `.env` otomatis dibaca saat startup:
+File `.env` otomatis dibaca saat startup (hanya port, auth, dan path database yang dibutuhkan di env):
 
 | Variabel Lingkungan | Nilai Bawaan | Keterangan |
 |---|---|---|
 | `NINEGUARD_PORT` | `8080` | Port listen server NineGuard |
-| `NINEGUARD_ROUTER_TARGET` | `http://localhost:20128` | Target route default untuk provider awal |
-| `NINEGUARD_ROUTER_API_KEY` | `""` | Master API key upstream awal (bisa diatur langsung via UI) |
 | `NINEGUARD_AUTH_ENABLED` | `true` | Proteksi login dashboard (`true`/`false`) |
 | `NINEGUARD_DB_FILE` | `./data/nineguard.db` | Lokasi file database SQLite lokal NineGuard |
+| `NINEGUARD_AUTH_FILE` | `./data/auth.json` | Lokasi file fallback autentikasi (opsional) |
+
+*Catatan: Upstream provider dikelola langsung secara dinamis melalui UI Dashboard (menu Providers) dan tersimpan di database lokal, sehingga tidak perlu mengatur target upstream di `.env`.*
 
 ---
 
@@ -137,20 +140,21 @@ File `.env` otomatis dibaca saat startup:
 ### 1. Daftarkan Upstream Provider
 Masuk ke menu **Gateway $\rightarrow$ Providers**:
 1. Klik **Add Provider**.
-2. Masukkan nama provider (contoh: `DAK Upstream`), prefix (contoh: `dak`), URL target route (contoh: `http://localhost:20128`), dan Upstream API Key.
+2. Masukkan nama provider (contoh: `OpenRouter Cloud` atau `Local Ollama`), prefix (contoh: `openrouter` atau `local`), URL target route (contoh: `https://openrouter.ai/api/v1` atau `http://localhost:11434`), dan Upstream API Key jika ada.
 3. Klik tombol **Test Probe** untuk memverifikasi koneksi.
 
 ### 2. Generate NineGuard API Key untuk Agent
 Masuk ke menu **Gateway $\rightarrow$ Endpoints & Keys**:
 1. Klik **+ Generate NineGuard API Key**.
 2. Beri nama (misal: `Cursor IDE` atau `Cline Mac`).
-3. Salin token yang dihasilkan (`sk-ng-...`).
+3. Pilih hak akses model: **All Models (*)** atau **Custom Allowed Models** (pilih model spesifik yang diizinkan).
+4. Salin token yang dihasilkan (`sk-ng-...`).
 
 ### 3. Konfigurasikan pada AI Agent / IDE
 Atur pengaturan OpenAI-compatible pada agent Anda:
 * **Base URL:** `http://localhost:8080/v1`
 * **API Key:** `sk-ng-...` (key NineGuard yang baru dibuat)
-* **Model ID:** Pilih model dengan prefix (misal: `dak/ag/gemini-3.8-flash` atau model default).
+* **Model ID:** Pilih model dengan prefix (misal: `openrouter/anthropic/claude-3.5-sonnet` atau model default).
 
 ---
 
@@ -168,8 +172,9 @@ Atur pengaturan OpenAI-compatible pada agent Anda:
 * `PUT /api/v1/providers/{id}` — Memperbarui data provider.
 * `DELETE /api/v1/providers/{id}` — Menghapus provider (otomatis menghapus model terkait di NineGuard).
 * `POST /api/v1/providers/test` — Menguji koneksi probe ke provider upstream.
-* `GET /api/v1/keys` — Daftar NineGuard API key yang aktif.
-* `POST /api/v1/keys` — Menerbitkan NineGuard API key baru.
+* `GET /api/v1/keys` — Daftar NineGuard API key yang aktif beserta allowed models.
+* `POST /api/v1/keys` — Menerbitkan NineGuard API key baru dengan konfigurasi allowed models.
+* `PUT /api/v1/keys/{id}` — Mengubah nama dan daftar model yang diizinkan untuk key tertentu.
 * `POST /api/v1/keys/{id}/toggle` — Mengaktifkan / menonaktifkan key.
 * `DELETE /api/v1/keys/{id}` — Mencabut / menghapus key.
 * `GET /api/v1/models` — Daftar model terdaftar dan status firewall.

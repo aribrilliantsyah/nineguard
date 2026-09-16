@@ -9,7 +9,7 @@ Dokumen ini menjelaskan rancangan sistem, alur transmisi paket, dan komponen int
 NineGuard dirancang berdasarkan prinsip:
 * **Single Gateway for All Models:** AI Coding Agent hanya perlu mengarah ke satu endpoint (`http://localhost:8080/v1`).
 * **Strict Client Authentication:** Hanya agen atau developer yang memiliki API key resmi dari NineGuard (`sk-ng-...`) yang diizinkan mengakses model.
-* **Prefix-Based Upstream Routing:** Model dari berbagai penyedia dikelompokkan dengan prefix (misalnya `dak/model-id`, `local/model-id`).
+* **Prefix-Based Upstream Routing:** Model dari berbagai penyedia dikelompokkan dengan prefix (misalnya `openrouter/model-id`, `local/model-id`).
 * **Zero Overhead Streaming:** Response Server-Sent Events (SSE) dialirkan tanpa buffering berlebih.
 
 ---
@@ -27,13 +27,16 @@ NineGuard dirancang berdasarkan prinsip:
        ├── Cek Validitas NineGuard API Key
        │     └── Jika Invalid / Disabled ──► 401 Unauthorized
        │
-       ├── Cek Status Model Firewall
+       ├── Cek Izin Model Per-Key (Allowed Models)
+       │     └── Jika Model Tidak Diizinkan ──► 403 Forbidden
+       │
+       ├── Cek Status Model Firewall Global
        │     └── Jika Disabled ─────────────► 403 Forbidden
        │
        ├── Prefix Stripping & Provider Matching
-       │     └── "dak/ag/gemini-3.8-flash"
-       │           ├── Prefix "dak" ──► Provider DAK Upstream
-       │           └── Model "ag/gemini-3.8-flash"
+       │     └── "openrouter/anthropic/claude-3.5-sonnet"
+       │           ├── Prefix "openrouter" ──► Provider OpenRouter
+       │           └── Model "anthropic/claude-3.5-sonnet"
        │
        ├── Rewrite Request Header:
        │     └── Authorization: Bearer <Master_API_Key_Provider>

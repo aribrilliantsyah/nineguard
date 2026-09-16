@@ -8,7 +8,7 @@ export function mount(root) {
   let activeTab = 'cursor';
   let modelsList = [];
   let keysList = [];
-  let upstreamInfo = { configured: false, masked_key: '', key: '', router_target: 'http://localhost:20128' };
+  let upstreamInfo = { configured: false, masked_key: '', key: '', router_target: '' };
 
   const origin = location.origin || `${location.protocol}//${location.host}` || 'http://localhost:8080';
   const baseUrl = `${origin}/v1`;
@@ -104,11 +104,11 @@ export function mount(root) {
   // ── Upstream Provider Setup Card ──
   function renderUpstreamCard() {
     const isConfigured = upstreamInfo && upstreamInfo.configured && upstreamInfo.key;
-    const targetUrl = upstreamInfo?.router_target || 'http://localhost:20128';
+    const targetUrl = upstreamInfo?.router_target || '';
 
     const statusBadge = isConfigured
-      ? h('span', { class: 'badge ok', style: { padding: '4px 8px' } }, icon('check'), ' Provider Connected')
-      : h('span', { class: 'badge warn', style: { padding: '4px 8px' } }, icon('alert'), ' Upstream Key Missing');
+      ? h('span', { class: 'badge ok', style: { padding: '4px 8px' } }, icon('check'), ' Upstream Key Configured')
+      : h('span', { class: 'badge muted', style: { padding: '4px 8px' } }, icon('server'), ' Multi-Provider Routing');
 
     upstreamCard.replaceChildren(
       h('div', { class: 'card-head', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
@@ -120,8 +120,10 @@ export function mount(root) {
       ),
       h('div', { style: { padding: '14px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', background: 'var(--hover)', borderRadius: '6px' } },
         h('div', null,
-          h('span', { class: 'muted', style: { fontSize: '11px', display: 'block', textTransform: 'uppercase' } }, 'Target Route'),
-          h('code', { style: { fontWeight: 'bold' } }, targetUrl),
+          h('span', { class: 'muted', style: { fontSize: '11px', display: 'block', textTransform: 'uppercase' } }, 'Default Upstream Route'),
+          targetUrl
+            ? h('code', { style: { fontWeight: 'bold' } }, targetUrl)
+            : h('span', { class: 'muted', style: { fontStyle: 'italic', fontSize: '12px' } }, 'None configured (Use Providers menu to register upstream endpoints)'),
           isConfigured
             ? h('span', { class: 'muted', style: { marginLeft: '12px', fontSize: '12px' } }, 'Master Key: ', h('code', null, upstreamInfo.masked_key))
             : null
@@ -130,7 +132,7 @@ export function mount(root) {
           class: 'btn btn-sm btn-primary',
           type: 'button',
           onclick: () => setRoute('providers')
-        }, icon('server'), 'Manage Provider Settings')
+        }, icon('server'), 'Manage Providers')
       )
     );
   }
@@ -142,7 +144,7 @@ export function mount(root) {
         h('h2', null, 'NineGuard Client API Keys'),
         h('p', { class: 'card-sub' }, 'Generate dedicated keys for Cursor, Cline, Pi, and developers. Every token and request is tracked per key.')
       ),
-      h('button', { class: 'btn btn-sm btn-primary', type: 'button', onclick: openNewKeyModal }, icon('plus'), 'Generate New Key')
+      h('button', { class: 'btn btn-sm btn-primary', type: 'button', onclick: () => openKeyModal() }, icon('plus'), 'Generate New Key')
     );
 
     if (!keysList.length) {
@@ -155,6 +157,7 @@ export function mount(root) {
         h('tr', null,
           h('th', null, 'Agent / Key Name'),
           h('th', null, 'Key Token'),
+          h('th', null, 'Allowed Models'),
           h('th', { class: 'num' }, 'Requests'),
           h('th', { class: 'num' }, 'Tokens'),
           h('th', null, 'Status'),
@@ -178,17 +181,51 @@ export function mount(root) {
             }
           }, k.is_active ? 'Active' : 'Disabled');
 
+          // Allowed Models Display
+          const allowedList = Array.isArray(k.allowed_models) ? k.allowed_models : [];
+          const isAll = allowedList.length === 0 || allowedList.includes('*') || allowedList.includes('all');
+          let allowedCell;
+          if (isAll) {
+            allowedCell = h('td', null,
+              h('span', { class: 'badge ok', style: { fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' } },
+                icon('check'), 'All Models (*)'
+              )
+            );
+          } else {
+            const count = allowedList.length;
+            const badges = allowedList.slice(0, 2).map(m =>
+              h('span', { class: 'badge', style: { background: 'var(--hover)', fontSize: '11px', fontFamily: 'monospace', marginRight: '4px' } }, m)
+            );
+            if (count > 2) {
+              badges.push(
+                h('span', {
+                  class: 'badge muted',
+                  style: { fontSize: '11px', cursor: 'help' },
+                  title: allowedList.join('\n')
+                }, `+${count - 2} more`)
+              );
+            }
+            allowedCell = h('td', null, h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '2px', alignItems: 'center' } }, ...badges));
+          }
+
           return h('tr', null,
             h('td', { class: 'strong' },
               h('span', { class: 'badge', style: { background: 'var(--hover)', marginRight: '8px' } }, icon('key')),
               k.name
             ),
             h('td', null, h('code', { class: 'muted', style: { fontSize: '12px' } }, k.key)),
+            allowedCell,
             h('td', { class: 'num' }, fmtNum(k.total_requests || 0)),
             h('td', { class: 'num' }, fmtCompact(k.total_tokens || 0)),
             h('td', null, statusBtn),
             h('td', { style: { textAlign: 'right' } },
               h('div', { style: { display: 'inline-flex', gap: '6px' } },
+                h('button', {
+                  class: 'btn btn-sm',
+                  type: 'button',
+                  title: 'Edit Key & Model Access',
+                  onclick: () => openKeyModal(k)
+                }, icon('pencil'), 'Edit'),
                 h('button', {
                   class: 'btn btn-sm',
                   type: 'button',
@@ -211,34 +248,256 @@ export function mount(root) {
     keysCard.replaceChildren(head, h('div', { class: 'table-wrap' }, table));
   }
 
-  function openNewKeyModal() {
+  function openKeyModal(existingKey = null) {
+    const isEdit = Boolean(existingKey);
+    const existingModels = (existingKey && Array.isArray(existingKey.allowed_models)) ? existingKey.allowed_models : [];
+    const isAllByDefault = !existingKey || existingModels.length === 0 || existingModels.includes('*') || existingModels.includes('all');
+
     const nameInput = h('input', {
       class: 'input',
       type: 'text',
       placeholder: 'e.g. Cursor IDE, Cline Mac, Pi Agent',
-      value: 'Cursor IDE'
+      value: existingKey ? existingKey.name : 'Cursor IDE'
     });
 
+    // Model selection mode
+    let mode = isAllByDefault ? 'all' : 'custom';
+
+    const radioAll = h('input', {
+      type: 'radio',
+      name: 'model_access_mode',
+      value: 'all',
+      checked: isAllByDefault
+    });
+    const radioCustom = h('input', {
+      type: 'radio',
+      name: 'model_access_mode',
+      value: 'custom',
+      checked: !isAllByDefault
+    });
+
+    const customPanel = h('div', {
+      style: {
+        display: isAllByDefault ? 'none' : 'flex',
+        flexDirection: 'column',
+        gap: '8px',
+        marginTop: '10px',
+        padding: '12px',
+        borderRadius: '8px',
+        border: '1px solid var(--border)',
+        background: 'var(--hover)'
+      }
+    });
+
+    radioAll.onchange = () => {
+      mode = 'all';
+      customPanel.style.display = 'none';
+    };
+    radioCustom.onchange = () => {
+      mode = 'custom';
+      customPanel.style.display = 'flex';
+    };
+
+    const modeSelector = h('div', { style: { display: 'flex', gap: '16px', marginTop: '4px' } },
+      h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: '500' } },
+        radioAll,
+        h('span', null, 'All Models (*)')
+      ),
+      h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: '500' } },
+        radioCustom,
+        h('span', null, 'Custom Allowed Models')
+      )
+    );
+
+    const filterInput = h('input', {
+      class: 'input',
+      type: 'text',
+      placeholder: 'Filter available models...',
+      style: { fontSize: '12px', padding: '6px 10px' }
+    });
+
+    const availableModelIDs = new Set();
+    modelsList.forEach(m => {
+      if (m && m.id) availableModelIDs.add(m.id);
+    });
+
+    const initialSelected = new Set();
+    const leftoverCustom = [];
+    if (!isAllByDefault) {
+      existingModels.forEach(m => {
+        if (m === '*' || m === 'all') return;
+        if (availableModelIDs.has(m)) {
+          initialSelected.add(m);
+        } else {
+          leftoverCustom.push(m);
+        }
+      });
+    }
+
+    const selectedCount = h('span', { class: 'muted', style: { fontSize: '11.5px', marginLeft: 'auto' } });
+
+    const checkboxes = new Map();
+    const listItems = [];
+
+    modelsList.forEach(m => {
+      const cb = h('input', {
+        type: 'checkbox',
+        checked: initialSelected.has(m.id)
+      });
+      checkboxes.set(m.id, cb);
+      cb.onchange = updateCount;
+
+      const item = h('label', {
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          padding: '5px 8px',
+          borderRadius: '4px',
+          cursor: 'pointer',
+          fontSize: '12px',
+          fontFamily: 'monospace',
+          userSelect: 'none'
+        },
+        onmouseenter: (e) => e.currentTarget.style.background = 'var(--panel)',
+        onmouseleave: (e) => e.currentTarget.style.background = 'transparent'
+      },
+        cb,
+        h('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, m.id),
+        m.provider_id ? h('span', { class: 'badge', style: { fontSize: '10px' } }, m.provider_id) : null
+      );
+
+      listItems.push({ id: m.id.toLowerCase(), node: item });
+    });
+
+    function updateCount() {
+      let count = 0;
+      checkboxes.forEach(cb => { if (cb.checked) count++; });
+      selectedCount.textContent = `${count} model${count === 1 ? '' : 's'} selected`;
+    }
+    updateCount();
+
+    filterInput.oninput = (e) => {
+      const q = e.target.value.toLowerCase().trim();
+      listItems.forEach(({ id, node }) => {
+        node.style.display = (!q || id.includes(q)) ? 'flex' : 'none';
+      });
+    };
+
+    const selectAllBtn = h('button', {
+      class: 'btn btn-sm',
+      type: 'button',
+      onclick: () => {
+        checkboxes.forEach(cb => { cb.checked = true; });
+        updateCount();
+      }
+    }, 'Select All');
+
+    const clearAllBtn = h('button', {
+      class: 'btn btn-sm',
+      type: 'button',
+      onclick: () => {
+        checkboxes.forEach(cb => { cb.checked = false; });
+        updateCount();
+      }
+    }, 'Clear Selection');
+
+    const actionsRow = h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+      selectAllBtn,
+      clearAllBtn,
+      selectedCount
+    );
+
+    const scrollList = h('div', {
+      style: {
+        maxHeight: '160px',
+        overflowY: 'auto',
+        border: '1px solid var(--border)',
+        borderRadius: '6px',
+        padding: '4px',
+        background: 'var(--panel)'
+      }
+    },
+      listItems.length > 0
+        ? listItems.map(i => i.node)
+        : h('div', { class: 'muted', style: { padding: '8px', fontSize: '12px', textAlign: 'center' } }, 'No models synced yet in NineGuard')
+    );
+
+    const customInput = h('input', {
+      class: 'input',
+      type: 'text',
+      placeholder: 'e.g. openrouter/*, gpt-4o, claude-3-5-sonnet',
+      value: leftoverCustom.join(', '),
+      style: { fontSize: '12px' }
+    });
+
+    customPanel.append(
+      actionsRow,
+      filterInput,
+      scrollList,
+      h('div', { style: { marginTop: '4px' } },
+        h('span', { class: 'muted', style: { fontSize: '11px', display: 'block', marginBottom: '4px' } }, 'Additional model IDs or wildcards (comma-separated):'),
+        customInput
+      )
+    );
+
     formDialog({
-      title: 'Generate New NineGuard API Key',
-      submitText: 'Generate Key',
+      title: isEdit ? `Edit API Key: ${existingKey.name}` : 'Generate New NineGuard API Key',
+      submitText: isEdit ? 'Save Changes' : 'Generate Key',
+      wide: true,
       fields: [
-        { label: 'Key Name / Description', input: nameInput },
-        { node: h('p', { class: 'muted', style: { fontSize: '11.5px', marginTop: '4px' } },
-          'This key will be used by your agent to authenticate against NineGuard. All request logs and token consumption will be grouped under this name.'
-        )}
+        {
+          label: 'Key Name / Description',
+          node: h('div', null,
+            nameInput,
+            h('p', { class: 'muted', style: { fontSize: '11px', margin: '3px 0 0' } }, 'Name for tracking usage in traffic logs.')
+          )
+        },
+        {
+          label: 'Allowed Models (Access Control)',
+          node: h('div', null,
+            modeSelector,
+            customPanel,
+            h('p', { class: 'muted', style: { fontSize: '11.5px', marginTop: '6px' } },
+              'Configure which models this API key can call. Unauthorized model calls are blocked with HTTP 403 Forbidden.'
+            )
+          )
+        }
       ],
       onSubmit: async () => {
-        const name = nameInput.value.trim() || 'Agent Key';
-        try {
-          const newKey = await api.post('/keys', { name });
-          toast(`Key "${name}" created!`, 'ok');
-          await load();
+        const name = nameInput.value.trim() || (isEdit ? existingKey.name : 'Agent Key');
+        let allowed_models = [];
 
-          // Show newly generated key prominently so user can copy
-          showGeneratedKeyModal(newKey);
+        if (mode === 'custom') {
+          const selected = [];
+          checkboxes.forEach((cb, id) => {
+            if (cb.checked) selected.push(id);
+          });
+
+          const extra = customInput.value.split(',').map(s => s.trim()).filter(Boolean);
+          extra.forEach(m => {
+            if (!selected.includes(m)) selected.push(m);
+          });
+
+          if (selected.length === 0) {
+            throw new Error('Please select at least one model or switch to "All Models (*)".');
+          }
+          allowed_models = selected;
+        }
+
+        try {
+          if (isEdit) {
+            await api.put(`/keys/${existingKey.id}`, { name, allowed_models });
+            toast(`Key "${name}" updated!`, 'ok');
+            await load();
+          } else {
+            const newKey = await api.post('/keys', { name, allowed_models });
+            toast(`Key "${name}" created!`, 'ok');
+            await load();
+            showGeneratedKeyModal(newKey);
+          }
         } catch (e) {
-          toast(`Failed to create key: ${e.message}`, 'error');
+          throw new Error(e.message || 'Operation failed');
         }
       }
     });

@@ -656,13 +656,37 @@ func (h *Handler) CreateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name string `json:"name"`
+		Name          string   `json:"name"`
+		AllowedModels []string `json:"allowed_models"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	keyInfo, err := h.keys.CreateKey(body.Name)
+	keyInfo, err := h.keys.CreateKey(body.Name, body.AllowedModels)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, keyInfo)
+}
+
+func (h *Handler) UpdateKey(w http.ResponseWriter, r *http.Request) {
+	if h.keys == nil {
+		jsonError(w, http.StatusBadRequest, "Keys manager not available")
+		return
+	}
+	id := r.PathValue("id")
+	var body struct {
+		Name          string   `json:"name"`
+		AllowedModels []string `json:"allowed_models"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+
+	keyInfo, err := h.keys.UpdateKey(id, body.Name, body.AllowedModels)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	jsonResponse(w, http.StatusOK, keyInfo)
@@ -852,7 +876,6 @@ func (h *Handler) SetUpstreamSettings(w http.ResponseWriter, r *http.Request) {
 		target = strings.TrimRight(target, "/")
 		h.routerTarget = target
 		_ = h.keys.SetUpstreamTarget(target)
-		h.models.SetRouterTarget(target)
 	}
 
 	if key := strings.TrimSpace(body.RouterAPIKey); key != "" {
