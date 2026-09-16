@@ -9,12 +9,13 @@ import * as endpoints from './views/endpoints.js';
 import * as reports from './views/reports.js';
 import * as models from './views/models.js';
 import * as traffic from './views/traffic.js';
+import * as logs from './views/logs.js';
 import * as profile from './views/profile.js';
 import * as users from './views/users.js';
 import * as about from './views/about.js';
 
 const APP = 'NineGuard';
-const VIEWS = { dashboard, providers, endpoints, reports, models, traffic, profile, users, about };
+const VIEWS = { dashboard, providers, endpoints, reports, models, traffic, logs, profile, users, about };
 
 // Sidebar menu, top to bottom. Groups without a title render as plain links.
 // auth: only with authentication enabled; admin: only for administrators.
@@ -24,7 +25,8 @@ const NAV = [
     { view: 'providers', label: 'Providers', icon: 'server', keywords: 'providers upstream openai compatible route apikey target prefix' },
     { view: 'endpoints', label: 'Endpoints & Keys', icon: 'key', keywords: 'endpoints agent setup url integration cursor cline continue python node curl' },
     { view: 'models', label: 'Models', icon: 'box', keywords: 'models enable disable firewall' },
-    { view: 'traffic', label: 'Traffic Explorer', icon: 'clock', keywords: 'traffic logs tokens usage' },
+    { view: 'traffic', label: 'Traffic Explorer', icon: 'clock', keywords: 'traffic requests telemetry tokens latency usage' },
+    { view: 'logs', label: 'Log Explorer', icon: 'logs', keywords: 'logs server system gateway stdout error debug kibana elk' },
     { view: 'reports', label: 'Usage Reports', icon: 'activity', keywords: 'reports usage breakdown tokens consumers keys models attribution analytics' },
   ]},
   {
@@ -59,7 +61,18 @@ function renderRoute() {
   current.inst.update?.(r.params);
   document.title = `${page.label} - ${APP}`;
   rootEl.classList.remove('sidebar-open');
-  $('crumbs').replaceChildren(h('b', null, page.label));
+
+  const crumbs = [h('b', null, r.params.live ? 'Live tail' : page.label)];
+  if (r.view === 'traffic') {
+    for (const v of [r.params.key, r.params.model, r.params.provider]) {
+      if (v) crumbs.push(icon('chevron-right'), h('span', null, v));
+    }
+  } else if (r.view === 'logs') {
+    for (const v of [r.params.source]) {
+      if (v) crumbs.push(icon('chevron-right'), h('span', null, v));
+    }
+  }
+  $('crumbs').replaceChildren(...crumbs);
   renderSidebar(r);
 }
 
@@ -115,7 +128,7 @@ document.addEventListener('keydown', (e) => {
     showPalette();
   } else if (e.key === '/' && !typing) {
     e.preventDefault();
-    const box = document.querySelector('[data-search]');
+    const box = document.querySelector('[data-log-search]') || document.querySelector('[data-search]');
     if (box) { box.focus(); box.select(); } else showPalette();
   }
 });

@@ -3,6 +3,7 @@ package traffic
 import (
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,17 +25,38 @@ type LogEntry struct {
 	ClientIP         string    `json:"client_ip"`
 	Stream           bool      `json:"stream"`
 	ErrorMessage     *string   `json:"error_message,omitempty"`
+	Level            string    `json:"level"`
+	Message          string    `json:"message"`
 }
 
 type FilterParams struct {
 	Period    string // "today", "yesterday", "7d", "30d", "month", "last_month", "all", "custom"
 	StartDate string // "YYYY-MM-DD"
 	EndDate   string // "YYYY-MM-DD"
+	From      string // RFC3339 / ISO or epoch
+	To        string // RFC3339 / ISO or epoch
 	Model     string
 	APIKey    string
-	Status    string // "ok", "blocked", "error"
+	Provider  string
+	Status    string // "ok", "blocked", "error" or status code
+	Level     string // comma-separated: "DEBUG,INFO,WARN,ERROR,FATAL"
+	Search    string // search term / query string
 	Limit     int
 	Offset    int
+	Cursor    string // id cursor for pagination
+}
+
+type VolumeBucket struct {
+	Start  int64            `json:"start"` // unix nano
+	Counts map[string]int64 `json:"counts"`
+}
+
+type VolumeResult struct {
+	From        int64            `json:"from"` // unix nano
+	To          int64            `json:"to"` // unix nano
+	BucketNanos int64            `json:"bucket_nanos"`
+	Buckets     []VolumeBucket   `json:"buckets"`
+	Totals      map[string]int64 `json:"totals"`
 }
 
 type ModelStat struct {
@@ -288,6 +310,110 @@ func NewManager(database *db.DB) *Manager {
 	return &Manager{db: database}
 }
 
+func NormalizeLevel(l string) string {
+	switch strings.ToUpper(strings.TrimSpace(l)) {
+	case "DEBUG", "TRACE", "DBG":
+		return "DEBUG"
+	case "WARN", "WARNING", "WRN":
+		return "WARN"
+	case "ERROR", "ERR":
+		return "ERROR"
+	case "FATAL", "PANIC", "CRITICAL":
+		return "FATAL"
+	default:
+		return "INFO"
+	}
+}
+
+func fmtNumStr(n int) string {
+	s := strconv.Itoa(n)
+	if len(s) <= 3 {
+		return s
+	}
+	var res []byte
+	rem := len(s) % 3
+	if rem > 0 {
+		res = append(res, s[:rem]...)
+		if len(s) > rem {
+			res = append(res, ',')
+		}
+	}
+	for i := rem; i < len(s); i += 3 {
+		res = append(res, s[i:i+3]...)
+		if i+3 < len(s) {
+			res = append(res, ',')
+		}
+	}
+	return string(res)
+}
+
+func (e *LogEntry) ComputeLevelAndMessage() {
+	if e.Level == "" {
+		if e.StatusCode == 503 || e.StatusCode == 504 {
+			e.Level = "FATAL"
+		} else if e.StatusCode >= 500 || e.StatusCode == 403 || e.StatusCode == 401 || e.StatusCode == 400 || e.StatusCode == 404 {
+			e.Level = "ERROR"
+		} else if e.StatusCode >= 400 {
+			e.Level = "WARN"
+		} else if e.StatusCode >= 200 {
+			e.Level = "INFO"
+		} else {
+			e.Level = "DEBUG"
+		}
+	} else {
+		e.Level = NormalizeLevel(e.Level)
+	}
+	if e.Message == "" {
+		modeStr := "sync"
+		if e.Stream {
+			modeStr = "sse"
+		}
+		if e.StatusCode >= 400 {
+			errTxt := ""
+			if e.ErrorMessage != nil && *e.ErrorMessage != "" {
+				errTxt = " - " + *e.ErrorMessage
+			}
+			e.Message = fmt.Sprintf("POST /v1/chat/completions model=%s %d%s (%dms, ip=%s)",
+				e.Model, e.StatusCode, errTxt, e.DurationMs, e.ClientIP)
+		} else {
+			e.Message = fmt.Sprintf("POST /v1/chat/completions model=%s 200 OK (%dms, %s tok [p:%s, c:%s], %s, ip=%s)",
+				e.Model, e.DurationMs, fmtNumStr(e.TotalTokens), fmtNumStr(e.PromptTokens), fmtNumStr(e.CompletionTokens), modeStr, e.ClientIP)
+		}
+	}
+}
+
+func parseTimeParam(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if n > 1e16 {
+			return time.Unix(0, n).UTC(), true
+		}
+		if n > 1e11 {
+			return time.UnixMilli(n).UTC(), true
+		}
+		return time.Unix(n, 0).UTC(), true
+	}
+	formats := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05.999999999Z07:00",
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
 func (m *Manager) Record(entry *LogEntry) error {
 	errMsg := sql.NullString{}
 	if entry.ErrorMessage != nil && *entry.ErrorMessage != "" {
@@ -302,14 +428,15 @@ func (m *Manager) Record(entry *LogEntry) error {
 
 	// Mask API key: keep first 7 chars and last 4 chars (e.g. sk-proj...1234)
 	maskedKey := maskAPIKey(entry.APIKey)
+	entry.ComputeLevelAndMessage()
 
 	_, err := m.db.Exec(`
 		INSERT INTO traffic_logs (
 			timestamp, api_key, api_key_name, provider_id, model, prompt_tokens, completion_tokens, total_tokens,
-			duration_ms, status_code, client_ip, stream, error_message
-		) VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			duration_ms, status_code, client_ip, stream, error_message, level
+		) VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, maskedKey, entry.APIKeyName, entry.ProviderID, entry.Model, entry.PromptTokens, entry.CompletionTokens, entry.TotalTokens,
-		entry.DurationMs, entry.StatusCode, entry.ClientIP, streamInt, errMsg)
+		entry.DurationMs, entry.StatusCode, entry.ClientIP, streamInt, errMsg, entry.Level)
 
 	// Ensure model is recorded in models table
 	_, _ = m.db.Exec("INSERT OR IGNORE INTO models (id, name, enabled) VALUES (?, ?, 1)", entry.Model, entry.Model)
@@ -335,9 +462,24 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 	var conditions []string
 	var args []interface{}
 
-	dateCond := buildDateFilter(p.Period, p.StartDate, p.EndDate)
-	if dateCond != "1=1" {
-		conditions = append(conditions, dateCond)
+	if tFrom, ok := parseTimeParam(p.From); ok {
+		conditions = append(conditions, "timestamp >= datetime(?)")
+		args = append(args, tFrom.Format("2006-01-02 15:04:05"))
+	}
+	if tTo, ok := parseTimeParam(p.To); ok {
+		conditions = append(conditions, "timestamp <= datetime(?)")
+		args = append(args, tTo.Format("2006-01-02 15:04:05"))
+	}
+	if p.From == "" && p.To == "" {
+		dateCond := buildDateFilter(p.Period, p.StartDate, p.EndDate)
+		if dateCond != "1=1" {
+			conditions = append(conditions, dateCond)
+		}
+	}
+
+	if p.Provider != "" {
+		conditions = append(conditions, "provider_id = ?")
+		args = append(args, p.Provider)
 	}
 
 	if p.Model != "" {
@@ -346,18 +488,116 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 	}
 
 	if p.APIKey != "" {
-		conditions = append(conditions, "(api_key LIKE ? OR api_key_name LIKE ?)")
-		args = append(args, "%"+p.APIKey+"%", "%"+p.APIKey+"%")
+		conditions = append(conditions, "(api_key = ? OR api_key_name = ? OR api_key LIKE ? OR api_key_name LIKE ?)")
+		args = append(args, p.APIKey, p.APIKey, "%"+p.APIKey+"%", "%"+p.APIKey+"%")
 	}
 
 	if p.Status != "" {
-		switch p.Status {
-		case "ok":
-			conditions = append(conditions, "status_code >= 200 AND status_code < 300")
-		case "blocked":
-			conditions = append(conditions, "status_code = 403")
-		case "error":
-			conditions = append(conditions, "status_code >= 400 AND status_code != 403")
+		parts := strings.Split(p.Status, ",")
+		var statusConds []string
+		for _, raw := range parts {
+			s := strings.ToLower(strings.TrimSpace(raw))
+			switch s {
+			case "2xx", "ok", "success", "200":
+				statusConds = append(statusConds, "(status_code >= 200 AND status_code < 300)")
+			case "3xx", "redirect":
+				statusConds = append(statusConds, "(status_code >= 300 AND status_code < 400)")
+			case "4xx", "client", "client_error":
+				statusConds = append(statusConds, "(status_code >= 400 AND status_code < 500)")
+			case "403", "blocked":
+				statusConds = append(statusConds, "(status_code = 403)")
+			case "5xx", "server", "server_error":
+				statusConds = append(statusConds, "(status_code >= 500)")
+			case "error", "errors":
+				statusConds = append(statusConds, "(status_code >= 400)")
+			default:
+				if code, err := strconv.Atoi(s); err == nil {
+					statusConds = append(statusConds, fmt.Sprintf("(status_code = %d)", code))
+				}
+			}
+		}
+		if len(statusConds) > 0 && len(statusConds) < 5 {
+			conditions = append(conditions, "("+strings.Join(statusConds, " OR ")+")")
+		}
+	}
+
+	if p.Level != "" {
+		levels := strings.Split(p.Level, ",")
+		var levelHolders []string
+		var validLevels []string
+		for _, l := range levels {
+			l = strings.ToUpper(strings.TrimSpace(l))
+			if l != "" {
+				validLevels = append(validLevels, l)
+				levelHolders = append(levelHolders, "?")
+			}
+		}
+		if len(validLevels) > 0 && len(validLevels) < 5 {
+			cond := fmt.Sprintf(`(
+				CASE
+					WHEN level IS NOT NULL AND level != '' THEN UPPER(level)
+					WHEN status_code IN (503, 504) THEN 'FATAL'
+					WHEN status_code >= 500 OR status_code IN (400, 401, 403, 404) THEN 'ERROR'
+					WHEN status_code >= 400 THEN 'WARN'
+					WHEN status_code >= 200 THEN 'INFO'
+					ELSE 'DEBUG'
+				END IN (%s)
+			)`, strings.Join(levelHolders, ","))
+			conditions = append(conditions, cond)
+			for _, vl := range validLevels {
+				args = append(args, vl)
+			}
+		}
+	}
+
+	if p.Search != "" {
+		terms := strings.Fields(p.Search)
+		for _, term := range terms {
+			term = strings.TrimSpace(term)
+			if term == "" {
+				continue
+			}
+			if colonIdx := strings.Index(term, ":"); colonIdx > 0 {
+				prefix := strings.ToLower(term[:colonIdx])
+				val := term[colonIdx+1:]
+				switch prefix {
+				case "model":
+					conditions = append(conditions, "model LIKE ?")
+					args = append(args, "%"+val+"%")
+					continue
+				case "key":
+					conditions = append(conditions, "(api_key LIKE ? OR api_key_name LIKE ?)")
+					args = append(args, "%"+val+"%", "%"+val+"%")
+					continue
+				case "provider":
+					conditions = append(conditions, "provider_id LIKE ?")
+					args = append(args, "%"+val+"%")
+					continue
+				case "status":
+					if code, err := strconv.Atoi(val); err == nil {
+						conditions = append(conditions, "status_code = ?")
+						args = append(args, code)
+						continue
+					}
+				}
+			}
+			likeTerm := "%" + term + "%"
+			conditions = append(conditions, `(
+				model LIKE ? OR 
+				COALESCE(api_key, '') LIKE ? OR 
+				COALESCE(api_key_name, '') LIKE ? OR 
+				COALESCE(provider_id, '') LIKE ? OR 
+				COALESCE(client_ip, '') LIKE ? OR 
+				COALESCE(error_message, '') LIKE ?
+			)`)
+			args = append(args, likeTerm, likeTerm, likeTerm, likeTerm, likeTerm, likeTerm)
+		}
+	}
+
+	if p.Cursor != "" {
+		if cursorID, err := strconv.ParseInt(p.Cursor, 10, 64); err == nil && cursorID > 0 {
+			conditions = append(conditions, "id < ?")
+			args = append(args, cursorID)
 		}
 	}
 
@@ -384,7 +624,7 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 
 	query := fmt.Sprintf(`
 		SELECT id, timestamp, api_key, COALESCE(api_key_name, ''), COALESCE(provider_id, ''), model, prompt_tokens, completion_tokens, total_tokens,
-		       duration_ms, status_code, client_ip, stream, error_message
+		       duration_ms, status_code, client_ip, stream, error_message, COALESCE(level, '')
 		FROM traffic_logs
 		%s
 		ORDER BY id DESC
@@ -403,10 +643,11 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 		var e LogEntry
 		var streamInt int
 		var errMsg sql.NullString
+		var lvlStr string
 		if err := rows.Scan(
 			&e.ID, &e.Timestamp, &e.APIKey, &e.APIKeyName, &e.ProviderID, &e.Model,
 			&e.PromptTokens, &e.CompletionTokens, &e.TotalTokens,
-			&e.DurationMs, &e.StatusCode, &e.ClientIP, &streamInt, &errMsg,
+			&e.DurationMs, &e.StatusCode, &e.ClientIP, &streamInt, &errMsg, &lvlStr,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -414,10 +655,236 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 		if errMsg.Valid {
 			e.ErrorMessage = &errMsg.String
 		}
+		e.Level = lvlStr
+		e.ComputeLevelAndMessage()
 		list = append(list, e)
 	}
 
 	return list, total, nil
+}
+
+func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) {
+	var from, to time.Time
+	var ok bool
+	if to, ok = parseTimeParam(p.To); !ok {
+		to = time.Now().UTC()
+	}
+	if from, ok = parseTimeParam(p.From); !ok {
+		if p.StartDate != "" && p.EndDate != "" {
+			t1, _ := time.Parse("2006-01-02", p.StartDate)
+			t2, _ := time.Parse("2006-01-02", p.EndDate)
+			from = t1.UTC()
+			to = t2.Add(24*time.Hour - time.Second).UTC()
+		} else {
+			switch p.Period {
+			case "7d":
+				from = to.Add(-7 * 24 * time.Hour)
+			case "14d":
+				from = to.Add(-14 * 24 * time.Hour)
+			case "30d":
+				from = to.Add(-30 * 24 * time.Hour)
+			case "yesterday":
+				yest := to.AddDate(0, 0, -1)
+				from = time.Date(yest.Year(), yest.Month(), yest.Day(), 0, 0, 0, 0, time.UTC)
+				to = time.Date(yest.Year(), yest.Month(), yest.Day(), 23, 59, 59, 0, time.UTC)
+			default:
+				from = time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC)
+				to = from.Add(24*time.Hour - time.Second)
+			}
+		}
+	}
+	if !from.Before(to) {
+		from = to.Add(-24 * time.Hour)
+	}
+	if buckets <= 0 {
+		buckets = 60
+	}
+	if buckets > 720 {
+		buckets = 720
+	}
+
+	fromUnix := from.Unix()
+	toUnix := to.Unix()
+	spanSec := toUnix - fromUnix
+	if spanSec <= 0 {
+		spanSec = 60
+	}
+	bucketWidthSec := (spanSec + int64(buckets) - 1) / int64(buckets)
+	if bucketWidthSec <= 0 {
+		bucketWidthSec = 1
+	}
+
+	res := &VolumeResult{
+		From:        from.UnixNano(),
+		To:          to.UnixNano(),
+		BucketNanos: bucketWidthSec * 1e9,
+		Buckets:     make([]VolumeBucket, buckets),
+		Totals: map[string]int64{
+			"2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0,
+			"DEBUG": 0, "INFO": 0, "WARN": 0, "ERROR": 0, "FATAL": 0,
+		},
+	}
+	for i := range res.Buckets {
+		res.Buckets[i] = VolumeBucket{
+			Start: (fromUnix + int64(i)*bucketWidthSec) * 1e9,
+			Counts: map[string]int64{
+				"2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0,
+				"DEBUG": 0, "INFO": 0, "WARN": 0, "ERROR": 0, "FATAL": 0,
+			},
+		}
+	}
+
+	var conditions []string
+	var args []interface{}
+
+	conditions = append(conditions, "timestamp >= datetime(?)")
+	args = append(args, from.Format("2006-01-02 15:04:05"))
+
+	conditions = append(conditions, "timestamp <= datetime(?)")
+	args = append(args, to.Format("2006-01-02 15:04:05"))
+
+	if p.Provider != "" {
+		conditions = append(conditions, "provider_id = ?")
+		args = append(args, p.Provider)
+	}
+	if p.Model != "" {
+		conditions = append(conditions, "model = ?")
+		args = append(args, p.Model)
+	}
+	if p.APIKey != "" {
+		conditions = append(conditions, "(api_key = ? OR api_key_name = ? OR api_key LIKE ? OR api_key_name LIKE ?)")
+		args = append(args, p.APIKey, p.APIKey, "%"+p.APIKey+"%", "%"+p.APIKey+"%")
+	}
+	if p.Status != "" {
+		parts := strings.Split(p.Status, ",")
+		var statusConds []string
+		for _, raw := range parts {
+			s := strings.ToLower(strings.TrimSpace(raw))
+			switch s {
+			case "2xx", "ok", "success", "200":
+				statusConds = append(statusConds, "(status_code >= 200 AND status_code < 300)")
+			case "3xx", "redirect":
+				statusConds = append(statusConds, "(status_code >= 300 AND status_code < 400)")
+			case "4xx", "client", "client_error":
+				statusConds = append(statusConds, "(status_code >= 400 AND status_code < 500)")
+			case "403", "blocked":
+				statusConds = append(statusConds, "(status_code = 403)")
+			case "5xx", "server", "server_error":
+				statusConds = append(statusConds, "(status_code >= 500)")
+			case "error", "errors":
+				statusConds = append(statusConds, "(status_code >= 400)")
+			default:
+				if code, err := strconv.Atoi(s); err == nil {
+					statusConds = append(statusConds, fmt.Sprintf("(status_code = %d)", code))
+				}
+			}
+		}
+		if len(statusConds) > 0 && len(statusConds) < 5 {
+			conditions = append(conditions, "("+strings.Join(statusConds, " OR ")+")")
+		}
+	}
+	if p.Level != "" {
+		levels := strings.Split(p.Level, ",")
+		var levelHolders []string
+		var validLevels []string
+		for _, l := range levels {
+			l = strings.ToUpper(strings.TrimSpace(l))
+			if l != "" {
+				validLevels = append(validLevels, l)
+				levelHolders = append(levelHolders, "?")
+			}
+		}
+		if len(validLevels) > 0 && len(validLevels) < 5 {
+			cond := fmt.Sprintf(`(
+				CASE
+					WHEN level IS NOT NULL AND level != '' THEN UPPER(level)
+					WHEN status_code IN (503, 504) THEN 'FATAL'
+					WHEN status_code >= 500 OR status_code IN (400, 401, 403, 404) THEN 'ERROR'
+					WHEN status_code >= 400 THEN 'WARN'
+					WHEN status_code >= 200 THEN 'INFO'
+					ELSE 'DEBUG'
+				END IN (%s)
+			)`, strings.Join(levelHolders, ","))
+			conditions = append(conditions, cond)
+			for _, vl := range validLevels {
+				args = append(args, vl)
+			}
+		}
+	}
+	if p.Search != "" {
+		terms := strings.Fields(p.Search)
+		for _, term := range terms {
+			term = strings.TrimSpace(term)
+			if term == "" {
+				continue
+			}
+			likeTerm := "%" + term + "%"
+			conditions = append(conditions, `(
+				model LIKE ? OR 
+				COALESCE(api_key, '') LIKE ? OR 
+				COALESCE(api_key_name, '') LIKE ? OR 
+				COALESCE(provider_id, '') LIKE ? OR 
+				COALESCE(client_ip, '') LIKE ? OR 
+				COALESCE(error_message, '') LIKE ?
+			)`)
+			args = append(args, likeTerm, likeTerm, likeTerm, likeTerm, likeTerm, likeTerm)
+		}
+	}
+
+	query := fmt.Sprintf(`
+		SELECT 
+			(CAST(strftime('%%s', timestamp) AS INTEGER) - %d) / %d as b_idx,
+			CASE
+				WHEN status_code >= 500 THEN '5xx'
+				WHEN status_code >= 400 THEN '4xx'
+				WHEN status_code >= 300 THEN '3xx'
+				WHEN status_code >= 200 THEN '2xx'
+				ELSE 'other'
+			END as status_grp,
+			COUNT(*) as cnt
+		FROM traffic_logs
+		WHERE %s
+		GROUP BY b_idx, status_grp
+	`, fromUnix, bucketWidthSec, strings.Join(conditions, " AND "))
+
+	rows, err := m.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var bIdx int
+		var statusGrp string
+		var cnt int64
+		if err := rows.Scan(&bIdx, &statusGrp, &cnt); err == nil {
+			if bIdx < 0 {
+				bIdx = 0
+			}
+			if bIdx >= buckets {
+				bIdx = buckets - 1
+			}
+			res.Buckets[bIdx].Counts[statusGrp] += cnt
+			res.Totals[statusGrp] += cnt
+
+			switch statusGrp {
+			case "2xx":
+				res.Buckets[bIdx].Counts["INFO"] += cnt
+				res.Totals["INFO"] += cnt
+			case "4xx":
+				res.Buckets[bIdx].Counts["ERROR"] += cnt
+				res.Totals["ERROR"] += cnt
+			case "5xx":
+				res.Buckets[bIdx].Counts["ERROR"] += cnt
+				res.Totals["ERROR"] += cnt
+			default:
+				res.Buckets[bIdx].Counts["DEBUG"] += cnt
+				res.Totals["DEBUG"] += cnt
+			}
+		}
+	}
+
+	return res, nil
 }
 
 func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*DashboardStats, error) {

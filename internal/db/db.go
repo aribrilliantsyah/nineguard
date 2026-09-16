@@ -76,7 +76,8 @@ func (d *DB) migrate() error {
 		status_code INTEGER NOT NULL,
 		client_ip TEXT,
 		stream INTEGER DEFAULT 0,
-		error_message TEXT
+		error_message TEXT,
+		level TEXT DEFAULT ''
 	);
 
 	CREATE TABLE IF NOT EXISTS api_keys (
@@ -107,6 +108,15 @@ func (d *DB) migrate() error {
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
+	CREATE TABLE IF NOT EXISTS system_logs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+		level TEXT NOT NULL,
+		source TEXT NOT NULL,
+		message TEXT NOT NULL,
+		attrs TEXT DEFAULT '{}'
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_traffic_timestamp ON traffic_logs(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_traffic_model ON traffic_logs(model);
 	CREATE INDEX IF NOT EXISTS idx_traffic_api_key ON traffic_logs(api_key);
@@ -115,6 +125,9 @@ func (d *DB) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(prefix);
 	CREATE INDEX IF NOT EXISTS idx_providers_prefix ON providers(prefix);
 	CREATE INDEX IF NOT EXISTS idx_providers_active ON providers(is_active);
+	CREATE INDEX IF NOT EXISTS idx_syslogs_timestamp ON system_logs(timestamp);
+	CREATE INDEX IF NOT EXISTS idx_syslogs_level ON system_logs(level);
+	CREATE INDEX IF NOT EXISTS idx_syslogs_source ON system_logs(source);
 	`
 	if _, err := d.Exec(schema); err != nil {
 		return err
@@ -123,8 +136,12 @@ func (d *DB) migrate() error {
 	// For existing databases, ensure columns exist
 	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN api_key_name TEXT")
 	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN provider_id TEXT")
+	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN level TEXT DEFAULT ''")
 	_, _ = d.Exec("ALTER TABLE models ADD COLUMN provider_id TEXT DEFAULT ''")
 	_, _ = d.Exec("CREATE INDEX IF NOT EXISTS idx_traffic_key_name ON traffic_logs(api_key_name)")
+	_, _ = d.Exec("CREATE INDEX IF NOT EXISTS idx_traffic_level ON traffic_logs(level)")
+	_, _ = d.Exec("CREATE INDEX IF NOT EXISTS idx_traffic_status ON traffic_logs(status_code)")
+	_, _ = d.Exec("CREATE INDEX IF NOT EXISTS idx_traffic_provider ON traffic_logs(provider_id)")
 	_, _ = d.Exec("CREATE INDEX IF NOT EXISTS idx_models_provider ON models(provider_id)")
 	return nil
 }

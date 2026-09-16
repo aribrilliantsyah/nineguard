@@ -127,7 +127,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}`, modelName)
 		_, _ = w.Write([]byte(errJSON))
 
-		errMsg := "model disabled"
+		errMsg := "model disabled by NineGuard firewall"
 		_ = p.traffic.Record(&traffic.LogEntry{
 			APIKey:       maskedKey,
 			APIKeyName:   keyName,
@@ -137,6 +137,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ClientIP:     clientIP,
 			Stream:       req.Stream,
 			ErrorMessage: &errMsg,
+			Level:        "ERROR",
 		})
 		return
 	}
@@ -221,6 +222,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ClientIP:     clientIP,
 			Stream:       req.Stream,
 			ErrorMessage: &errMsg,
+			Level:        "ERROR",
 		})
 		return
 	}

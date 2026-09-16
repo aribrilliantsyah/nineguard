@@ -51,12 +51,95 @@ export function icon(name, cls = '') {
 }
 
 // ── Time ──
+export function nanoOf(e) {
+  if (!e) return 0n;
+  const ts = e.timestamp || '';
+  const m = /^(.*?)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)$/.exec(ts);
+  if (!m) return BigInt(Date.parse(ts) || 0) * 1000000n;
+  return BigInt(Date.parse(m[1] + m[3])) * 1000000n + BigInt((m[2] || '').padEnd(9, '0').slice(0, 9));
+}
+export const msOf = (e) => {
+  if (typeof e === 'number') return e;
+  if (!e) return Date.now();
+  if (e.timestamp) {
+    const d = Date.parse(e.timestamp);
+    if (!isNaN(d)) return d;
+  }
+  return Number(nanoOf(e) / 1000000n);
+};
+
+let TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+let partsFmt = null;
+export function setTimeZone(tz) {
+  if (!tz) return;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    TZ = tz;
+    partsFmt = null;
+  } catch { /* unknown zone: keep the browser's */ }
+}
+export const timeZone = () => TZ;
+export function tzLabel() {
+  try {
+    return new Intl.DateTimeFormat('id-ID', { timeZone: TZ, timeZoneName: 'short' })
+      .formatToParts(Date.now()).find((p) => p.type === 'timeZoneName')?.value || TZ;
+  } catch {
+    return TZ;
+  }
+}
+function parts(ms) {
+  partsFmt ||= new Intl.DateTimeFormat('en-US', {
+    timeZone: TZ, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const o = {};
+  for (const p of partsFmt.formatToParts(ms)) o[p.type] = p.value;
+  return o;
+}
+export function zonedMs(date, time = '00:00') {
+  const [y, mo, d] = date.split('-').map(Number);
+  const [hh, mi] = time.split(':').map(Number);
+  const wall = Date.UTC(y, mo - 1, d, hh || 0, mi || 0);
+  const offset = (ms) => {
+    const p = parts(ms);
+    return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - Math.floor(ms / 1000) * 1000;
+  };
+  const first = wall - offset(wall);
+  return wall - offset(first);
+}
+export const addDays = (date, n) => new Date(Date.parse(date + 'T12:00:00Z') + n * 86400e3).toISOString().slice(0, 10);
+const pad = (n, w = 2) => String(n).padStart(w, '0');
+
+export function localDate(d = Date.now()) {
+  const p = parts(d instanceof Date ? d.getTime() : typeof d === 'string' ? Date.parse(d) : d);
+  return `${p.year}-${p.month}-${p.day}`;
+}
+export function fmtTime(ms) {
+  const p = parts(ms);
+  return `${p.hour}:${p.minute}:${p.second}.${pad(((ms % 1000) + 1000) % 1000, 3)}`;
+}
+export function fmtClock(ms) {
+  const p = parts(ms);
+  return `${p.hour}:${p.minute}`;
+}
+export function fmtDateTime(ms) {
+  const p = parts(ms);
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
+}
+
 export function fmtAgo(ms) {
   const s = Math.max(0, (Date.now() - ms) / 1000);
   if (s < 60) return 'just now';
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
+}
+
+// ── Identity Colors ──
+export function podColor(name) {
+  if (!name) return 'hsl(200 45% 52%)';
+  let x = 0;
+  for (let i = 0; i < name.length; i++) x = (x * 31 + name.charCodeAt(i)) >>> 0;
+  return `hsl(${x % 360} 45% 52%)`;
 }
 
 // ── Numbers ──

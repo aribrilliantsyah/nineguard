@@ -16,6 +16,7 @@ import (
 	"nineguard/internal/models"
 	"nineguard/internal/providers"
 	"nineguard/internal/proxy"
+	"nineguard/internal/syslog"
 	"nineguard/internal/traffic"
 	"nineguard/web"
 )
@@ -34,6 +35,13 @@ func main() {
 	}
 
 	// 2. Initialize Managers
+	syslogMgr := syslog.NewManager(database)
+	defer syslogMgr.Close()
+
+	// Capture all slog logs into syslog manager and stdout
+	baseHandler := slog.NewTextHandler(os.Stdout, nil)
+	slog.SetDefault(slog.New(syslog.NewSlogHandler(syslogMgr, baseHandler)))
+
 	authMgr := auth.NewManager(database, cfg.AuthEnabled)
 	keysMgr := keys.NewManager(database, cfg.RouterAPIKey)
 	routerTarget := keysMgr.GetUpstreamTarget(cfg.RouterTarget)
@@ -49,7 +57,7 @@ func main() {
 	}
 
 	// 4. Handlers
-	h := handler.New(authMgr, modelsMgr, trafficMgr, keysMgr, providersMgr, revProxy, routerTarget)
+	h := handler.New(authMgr, modelsMgr, trafficMgr, syslogMgr, keysMgr, providersMgr, revProxy, routerTarget)
 
 	// Background Auto-Sync: automatically fetch models from active upstream providers
 	go func() {
@@ -139,8 +147,15 @@ func main() {
 	mux.HandleFunc("DELETE /api/v1/models/{id...}", h.DeleteModel)
 
 	mux.HandleFunc("GET /api/v1/traffic", h.GetTrafficLogs)
+	mux.HandleFunc("GET /api/v1/traffic/volume", h.GetTrafficVolume)
+	mux.HandleFunc("GET /api/v1/traffic/export", h.ExportTrafficLogs)
 	mux.HandleFunc("GET /api/v1/traffic/stats", h.GetTrafficStats)
 	mux.HandleFunc("GET /api/v1/traffic/report", h.GetUsageReport)
+
+	mux.HandleFunc("GET /api/v1/logs", h.GetSystemLogs)
+	mux.HandleFunc("GET /api/v1/logs/volume", h.GetSystemLogVolume)
+	mux.HandleFunc("GET /api/v1/logs/export", h.ExportSystemLogs)
+	mux.HandleFunc("GET /api/v1/logs/sources", h.GetSystemLogSources)
 
 	mux.HandleFunc("GET /api/v1/keys", h.ListKeys)
 	mux.HandleFunc("POST /api/v1/keys", h.CreateKey)

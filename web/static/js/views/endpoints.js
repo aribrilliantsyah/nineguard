@@ -18,19 +18,11 @@ export function mount(root) {
   const guidesWrap = h('div', { class: 'card-body p-0' });
   const testerCard = h('div', { class: 'card mt' });
 
-  // ── Header Actions ──
-  const newKeyBtn = h('button', {
-    class: 'btn btn-primary',
-    type: 'button',
-    onclick: () => openNewKeyModal()
-  }, icon('plus'), 'Generate NineGuard API Key');
-
   const header = h('div', { class: 'page-head' },
     h('div', null,
       h('h1', null, 'Endpoints & Agent Setup'),
       h('p', null, 'Manage upstream provider connection, generate NineGuard keys for your agents, and configure tools')
-    ),
-    h('div', { class: 'page-actions' }, newKeyBtn)
+    )
   );
 
   // ── Copy Helper ──

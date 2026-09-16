@@ -1,26 +1,14 @@
-// Traffic Explorer: Kibana/Discover-style HTTP request, latency and token telemetry.
+// Log Explorer: Kibana-style system, server and gateway logs discovery.
 import { api } from '../api.js';
 import { h, icon, fmtTime, fmtNum, localDate, tzLabel, msOf, podColor, copy, toast, menu, emptyState, skeletonRows, debounce } from '../ui.js';
-import { patchRoute } from '../state.js';
+import { store, patchRoute, LEVELS } from '../state.js';
 import { queryParams, rangeControls, searchTerms, highlight, toLocalInput, iso } from '../filters.js';
 import { volumeChart } from '../chart.js';
 
 const PAGE = 500;
 const MAX_ROWS = 5000;
 
-const TRAFFIC_STATUSES = [
-  { id: '2xx', label: '2xx', cls: 'status-chip-2xx' },
-  { id: '4xx', label: '4xx', cls: 'status-chip-4xx' },
-  { id: '5xx', label: '5xx', cls: 'status-chip-5xx' },
-];
-
-const TRAFFIC_SERIES = [
-  { label: '5xx', levels: ['5xx'], color: 'var(--danger)' },
-  { label: '4xx', levels: ['4xx', '403'], color: '#c42b1c' },
-  { label: '2xx', levels: ['2xx'], color: 'var(--ok)' },
-];
-
-const keyOf = (x) => JSON.stringify([x.key, x.model, x.provider, x.status, x.q, x.range, x.date, x.from, x.to]);
+const keyOf = (x) => JSON.stringify([x.source, x.lv, x.q, x.range, x.date, x.from, x.to]);
 
 export function mount(root) {
   let p = {};
@@ -33,34 +21,27 @@ export function mount(root) {
   let liveState = '';
   let chart = null;
   let terms = [];
-
-  let availableKeys = [];
-  let availableModels = [];
-  let availableProviders = [];
+  let availableSources = [];
 
   const patch = (c) => patchRoute(c);
 
-  // Range controls with stepper and custom time inputs
+  // Range controls with date stepper and custom time pickers
   const range = rangeControls((c) => patch(c.range === 'custom' || c.from || c.date ? { ...c, live: '' } : c));
 
-  const select = (label, key, clears) => h('select', {
-    class: 'select', 'aria-label': label,
-    onchange: (e) => patch({ [key]: e.target.value, ...Object.fromEntries(clears.map((k) => [k, ''])) }),
+  const sourceSel = h('select', {
+    class: 'select', 'aria-label': 'Log Source',
+    onchange: (e) => patch({ source: e.target.value }),
   });
-
-  const keySel = select('Client Key', 'key', []);
-  const modelSel = select('Model', 'model', []);
-  const providerSel = select('Provider', 'provider', []);
 
   const clearBtn = h('button', {
     class: 'btn btn-sm', type: 'button',
-    onclick: () => patch({ key: '', model: '', provider: '', status: '', q: '' }),
+    onclick: () => patch({ source: '', lv: '', q: '' }),
   }, icon('x'), 'Clear');
 
   const searchIn = h('input', {
-    type: 'search', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Search traffic logs', 'data-log-search': '',
-    placeholder: 'Search traffic logs  (press /)',
-    title: 'Words are ANDed. "exact phrase", -exclude, or field filters key: model: provider: status:',
+    type: 'search', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Search logs', 'data-log-search': '',
+    placeholder: 'Search logs  (press /)',
+    title: 'Words are ANDed. "exact phrase", -exclude, or field filters source: level:',
   });
 
   const pushQuery = debounce(() => patch({ q: searchIn.value.trim() }), 400);
@@ -72,18 +53,17 @@ export function mount(root) {
 
   const searchBox = h('label', { class: 'tool-search' }, icon('search'), searchIn);
 
-  // Status Filter Chips (2xx, 403, 4xx, 5xx)
-  const chips = TRAFFIC_STATUSES.map((s) => h('button', {
-    class: `chip ${s.cls}`, type: 'button', title: `Filter ${s.label}`,
-    onclick: () => toggleStatus(s.id)
-  }, h('i', { class: 'dot' }), s.label));
+  const chips = LEVELS.map((l) => h('button', {
+    class: `chip lv-${l}`, type: 'button', title: `Show or hide ${l}`,
+    onclick: () => toggleLevel(l)
+  }, h('i', { class: 'dot' }), l));
 
   const liveBtn = h('button', { class: 'chip live', type: 'button', onclick: toggleLive });
 
   const exportBtn = h('button', {
     class: 'btn btn-sm', type: 'button',
     onclick: () => menu(exportBtn, [
-      { label: 'Export matching traffic logs' },
+      { label: 'Export matching system logs' },
       { icon: 'download', text: 'CSV', onClick: () => doExport('csv') },
       { icon: 'download', text: 'JSON', onClick: () => doExport('json') },
     ]),
@@ -95,13 +75,13 @@ export function mount(root) {
 
   root.append(h('div', { class: 'page-fill' },
     h('div', { class: 'toolbar' },
-      searchBox, range.el, h('span', { class: 'sep' }), keySel, modelSel, providerSel, clearBtn,
+      searchBox, range.el, h('span', { class: 'sep' }), sourceSel, clearBtn,
       h('span', { class: 'spacer' }), h('span', { class: 'chips' }, chips), liveBtn, exportBtn),
     chartBox,
     h('div', { class: 'log-table' },
       h('div', { class: 'log-head' },
         h('span', { title: 'Local time zone' }, `Time (${tzLabel()})`),
-        h('span', null, 'Status'),
+        h('span', null, 'Level'),
         h('span', { class: 'c-src' }, 'Source'),
         h('span', null, 'Message')),
       body),
@@ -111,14 +91,14 @@ export function mount(root) {
     if (cursor && !p.live && body.scrollTop + body.clientHeight > body.scrollHeight - 300) loadMore();
   }, { passive: true });
 
-  // ── Status Filters ──
-  const statusSet = () => new Set(p.status ? p.status.split(',') : TRAFFIC_STATUSES.map((s) => s.id));
-  function toggleStatus(id) {
-    const set = statusSet();
-    if (set.has(id)) set.delete(id);
-    else set.add(id);
+  // ── Filters ──
+  const levelSet = () => new Set(p.lv ? p.lv.split(',') : LEVELS);
+  function toggleLevel(l) {
+    const set = levelSet();
+    if (set.has(l)) set.delete(l);
+    else set.add(l);
     if (!set.size) return;
-    patch({ status: set.size === TRAFFIC_STATUSES.length ? '' : TRAFFIC_STATUSES.map((s) => s.id).filter((x) => set.has(x)).join(',') });
+    patch({ lv: set.size === LEVELS.length ? '' : LEVELS.filter((x) => set.has(x)).join(',') });
   }
 
   function toggleLive() {
@@ -138,31 +118,25 @@ export function mount(root) {
     range.sync(p);
     if (document.activeElement !== searchIn) searchIn.value = p.q || '';
 
-    fill(keySel, 'All client keys', availableKeys.map((k) => k.name || k.key), p.key);
-    fill(modelSel, 'All models', availableModels.map((m) => m.id || m.name), p.model);
-    fill(providerSel, 'All providers', availableProviders.map((pr) => pr.id || pr.name), p.provider);
+    fill(sourceSel, 'All sources', availableSources, p.source);
 
-    const set = statusSet();
-    chips.forEach((c, i) => c.classList.toggle('active', set.has(TRAFFIC_STATUSES[i].id)));
-    clearBtn.hidden = !(p.key || p.model || p.provider || p.status || p.q);
+    const set = levelSet();
+    chips.forEach((c, i) => c.classList.toggle('active', set.has(LEVELS[i])));
+    clearBtn.hidden = !(p.source || p.lv || p.q);
 
     liveBtn.classList.toggle('active', !!p.live);
-    liveBtn.title = p.live ? 'Stop following new requests' : 'Follow new requests in real time';
+    liveBtn.title = p.live ? 'Stop following new logs' : 'Follow new logs in real time';
     liveBtn.replaceChildren(icon(p.live ? 'pause' : 'play'), 'Live',
       ...(p.live ? [h('i', { class: `live-dot${liveState === 'open' ? '' : ' wait'}`, title: liveState === 'open' ? 'Live active' : 'Connecting' })] : []));
   }
 
-  async function loadCatalogs() {
+  async function loadSources() {
     try {
-      const [keysRes, modelsRes, providersRes] = await Promise.allSettled([
-        api.get('/keys'),
-        api.get('/models'),
-        api.get('/providers'),
-      ]);
-      if (keysRes.status === 'fulfilled' && keysRes.value?.keys) availableKeys = keysRes.value.keys;
-      if (modelsRes.status === 'fulfilled' && modelsRes.value?.models) availableModels = modelsRes.value.models;
-      if (providersRes.status === 'fulfilled' && providersRes.value?.providers) availableProviders = providersRes.value.providers;
-      syncControls();
+      const res = await api.get('/logs/sources');
+      if (res && res.sources) {
+        availableSources = res.sources;
+        syncControls();
+      }
     } catch { /* ignore */ }
   }
 
@@ -179,10 +153,10 @@ export function mount(root) {
     chartBox.replaceChildren(h('div', { class: 'skel', style: { height: '94px' } }));
     renderStatus(true);
 
-    const q = queryParams(p);
+    const q = { ...queryParams(p), source: p.source || '' };
     const [logs, vol] = await Promise.allSettled([
-      api.get('/traffic', { ...q, limit: PAGE }),
-      api.get('/traffic/volume', { ...q, to: q.to || iso(Date.now()), buckets: 60 }),
+      api.get('/logs', { ...q, limit: PAGE }),
+      api.get('/logs/volume', { ...q, to: q.to || iso(Date.now()), buckets: 60 }),
     ]);
 
     if (id !== reqId) return;
@@ -193,7 +167,7 @@ export function mount(root) {
       cursor = result.next_cursor || '';
       renderRows();
     } else {
-      body.replaceChildren(emptyState('alert', 'Could not load traffic logs', logs.reason.message));
+      body.replaceChildren(emptyState('alert', 'Could not load system logs', logs.reason.message));
     }
     renderChart(vol);
     renderStatus();
@@ -205,7 +179,8 @@ export function mount(root) {
     renderStatus();
     const id = reqId;
     try {
-      const res = await api.get('/traffic', { ...queryParams(p), limit: PAGE, cursor });
+      const q = { ...queryParams(p), source: p.source || '', limit: PAGE, cursor };
+      const res = await api.get('/logs', q);
       if (id !== reqId) return;
       const fresh = res.entries || res.logs || [];
       cursor = res.next_cursor || '';
@@ -229,7 +204,7 @@ export function mount(root) {
     if (liveTimer) return;
     liveState = 'open';
     syncControls();
-    liveTimer = setInterval(pollFresh, 2500);
+    liveTimer = setInterval(pollFresh, 2000);
   }
 
   function stopLive() {
@@ -241,8 +216,8 @@ export function mount(root) {
   async function pollFresh() {
     if (!result || !p.live) return;
     try {
-      const q = { ...queryParams(p), limit: 50 };
-      const res = await api.get('/traffic', q);
+      const q = { ...queryParams(p), source: p.source || '', limit: 50 };
+      const res = await api.get('/logs', q);
       const fresh = res.entries || res.logs || [];
       if (!fresh.length) return;
 
@@ -251,7 +226,7 @@ export function mount(root) {
       if (unseens.length) {
         addFresh(unseens.reverse());
       }
-    } catch { /* ignore network glitches */ }
+    } catch { /* ignore glitches */ }
   }
 
   function addFresh(list) {
@@ -279,7 +254,7 @@ export function mount(root) {
   async function doExport(format) {
     try {
       toast(`Preparing ${format.toUpperCase()} export...`);
-      await api.download('/traffic/export', { ...queryParams(p), format });
+      await api.download('/logs/export', { ...queryParams(p), source: p.source || '', format });
     } catch (e) {
       toast(e.message, 'error');
     }
@@ -292,7 +267,6 @@ export function mount(root) {
       return;
     }
     chart = volumeChart(vol.value, {
-      series: TRAFFIC_SERIES,
       height: 74,
       onSelect: (from, to) => patch({ range: 'custom', date: '', live: '', from: toLocalInput(from), to: toLocalInput(Math.max(to - 1, from)) }),
     });
@@ -311,44 +285,23 @@ export function mount(root) {
   }
 
   function emptyView() {
-    if (p.live) return emptyState('activity', 'Waiting for new requests', 'Nothing matched yet. New requests to NineGuard appear here in real time.');
-    return emptyState('inbox', 'No traffic recorded yet', 'Nothing in this time range matches the current filters.',
+    if (p.live) return emptyState('activity', 'Waiting for new log lines', 'Nothing matched yet. New lines appear here as soon as they are written.');
+    return emptyState('inbox', 'No logs match', 'Nothing in this time range matches the current filters.',
       h('span', { class: 'input-group' },
         h('button', { class: 'btn btn-sm', onclick: () => patch({ range: '24h', date: '', from: '', to: '' }) }, 'Last 24 hours'),
-        h('button', { class: 'btn btn-sm', onclick: () => patch({ range: '', date: '', from: '', to: '', key: '', model: '', provider: '', status: '', q: '' }) }, 'Reset filters')));
-  }
-
-  function renderStatusBadge(code) {
-    if (code >= 500) {
-      return h('span', { class: 'badge-status s-5xx' }, '5xx');
-    }
-    if (code >= 400) {
-      return h('span', { class: 'badge-status s-4xx' }, '4xx');
-    }
-    if (code >= 300) {
-      return h('span', { class: 'badge-status s-3xx' }, '3xx');
-    }
-    if (code >= 200) {
-      return h('span', { class: 'badge-status s-2xx' }, '2xx');
-    }
-    return h('span', { class: 'badge-status s-2xx' }, `${code}`);
+        h('button', { class: 'btn btn-sm', onclick: () => patch({ range: '', date: '', from: '', to: '', source: '', lv: '', q: '' }) }, 'Reset filters')));
   }
 
   function rowEl(e) {
     const ms = msOf(e);
-    const source = e.api_key_name || e.api_key || 'gateway';
-    const isErr = e.status_code === 403 || e.status_code >= 500;
-    const isWarn = e.status_code >= 400 && !isErr;
-    const rowCls = isErr ? 'lv-ERROR' : isWarn ? 'lv-WARN' : '';
-
-    const row = h('div', { class: `row ${rowCls}`, onclick: () => toggleDetail(row, e) },
+    const source = e.source || 'server';
+    const row = h('div', { class: `row lv-${e.level || 'INFO'}`, onclick: () => toggleDetail(row, e) },
       h('span', { class: 'c-time', title: e.timestamp }, fmtTime(ms)),
-      h('span', null, renderStatusBadge(e.status_code)),
-      h('span', { class: 'c-src', title: `Client: ${source}\nModel: ${e.model}` },
+      h('span', null, h('span', { class: 'lv' }, e.level || 'INFO')),
+      h('span', { class: 'c-src', title: source },
         h('i', { class: 'pod-dot', style: { background: podColor(source) } }),
-        h('span', { class: 'src-wl' }, source),
-        h('span', { class: 'src-pod' }, e.model)),
-      h('span', { class: 'c-msg' }, highlight(e.message || `${e.model} (${e.duration_ms}ms)`, terms)));
+        h('span', { class: 'src-wl' }, source)),
+      h('span', { class: 'c-msg' }, highlight(e.message || '', terms)));
     return row;
   }
 
@@ -364,55 +317,35 @@ export function mount(root) {
     row.after(detailEl(e));
   }
 
-  function formatDuration(ms) {
-    if (ms < 1000) return `${ms}ms`;
-    return `${(ms / 1000).toFixed(2)}s`;
-  }
-
   function detailEl(e) {
     const ms = msOf(e);
-    let statusText = `${e.status_code}`;
-    if (e.status_code === 200) statusText = '200 OK';
-    else if (e.status_code === 403) statusText = '403 Forbidden (Blocked by NineGuard Firewall)';
-    else if (e.status_code === 400) statusText = '400 Bad Request';
-    else if (e.status_code === 401) statusText = '401 Unauthorized';
-    else if (e.status_code === 404) statusText = '404 Not Found';
-    else if (e.status_code === 429) statusText = '429 Too Many Requests (Rate Limited)';
-    else if (e.status_code === 500) statusText = '500 Internal Server Error';
-    else if (e.status_code === 502) statusText = '502 Bad Gateway (Upstream Provider Error)';
-    else if (e.status_code === 503) statusText = '503 Service Unavailable';
-    else if (e.status_code === 504) statusText = '504 Gateway Timeout';
-    else if (e.status_code >= 200 && e.status_code < 300) statusText = `${e.status_code} OK`;
-    else if (e.status_code >= 400 && e.status_code < 500) statusText = `${e.status_code} Client Error`;
-    else if (e.status_code >= 500) statusText = `${e.status_code} Server Error`;
-
     const meta = [
       ['Timestamp', e.timestamp ? new Date(e.timestamp).toLocaleString() : '-'],
-      ['HTTP Status', statusText],
-      ['Model', e.model || '-'],
-      ['Provider', e.provider_id || '(default upstream)'],
-      ['Client Key', e.api_key_name ? `${e.api_key_name} (${e.api_key})` : e.api_key || '-'],
-      ['Latency', formatDuration(e.duration_ms)],
-      ['Prompt Tokens', fmtNum(e.prompt_tokens)],
-      ['Comp Tokens', fmtNum(e.completion_tokens)],
-      ['Total Tokens', fmtNum(e.total_tokens)],
-      ['Mode', e.stream ? 'Server-Sent Events (SSE)' : 'Synchronous JSON'],
-      ['Client IP', e.client_ip || '-'],
+      ['Level', e.level || 'INFO'],
+      ['Source', e.source || 'server'],
     ];
+
+    let attrsObj = null;
+    if (e.attrs) {
+      try { attrsObj = JSON.parse(e.attrs); } catch { /* ignore */ }
+    }
+    if (attrsObj && typeof attrsObj === 'object') {
+      for (const [k, v] of Object.entries(attrsObj)) {
+        meta.push([k, typeof v === 'object' ? JSON.stringify(v) : String(v)]);
+      }
+    }
 
     const action = (ic, text, fn) => h('button', { class: 'btn btn-sm', type: 'button', onclick: fn }, icon(ic), text);
 
     return h('div', { class: 'detail' },
       h('div', { class: 'detail-meta' }, meta.map(([k, v]) => h('div', null, h('span', { class: 'k' }, k), h('span', { class: 'v', title: v }, v || '-')))),
-      e.error_message ? h('div', { class: 'note warn', style: { marginBottom: '10px' } }, icon('alert'), h('b', null, 'Error: '), e.error_message) : null,
-      h('pre', { class: 'detail-msg' }, highlight(e.message || JSON.stringify(e, null, 2), terms)),
+      h('pre', { class: 'detail-msg' }, highlight(e.message || '', terms)),
       h('div', { class: 'detail-actions' },
         action('copy', 'Copy message', () => copy(e.message || '')),
         action('copy', 'Copy JSON', () => copy(JSON.stringify(e, null, 2))),
-        e.api_key_name || e.api_key ? action('key', 'Only this key', () => patch({ key: e.api_key_name || e.api_key })) : null,
-        e.model ? action('box', 'Only this model', () => patch({ model: e.model })) : null,
-        action('crosshair', 'Surrounding requests', () => patch({
-          key: '', model: '', provider: '', status: '', q: '', live: '', date: '',
+        e.source ? action('server', 'Only this source', () => patch({ source: e.source })) : null,
+        action('crosshair', 'Surrounding lines', () => patch({
+          source: '', q: '', lv: '', live: '', date: '',
           range: 'custom', from: toLocalInput(ms - 60e3), to: toLocalInput(ms + 60e3),
         }))));
   }
@@ -420,15 +353,15 @@ export function mount(root) {
   function renderStatus(loading) {
     const liveText = liveState === 'open' ? 'Live: streaming' : '';
     status.replaceChildren(...[
-      h('span', null, loading ? 'Loading...' : `${fmtNum(entries.length)} requests, newest first`),
-      h('span', null, `${availableProviders.length} providers`),
+      h('span', null, loading ? 'Loading...' : `${fmtNum(entries.length)} lines, newest first`),
+      h('span', null, `${availableSources.length} sources`),
       p.live && liveText ? h('span', { class: 'warn' }, icon('activity'), liveText) : null,
       h('span', { class: 'spacer' }),
       cursor && !loading ? h('button', { class: 'btn btn-sm', type: 'button', disabled: loadingMore, onclick: loadMore }, loadingMore ? 'Loading...' : 'Load older') : null,
     ].filter(Boolean));
   }
 
-  loadCatalogs();
+  loadSources();
 
   return {
     update(params) {
@@ -446,7 +379,7 @@ export function mount(root) {
       }
     },
     refresh: () => {
-      loadCatalogs();
+      loadSources();
       reload().then(() => { if (p.live) { stopLive(); startLive(); } });
     },
     destroy() {

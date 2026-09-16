@@ -91,7 +91,7 @@ NineGuard bertindak sebagai gateway tunggal antara AI Coding Agents dan Upstream
 
 ```bash
 # 1. Masuk ke direktori NineGuard
-cd 9router-extended
+cd nineguard
 
 # 2. Build single binary
 go build -o nineguard cmd/nineguard/main.go

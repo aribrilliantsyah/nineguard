@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"nineguard/internal/models"
 	"nineguard/internal/providers"
 	"nineguard/internal/proxy"
+	"nineguard/internal/syslog"
 	"nineguard/internal/traffic"
 	"nineguard/internal/version"
 )
@@ -21,17 +24,19 @@ type Handler struct {
 	auth         *auth.Manager
 	models       *models.Manager
 	traffic      *traffic.Manager
+	syslog       *syslog.Manager
 	keys         *keys.Manager
 	providers    *providers.Manager
 	proxy        *proxy.Proxy
 	routerTarget string
 }
 
-func New(am *auth.Manager, mm *models.Manager, tm *traffic.Manager, km *keys.Manager, pm *providers.Manager, pr *proxy.Proxy, target string) *Handler {
+func New(am *auth.Manager, mm *models.Manager, tm *traffic.Manager, sm *syslog.Manager, km *keys.Manager, pm *providers.Manager, pr *proxy.Proxy, target string) *Handler {
 	return &Handler{
 		auth:         am,
 		models:       mm,
 		traffic:      tm,
+		syslog:       sm,
 		keys:         km,
 		providers:    pm,
 		proxy:        pr,
@@ -311,10 +316,9 @@ func (h *Handler) DeleteModel(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// ── Traffic Handlers ──
+// ── System Logs Handlers (Log Explorer) ──
 
-func (h *Handler) GetTrafficLogs(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
+func parseSyslogFilterParams(q url.Values) syslog.FilterParams {
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
 
@@ -327,27 +331,268 @@ func (h *Handler) GetTrafficLogs(w http.ResponseWriter, r *http.Request) {
 		endDate = q.Get("end_date")
 	}
 
-	params := traffic.FilterParams{
+	search := q.Get("search")
+	if search == "" {
+		search = q.Get("q")
+	}
+
+	return syslog.FilterParams{
 		Period:    q.Get("period"),
 		StartDate: startDate,
 		EndDate:   endDate,
-		Model:     q.Get("model"),
-		APIKey:    q.Get("api_key"),
-		Status:    q.Get("status"),
+		From:      q.Get("from"),
+		To:        q.Get("to"),
+		Source:    q.Get("source"),
+		Level:     q.Get("level"),
+		Search:    search,
+		Cursor:    q.Get("cursor"),
 		Limit:     limit,
 		Offset:    offset,
 	}
+}
 
+func (h *Handler) GetSystemLogs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if q.Get("export") != "" || (q.Get("format") != "" && (q.Get("format") == "csv" || q.Get("format") == "json")) {
+		h.ExportSystemLogs(w, r)
+		return
+	}
+
+	params := parseSyslogFilterParams(q)
+	logs, total, err := h.syslog.QueryLogs(params)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	nextCursor := ""
+	if len(logs) > 0 && len(logs) >= params.Limit {
+		nextCursor = strconv.FormatInt(logs[len(logs)-1].ID, 10)
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"entries":     logs,
+		"logs":        logs,
+		"total":       total,
+		"next_cursor": nextCursor,
+	})
+}
+
+func (h *Handler) GetSystemLogVolume(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	buckets, _ := strconv.Atoi(q.Get("buckets"))
+	if buckets <= 0 {
+		buckets = 60
+	}
+	params := parseSyslogFilterParams(q)
+	vol, err := h.syslog.GetVolume(params, buckets)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, vol)
+}
+
+func (h *Handler) GetSystemLogSources(w http.ResponseWriter, r *http.Request) {
+	sources, err := h.syslog.GetSources()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"sources": sources,
+	})
+}
+
+func (h *Handler) ExportSystemLogs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	format := strings.ToLower(q.Get("format"))
+	if format == "" {
+		format = strings.ToLower(q.Get("export"))
+	}
+	if format != "csv" && format != "json" {
+		format = "csv"
+	}
+
+	params := parseSyslogFilterParams(q)
+	params.Limit = 5000
+	params.Offset = 0
+
+	logs, _, err := h.syslog.QueryLogs(params)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	filename := fmt.Sprintf("nineguard-system-logs-%s.%s", time.Now().UTC().Format("20060102-150405"), format)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+
+	if format == "csv" {
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		cw := csv.NewWriter(w)
+		_ = cw.Write([]string{"timestamp", "level", "source", "message", "attrs"})
+		for _, e := range logs {
+			_ = cw.Write([]string{
+				e.Timestamp.Format(time.RFC3339Nano),
+				e.Level,
+				e.Source,
+				e.Message,
+				e.Attrs,
+			})
+		}
+		cw.Flush()
+	} else {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(logs)
+	}
+}
+
+// ── Traffic Handlers ──
+
+func parseFilterParams(q url.Values) traffic.FilterParams {
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
+
+	startDate := q.Get("start")
+	if startDate == "" {
+		startDate = q.Get("start_date")
+	}
+	endDate := q.Get("end")
+	if endDate == "" {
+		endDate = q.Get("end_date")
+	}
+
+	search := q.Get("search")
+	if search == "" {
+		search = q.Get("q")
+	}
+
+	apiKey := q.Get("api_key")
+	if apiKey == "" {
+		apiKey = q.Get("key")
+	}
+
+	return traffic.FilterParams{
+		Period:    q.Get("period"),
+		StartDate: startDate,
+		EndDate:   endDate,
+		From:      q.Get("from"),
+		To:        q.Get("to"),
+		Model:     q.Get("model"),
+		APIKey:    apiKey,
+		Provider:  q.Get("provider"),
+		Status:    q.Get("status"),
+		Level:     q.Get("level"),
+		Search:    search,
+		Cursor:    q.Get("cursor"),
+		Limit:     limit,
+		Offset:    offset,
+	}
+}
+
+func (h *Handler) GetTrafficLogs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if q.Get("export") != "" || (q.Get("format") != "" && (q.Get("format") == "csv" || q.Get("format") == "json")) {
+		h.ExportTrafficLogs(w, r)
+		return
+	}
+
+	params := parseFilterParams(q)
 	logs, total, err := h.traffic.QueryLogs(params)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
+	nextCursor := ""
+	if len(logs) > 0 && len(logs) >= params.Limit {
+		nextCursor = strconv.FormatInt(logs[len(logs)-1].ID, 10)
+	}
+
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"logs":  logs,
-		"total": total,
+		"entries":     logs,
+		"logs":        logs,
+		"total":       total,
+		"next_cursor": nextCursor,
 	})
+}
+
+func (h *Handler) GetTrafficVolume(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	buckets, _ := strconv.Atoi(q.Get("buckets"))
+	if buckets <= 0 {
+		buckets = 60
+	}
+	params := parseFilterParams(q)
+	vol, err := h.traffic.GetVolume(params, buckets)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, vol)
+}
+
+func (h *Handler) ExportTrafficLogs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	format := strings.ToLower(q.Get("format"))
+	if format == "" {
+		format = strings.ToLower(q.Get("export"))
+	}
+	if format != "csv" && format != "json" {
+		format = "csv"
+	}
+
+	params := parseFilterParams(q)
+	params.Limit = 5000
+	params.Offset = 0
+
+	logs, _, err := h.traffic.QueryLogs(params)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	filename := fmt.Sprintf("nineguard-traffic-%s.%s", time.Now().UTC().Format("20060102-150405"), format)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+
+	if format == "csv" {
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		cw := csv.NewWriter(w)
+		_ = cw.Write([]string{
+			"timestamp", "level", "status_code", "model", "provider", "client_key_name", "client_key",
+			"duration_ms", "prompt_tokens", "completion_tokens", "total_tokens", "stream", "client_ip", "message",
+		})
+		for _, e := range logs {
+			streamStr := "false"
+			if e.Stream {
+				streamStr = "true"
+			}
+			_ = cw.Write([]string{
+				e.Timestamp.Format(time.RFC3339Nano),
+				e.Level,
+				strconv.Itoa(e.StatusCode),
+				e.Model,
+				e.ProviderID,
+				e.APIKeyName,
+				e.APIKey,
+				strconv.Itoa(e.DurationMs),
+				strconv.Itoa(e.PromptTokens),
+				strconv.Itoa(e.CompletionTokens),
+				strconv.Itoa(e.TotalTokens),
+				streamStr,
+				e.ClientIP,
+				e.Message,
+			})
+		}
+		cw.Flush()
+	} else {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(logs)
+	}
 }
 
 func (h *Handler) GetTrafficStats(w http.ResponseWriter, r *http.Request) {

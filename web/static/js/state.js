@@ -1,5 +1,7 @@
 // Shared app state: signed-in user, events, localStorage and the hash router.
 
+export const LEVELS = ['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'];
+
 const read = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
 export const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } };
 export const load = read;

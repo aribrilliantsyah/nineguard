@@ -8,6 +8,8 @@ export function mount(root) {
   let providersList = [];
   let selectedProvider = '';
   let filterText = '';
+  let page = 1;
+  let pageSize = 20;
 
   const tableCard = h('div', { class: 'card table-card' });
 
@@ -19,6 +21,7 @@ export function mount(root) {
     style: { width: '200px' },
     oninput: (e) => {
       filterText = e.target.value.toLowerCase().trim();
+      page = 1;
       renderTable();
     }
   });
@@ -28,6 +31,7 @@ export function mount(root) {
     style: { maxWidth: '200px' },
     onchange: (e) => {
       selectedProvider = e.target.value;
+      page = 1;
       renderTable();
     }
   }, h('option', { value: '' }, 'All Providers'));
@@ -153,7 +157,16 @@ export function mount(root) {
       return;
     }
 
-    const rows = filtered.map((m) => {
+    const total = filtered.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    if (page > totalPages) page = totalPages;
+    if (page < 1) page = 1;
+
+    const startIdx = (page - 1) * pageSize;
+    const endIdx = Math.min(startIdx + pageSize, total);
+    const pagedModels = filtered.slice(startIdx, endIdx);
+
+    const rows = pagedModels.map((m) => {
       const statusBadge = m.enabled
         ? h('span', { class: 'badge ok' }, icon('check'), 'Enabled')
         : h('span', { class: 'badge err' }, icon('alert'), 'Disabled');
@@ -196,6 +209,115 @@ export function mount(root) {
       );
     });
 
+    function changePage(newPage) {
+      page = newPage;
+      renderTable();
+      tableCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    const startNum = startIdx + 1;
+    const countInfo = filtered.length < allModels.length
+      ? `Showing ${startNum}–${endIdx} of ${fmtNum(total)} models (${fmtNum(allModels.length)} total)`
+      : `Showing ${startNum}–${endIdx} of ${fmtNum(total)} models`;
+
+    const prevBtn = h('button', {
+      class: 'btn btn-sm',
+      type: 'button',
+      disabled: page <= 1,
+      onclick: () => changePage(page - 1)
+    }, 'Previous');
+
+    const nextBtn = h('button', {
+      class: 'btn btn-sm',
+      type: 'button',
+      disabled: page >= totalPages,
+      onclick: () => changePage(page + 1)
+    }, 'Next');
+
+    const pageButtons = [];
+    let startP = Math.max(1, page - 2);
+    let endP = Math.min(totalPages, startP + 4);
+    if (endP - startP < 4) {
+      startP = Math.max(1, endP - 4);
+    }
+
+    if (startP > 1) {
+      pageButtons.push(h('button', {
+        class: 'btn btn-sm',
+        type: 'button',
+        style: { minWidth: '28px', padding: '0 6px' },
+        onclick: () => changePage(1)
+      }, '1'));
+      if (startP > 2) {
+        pageButtons.push(h('span', { class: 'muted', style: { padding: '0 2px', fontSize: '11px' } }, '…'));
+      }
+    }
+
+    for (let p = startP; p <= endP; p++) {
+      const isCurrent = p === page;
+      pageButtons.push(h('button', {
+        class: `btn btn-sm ${isCurrent ? 'btn-primary' : ''}`,
+        type: 'button',
+        style: {
+          minWidth: '28px',
+          padding: '0 6px',
+          fontWeight: isCurrent ? '700' : 'normal',
+          pointerEvents: isCurrent ? 'none' : 'auto'
+        },
+        onclick: () => changePage(p)
+      }, String(p)));
+    }
+
+    if (endP < totalPages) {
+      if (endP < totalPages - 1) {
+        pageButtons.push(h('span', { class: 'muted', style: { padding: '0 2px', fontSize: '11px' } }, '…'));
+      }
+      pageButtons.push(h('button', {
+        class: 'btn btn-sm',
+        type: 'button',
+        style: { minWidth: '28px', padding: '0 6px' },
+        onclick: () => changePage(totalPages)
+      }, String(totalPages)));
+    }
+
+    const pageSizeSelect = h('select', {
+      class: 'select',
+      style: { height: '26px', padding: '0 20px 0 8px', fontSize: '11.5px', width: 'auto' },
+      onchange: (e) => {
+        pageSize = Number(e.target.value);
+        page = 1;
+        renderTable();
+      }
+    },
+      h('option', { value: '10', selected: pageSize === 10 }, '10 / page'),
+      h('option', { value: '20', selected: pageSize === 20 }, '20 / page'),
+      h('option', { value: '50', selected: pageSize === 50 }, '50 / page'),
+      h('option', { value: '100', selected: pageSize === 100 }, '100 / page')
+    );
+
+    const paginationBar = h('div', {
+      class: 'table-foot',
+      style: {
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        borderTop: '1px solid var(--border)',
+        padding: '10px 8px 6px',
+        flexWrap: 'wrap',
+        gap: '10px'
+      }
+    },
+      h('span', null, countInfo),
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+        pageSizeSelect,
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
+          prevBtn,
+          ...pageButtons,
+          nextBtn
+        )
+      )
+    );
+
     tableCard.replaceChildren(
       h('div', { class: 'table-wrap' },
         h('table', { class: 'table' },
@@ -212,7 +334,8 @@ export function mount(root) {
           ),
           h('tbody', null, ...rows)
         )
-      )
+      ),
+      paginationBar
     );
   }
 
