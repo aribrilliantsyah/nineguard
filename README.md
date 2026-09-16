@@ -83,13 +83,14 @@ NineGuard bertindak sebagai gateway tunggal antara AI Coding Agents dan Upstream
 | **Interactive Trend Line Chart** | Visualisasi throughput request, volume token, dan latensi respons dengan grafik interaktif. |
 | **Usage Reports & Breakdown** | Audit "siapa saja pemakai tokennya" dengan filter periode preset (Today, 7D, 30D, Month, Last Month) dan Custom Date Range. |
 | **Traffic Explorer** | Log real-time berdensitas tinggi dengan filter nama key client, status HTTP, dan live tail. |
+| **Interactive TUI & System Tray** | Antarmuka terminal interaktif dan icon tray Windows/macOS/Linux untuk kemudahan monitoring & akses cepat ke dashboard. |
 | **Agent Setup Guides** | Panduan integrasi siap salin untuk Cursor IDE, Cline, Continue.dev, Pi Agent, Python, Node.js, dan cURL. |
 
 ---
 
 ## Instalasi & Menjalankan
 
-### Cara 1: Menggunakan Binary Go
+### Cara 1: Menggunakan Binary Go (Linux & macOS)
 
 ```bash
 # 1. Masuk ke direktori NineGuard
@@ -104,7 +105,55 @@ go build -o nineguard cmd/nineguard/main.go
 
 Buka browser di **`http://localhost:8080/`**. Pada kunjungan pertama, buat akun administrator Anda.
 
-### Cara 2: Menggunakan Docker
+### Cara 2: Build & Menjalankan di Windows
+
+NineGuard dirancang sebagai single-binary mandiri dengan SQLite murni (`modernc.org/sqlite`). Anda **tidak memerlukan compiler C (CGO / MinGW / GCC)** untuk mengompilasinya di Windows.
+
+#### 1. Build Langsung di Windows (PowerShell / Command Prompt)
+
+Pastikan Go 1.22+ sudah terpasang di sistem Windows Anda:
+
+```powershell
+# 1. Masuk ke direktori NineGuard
+cd nineguard
+
+# 2. Build binary executable
+go build -o nineguard.exe cmd/nineguard/main.go
+
+# 3. Jalankan NineGuard (Interactive TUI Menu)
+.\nineguard.exe
+```
+
+> **Tip (Background / System Tray Mode Tanpa Jendela Terminal):**
+> Jika Anda ingin menjalankan NineGuard di latar belakang dan langsung masuk ke System Tray tanpa memunculkan jendela console (Command Prompt) hitam, gunakan flag linker `-H=windowsgui`:
+> ```powershell
+> go build -ldflags="-H=windowsgui" -o nineguard.exe cmd/nineguard/main.go
+> .\nineguard.exe -t
+> ```
+
+#### 2. Cross-Compile untuk Windows dari Linux / macOS
+
+Anda dapat mengompilasi binary `.exe` untuk Windows langsung dari Linux atau macOS:
+
+```bash
+# Console / Interactive TUI mode
+GOOS=windows GOARCH=amd64 go build -o nineguard.exe cmd/nineguard/main.go
+
+# GUI / System Tray mode (tanpa popup jendela console)
+GOOS=windows GOARCH=amd64 go build -ldflags="-H=windowsgui" -o nineguard.exe cmd/nineguard/main.go
+```
+
+#### 3. Mode Eksekusi CLI di Windows
+
+| Perintah | Mode | Keterangan |
+|---|---|---|
+| `.\nineguard.exe` | **Interactive TUI** | Menampilkan antarmuka terminal interaktif dengan ringkasan status, pintasan browser, dan live log. |
+| `.\nineguard.exe -t` / `--tray` | **System Tray** | Berjalan di tray taskbar Windows. Klik ikon NineGuard untuk membuka dashboard atau keluar. |
+| `.\nineguard.exe -l` / `--logs` | **Live Logs** | Menjalankan server dan langsung streaming log HTTP/traffic di terminal. |
+| `.\nineguard.exe -d` / `--daemon` | **Headless / Service** | Mode daemon tanpa UI terminal (cocok untuk Task Scheduler atau Windows Service). |
+| `.\nineguard.exe -p 9090` | **Custom Port** | Mengubah port listen server HTTP (default: `8080`). |
+
+### Cara 3: Menggunakan Docker
 
 ```bash
 # 1. Build image Docker
