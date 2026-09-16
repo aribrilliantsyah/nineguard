@@ -153,6 +153,15 @@ func TestRecordAndQueryLogs(t *testing.T) {
 		t.Errorf("expected 1 search result, got %d", totalSearch)
 	}
 
+	// Filter by ClientIP
+	ipLogs, totalIP, err := mgr.QueryLogs(FilterParams{ClientIP: "192.168.1.50"})
+	if err != nil {
+		t.Fatalf("QueryLogs ClientIP failed: %v", err)
+	}
+	if totalIP != 1 || len(ipLogs) != 1 {
+		t.Errorf("expected 1 log for IP 192.168.1.50, got %d", totalIP)
+	}
+
 	// Test GetVolume
 	now := time.Now()
 	vol, err := mgr.GetVolume(FilterParams{
@@ -165,7 +174,7 @@ func TestRecordAndQueryLogs(t *testing.T) {
 	if len(vol.Buckets) != 10 {
 		t.Errorf("expected 10 buckets, got %d", len(vol.Buckets))
 	}
-	if vol.Totals["2xx"] != 1 || vol.Totals["4xx"] != 1 || vol.Totals["5xx"] != 1 {
-		t.Errorf("expected 1 2xx, 1 4xx, 1 5xx, got totals: %+v", vol.Totals)
+	if vol.Totals["2xx"] != 1 || vol.Totals["403"] != 1 || vol.Totals["5xx"] != 1 {
+		t.Errorf("expected 1 2xx, 1 403, 1 5xx, got totals: %+v", vol.Totals)
 	}
 }

@@ -96,7 +96,18 @@ function renderLogin() {
   const err = h('p', { class: 'form-error' });
   const btn = submit('Sign in');
 
-  const form = h('form', { class: 'auth-form' }, user.el, pass.el, btn, err);
+  const forgotWrap = h('div', { style: { display: 'flex', justifyContent: 'flex-end', margin: '-4px 0 8px' } },
+    h('a', {
+      href: '#recover',
+      style: { fontSize: '11.5px', color: 'var(--accent)', textDecoration: 'none', cursor: 'pointer' },
+      onclick: (e) => {
+        e.preventDefault();
+        renderRecovery(user.input.value.trim());
+      }
+    }, 'Forgot password?')
+  );
+
+  const form = h('form', { class: 'auth-form' }, user.el, pass.el, forgotWrap, btn, err);
 
   form.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -121,6 +132,112 @@ function renderLogin() {
     h('p', { class: 'auth-hint' }, icon('lock'), ' Session stays signed in for 30 days.')
   );
   pass.input.focus();
+}
+
+// ── Password Recovery Flow ──
+function renderRecovery(initialUsername = 'admin') {
+  wrap.classList.remove('wide');
+  const user = field('Username', { autocomplete: 'username', value: initialUsername || 'admin' });
+  const err = h('p', { class: 'form-error' });
+  const step1Btn = submit('Continue');
+  const backLink = h('p', { class: 'auth-hint', style: { marginTop: '12px' } },
+    h('a', {
+      href: '#login',
+      style: { color: 'var(--accent)', textDecoration: 'none', cursor: 'pointer', fontSize: '12px' },
+      onclick: (e) => { e.preventDefault(); renderLogin(); }
+    }, '← Back to sign in')
+  );
+
+  const form = h('form', { class: 'auth-form' }, user.el, step1Btn, err);
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    err.textContent = '';
+    const username = user.input.value.trim();
+    if (!username) {
+      err.textContent = 'Please enter your username.';
+      return;
+    }
+    busy(step1Btn, 'Checking...', async () => {
+      let data;
+      try {
+        const resp = await fetch('/api/v1/auth/recovery?username=' + encodeURIComponent(username));
+        data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || 'Failed to check recovery status');
+      } catch (err2) {
+        err.textContent = err2.message;
+        return;
+      }
+      renderRecoveryStep2(username, data.question);
+    });
+  });
+
+  card.replaceChildren(
+    title('Recover Password', 'Answer your recovery question to reset your password'),
+    form,
+    backLink
+  );
+  user.input.focus();
+}
+
+function renderRecoveryStep2(username, question) {
+  const qBox = h('div', { class: 'card', style: { padding: '12px 14px', marginBottom: '12px', background: 'var(--panel-2)' } },
+    h('div', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--muted)', marginBottom: '4px' } }, 'Recovery Question'),
+    h('div', { class: 'strong', style: { fontSize: '13px', color: 'var(--text)' } }, question)
+  );
+
+  const ans = field('Your Secret Answer', { autocomplete: 'off', placeholder: 'Enter answer' });
+  const p1 = field('New Password', { type: 'password', minlength: 6, autocomplete: 'new-password', placeholder: 'Min 6 characters' });
+  const p2 = field('Confirm New Password', { type: 'password', minlength: 6, autocomplete: 'new-password', placeholder: 'Re-enter new password' });
+  const err = h('p', { class: 'form-error' });
+  const btn = submit('Reset Password');
+  const backLink = h('p', { class: 'auth-hint', style: { marginTop: '12px' } },
+    h('a', {
+      href: '#login',
+      style: { color: 'var(--accent)', textDecoration: 'none', cursor: 'pointer', fontSize: '12px' },
+      onclick: (e) => { e.preventDefault(); renderLogin(); }
+    }, '← Back to sign in')
+  );
+
+  const form = h('form', { class: 'auth-form' }, qBox, ans.el, p1.el, p2.el, btn, err);
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    err.textContent = '';
+    if (p1.input.value !== p2.input.value) {
+      err.textContent = 'New passwords do not match.';
+      return;
+    }
+    busy(btn, 'Resetting...', async () => {
+      try {
+        await post('/auth/recovery', {
+          username,
+          answer: ans.input.value.trim(),
+          new_password: p1.input.value,
+        });
+        card.replaceChildren(
+          title('Password Reset', 'Your password has been changed successfully'),
+          h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px', marginTop: '14px' } },
+            h('p', { class: 'auth-hint' }, icon('check'), ' Sign in using your new password.'),
+            h('button', {
+              class: 'btn btn-primary btn-block',
+              type: 'button',
+              onclick: () => renderLogin()
+            }, 'Sign in now')
+          )
+        );
+      } catch (err2) {
+        err.textContent = err2.message;
+      }
+    });
+  });
+
+  card.replaceChildren(
+    title('Security Question', `Resetting password for ${username}`),
+    form,
+    backLink
+  );
+  ans.input.focus();
 }
 
 // Pre-render immediately based on pathname so there is zero skeleton delay

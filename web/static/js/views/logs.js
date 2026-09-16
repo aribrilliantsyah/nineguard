@@ -1,6 +1,6 @@
 // Log Explorer: Kibana-style system, server and gateway logs discovery.
 import { api } from '../api.js';
-import { h, icon, fmtTime, fmtNum, localDate, tzLabel, msOf, podColor, copy, toast, menu, emptyState, skeletonRows, debounce } from '../ui.js';
+import { h, icon, fmtTime, fmtNum, localDate, tzLabel, msOf, podColor, copy, toast, menu, emptyState, skeletonRows, debounce, searchableSelect } from '../ui.js';
 import { store, patchRoute, LEVELS } from '../state.js';
 import { queryParams, rangeControls, searchTerms, highlight, toLocalInput, iso } from '../filters.js';
 import { volumeChart } from '../chart.js';
@@ -28,9 +28,13 @@ export function mount(root) {
   // Range controls with date stepper and custom time pickers
   const range = rangeControls((c) => patch(c.range === 'custom' || c.from || c.date ? { ...c, live: '' } : c));
 
-  const sourceSel = h('select', {
-    class: 'select', 'aria-label': 'Log Source',
-    onchange: (e) => patch({ source: e.target.value }),
+  const sourceSel = searchableSelect({
+    placeholder: 'All sources',
+    searchPlaceholder: 'Search log sources...',
+    ariaLabel: 'Log Source',
+    clearable: true,
+    compact: true,
+    onChange: (val) => patch({ source: val }),
   });
 
   const clearBtn = h('button', {
@@ -108,6 +112,10 @@ export function mount(root) {
   }
 
   function fill(sel, all, options, value) {
+    if (sel.setOptions) {
+      sel.setOptions(options, value, all);
+      return;
+    }
     const opts = value && !options.includes(value) ? [value, ...options] : options;
     sel.replaceChildren(h('option', { value: '' }, all), ...opts.map((o) => h('option', { value: o }, o)));
     sel.value = value || '';

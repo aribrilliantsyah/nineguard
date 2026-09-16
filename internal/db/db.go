@@ -43,6 +43,8 @@ func (d *DB) migrate() error {
 		display_name TEXT,
 		password_hash TEXT NOT NULL,
 		role TEXT NOT NULL DEFAULT 'operator',
+		recovery_question TEXT DEFAULT '',
+		recovery_answer_hash TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		last_login_at DATETIME
 	);
@@ -86,7 +88,18 @@ func (d *DB) migrate() error {
 		prefix TEXT NOT NULL,
 		name TEXT NOT NULL,
 		is_active INTEGER DEFAULT 1,
+		model_access_mode TEXT DEFAULT 'all',
+		model_group_ids TEXT DEFAULT '[]',
 		allowed_models TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS model_groups (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		description TEXT DEFAULT '',
+		models TEXT NOT NULL DEFAULT '[]',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
@@ -129,13 +142,18 @@ func (d *DB) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_syslogs_timestamp ON system_logs(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_syslogs_level ON system_logs(level);
 	CREATE INDEX IF NOT EXISTS idx_syslogs_source ON system_logs(source);
+	CREATE INDEX IF NOT EXISTS idx_model_groups_name ON model_groups(name);
 	`
 	if _, err := d.Exec(schema); err != nil {
 		return err
 	}
 
 	// For existing databases, ensure columns exist
+	_, _ = d.Exec("ALTER TABLE users ADD COLUMN recovery_question TEXT DEFAULT ''")
+	_, _ = d.Exec("ALTER TABLE users ADD COLUMN recovery_answer_hash TEXT DEFAULT ''")
 	_, _ = d.Exec("ALTER TABLE api_keys ADD COLUMN allowed_models TEXT DEFAULT ''")
+	_, _ = d.Exec("ALTER TABLE api_keys ADD COLUMN model_access_mode TEXT DEFAULT 'all'")
+	_, _ = d.Exec("ALTER TABLE api_keys ADD COLUMN model_group_ids TEXT DEFAULT '[]'")
 	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN api_key_name TEXT")
 	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN provider_id TEXT")
 	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN level TEXT DEFAULT ''")
@@ -147,5 +165,20 @@ func (d *DB) migrate() error {
 	_, _ = d.Exec("CREATE INDEX IF NOT EXISTS idx_traffic_status ON traffic_logs(status_code)")
 	_, _ = d.Exec("CREATE INDEX IF NOT EXISTS idx_traffic_provider ON traffic_logs(provider_id)")
 	_, _ = d.Exec("CREATE INDEX IF NOT EXISTS idx_models_provider ON models(provider_id)")
+
+	// Ensure at most one default provider exists across the database
+	_, _ = d.Exec(`
+		UPDATE providers SET is_default = 0
+		WHERE id NOT IN (
+			SELECT id FROM providers WHERE is_default = 1 ORDER BY updated_at DESC, created_at DESC LIMIT 1
+		)
+	`)
+	// If providers exist but none is default, set the first active one as default
+	_, _ = d.Exec(`
+		UPDATE providers SET is_default = 1
+		WHERE (SELECT COUNT(*) FROM providers WHERE is_default = 1) = 0
+		AND id = (SELECT id FROM providers WHERE is_active = 1 ORDER BY created_at ASC LIMIT 1)
+	`)
+
 	return nil
 }

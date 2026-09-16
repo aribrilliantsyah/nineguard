@@ -2,7 +2,7 @@
 // High-density, precision telemetry matching the clean guard & firewall monitoring reference.
 import { api } from '../api.js';
 import { h, icon, emptyState, fmtNum, fmtCompact, fmtAgo } from '../ui.js';
-import { setRoute } from '../state.js';
+import { setRoute, store, on } from '../state.js';
 
 // ── Math & Interpolation: Monotone Cubic Hermite Spline (Fritsch-Carlson) ──
 // Guarantees zero-overshoot, zero dips below 0, and no looping curves when values fluctuate.
@@ -107,6 +107,48 @@ export function mount(root) {
   const rowRecentLogs = h('div', { class: 'card mt' });
   const errorCard = h('div', { class: 'card table-card', style: { display: 'none' } });
 
+  let dismissedBanner = false;
+  try {
+    dismissedBanner = sessionStorage.getItem('nineguard_dismiss_recovery_banner') === '1';
+  } catch {}
+
+  const recoveryBanner = h('div', { class: 'dashboard-recovery-banner', style: { display: 'none' } });
+
+  function updateRecoveryBanner() {
+    if (store.authEnabled && store.role === 'admin' && !store.hasRecovery && !dismissedBanner) {
+      recoveryBanner.style.display = 'flex';
+      recoveryBanner.replaceChildren(
+        h('div', { class: 'banner-icon-wrap' }, icon('shield')),
+        h('div', { class: 'banner-body' },
+          h('div', { class: 'banner-title' }, 'Set a recovery question in your profile'),
+          h('div', { class: 'banner-desc' }, 'A lost password or phone cannot be recovered without another admin unless a recovery question is configured.')
+        ),
+        h('div', { class: 'banner-actions' },
+          h('button', {
+            type: 'button',
+            class: 'btn btn-primary btn-sm',
+            onclick: () => setRoute('profile'),
+          }, icon('key'), 'Set Up Recovery Question'),
+          h('button', {
+            type: 'button',
+            class: 'btn btn-sm banner-dismiss-btn',
+            title: 'Dismiss reminder',
+            onclick: () => {
+              dismissedBanner = true;
+              try { sessionStorage.setItem('nineguard_dismiss_recovery_banner', '1'); } catch {}
+              recoveryBanner.style.display = 'none';
+            }
+          }, icon('x'))
+        )
+      );
+    } else {
+      recoveryBanner.style.display = 'none';
+      recoveryBanner.replaceChildren();
+    }
+  }
+
+  const unbindUser = on('user', updateRecoveryBanner);
+
   // ── Period Switcher ──
   const periods = [
     { id: '7d', label: '7 days' },
@@ -140,6 +182,7 @@ export function mount(root) {
         h('div', { class: 'period' }, ...periodButtons)
       )
     ),
+    recoveryBanner,
     errorCard,
     kpiRow,
     rowVolumeMix,
@@ -1015,12 +1058,17 @@ export function mount(root) {
 
     // 5. Recent Guard Activity & Audit Logs Row (Direct Live Usage Feed)
     rowRecentLogs.replaceChildren(renderRecentLogsCard(cachedLogs));
+
+    updateRecoveryBanner();
   }
 
   load();
   return {
     update() {},
     refresh: load,
-    destroy() { alive = false; }
+    destroy() {
+      alive = false;
+      unbindUser();
+    }
   };
 }

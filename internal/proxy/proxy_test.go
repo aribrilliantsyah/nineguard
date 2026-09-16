@@ -73,13 +73,13 @@ func TestProxyModelPermissions(t *testing.T) {
 	}
 
 	// 3. Create restricted key (only allowed "mock/gpt-4o")
-	restrictedKey, err := keysMgr.CreateKey("Restricted Agent", []string{"mock/gpt-4o"})
+	restrictedKey, err := keysMgr.CreateKey("Restricted Agent", "custom", nil, []string{"mock/gpt-4o"})
 	if err != nil {
 		t.Fatalf("failed to create restricted key: %v", err)
 	}
 
 	// Create unrestricted key
-	unrestrictedKey, err := keysMgr.CreateKey("Unrestricted Agent", nil)
+	unrestrictedKey, err := keysMgr.CreateKey("Unrestricted Agent", "all", nil, nil)
 	if err != nil {
 		t.Fatalf("failed to create unrestricted key: %v", err)
 	}

@@ -6,6 +6,7 @@ import (
 
 	"nineguard/internal/db"
 	"nineguard/internal/keys"
+	"nineguard/internal/models"
 )
 
 func TestModelAllowedLogic(t *testing.T) {
@@ -114,7 +115,7 @@ func TestKeyManagerCRUD(t *testing.T) {
 	mgr := keys.NewManager(database, "")
 
 	// 1. Create a key with restricted models
-	k1, err := mgr.CreateKey("Test Dev Key", []string{"gpt-4o", "claude-3-5"})
+	k1, err := mgr.CreateKey("Test Dev Key", "custom", nil, []string{"gpt-4o", "claude-3-5"})
 	if err != nil {
 		t.Fatalf("failed to create key: %v", err)
 	}
@@ -135,7 +136,7 @@ func TestKeyManagerCRUD(t *testing.T) {
 	}
 
 	// 3. Update key
-	updated, err := mgr.UpdateKey(k1.ID, "Test Dev Key Renamed", []string{"*"})
+	updated, err := mgr.UpdateKey(k1.ID, "Test Dev Key Renamed", "all", nil, []string{"*"})
 	if err != nil {
 		t.Fatalf("failed to update key: %v", err)
 	}
@@ -159,5 +160,87 @@ func TestKeyManagerCRUD(t *testing.T) {
 	}
 	if len(list) < 2 { // default agent key + test key
 		t.Errorf("expected at least 2 keys in list, got %d", len(list))
+	}
+}
+
+func TestModelGroupDynamicLinking(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test_groups.db")
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+	defer database.Close()
+
+	modelsMgr := models.NewManager(database)
+	keysMgr := keys.NewManager(database, "")
+
+	// 1. Create two model groups
+	grpGPT, err := modelsMgr.CreateGroup("GPT Group", "GPT models", []string{"gpt-4o", "gpt-4o-mini"})
+	if err != nil {
+		t.Fatalf("failed to create GPT group: %v", err)
+	}
+
+	grpClaude, err := modelsMgr.CreateGroup("Claude Group", "Claude models", []string{"claude-3-5-sonnet"})
+	if err != nil {
+		t.Fatalf("failed to create Claude group: %v", err)
+	}
+
+	// Refresh group cache in keys manager
+	keysMgr.ReloadGroupCache()
+
+	// 2. Create an API key linked to both groups (Multi-group)
+	keyMulti, err := keysMgr.CreateKey("Multi-Agent Key", "group", []string{grpGPT.ID, grpClaude.ID}, nil)
+	if err != nil {
+		t.Fatalf("failed to create multi-group key: %v", err)
+	}
+
+	validated, ok := keysMgr.ValidateClientKey(keyMulti.RawKey)
+	if !ok || validated == nil {
+		t.Fatalf("failed to validate multi-group key")
+	}
+
+	// Should allow models from both groups
+	if !validated.IsModelAllowed("gpt-4o") {
+		t.Errorf("expected gpt-4o to be allowed from GPT group")
+	}
+	if !validated.IsModelAllowed("gpt-4o-mini") {
+		t.Errorf("expected gpt-4o-mini to be allowed from GPT group")
+	}
+	if !validated.IsModelAllowed("claude-3-5-sonnet") {
+		t.Errorf("expected claude-3-5-sonnet to be allowed from Claude group")
+	}
+	if validated.IsModelAllowed("deepseek-chat") {
+		t.Errorf("expected deepseek-chat to be disallowed")
+	}
+
+	// 3. Dynamic Reference Test: Add a new model to grpGPT (e.g. "o3-mini")
+	_, err = modelsMgr.UpdateGroup(grpGPT.ID, grpGPT.Name, grpGPT.Description, []string{"gpt-4o", "gpt-4o-mini", "o3-mini"})
+	if err != nil {
+		t.Fatalf("failed to update group: %v", err)
+	}
+	keysMgr.ReloadGroupCache()
+
+	// Without touching keyMulti, it should NOW dynamically allow "o3-mini"!
+	if !validated.IsModelAllowed("o3-mini") {
+		t.Errorf("expected o3-mini to be dynamically allowed after group update without modifying the key!")
+	}
+
+	// 4. Test delete protection: cannot delete group while linked to key
+	err = modelsMgr.DeleteGroup(grpGPT.ID)
+	if err == nil {
+		t.Errorf("expected error deleting group that is actively linked to an API key")
+	}
+
+	// Unlink group from key
+	_, err = keysMgr.UpdateKey(keyMulti.ID, keyMulti.Name, "group", []string{grpClaude.ID}, nil)
+	if err != nil {
+		t.Fatalf("failed to unlink group from key: %v", err)
+	}
+
+	// Now delete should succeed
+	err = modelsMgr.DeleteGroup(grpGPT.ID)
+	if err != nil {
+		t.Errorf("expected successful group deletion after unlinking: %v", err)
 	}
 }

@@ -15,18 +15,22 @@ import (
 )
 
 type KeyInfo struct {
-	ID            string    `json:"id"`
-	Key           string    `json:"key"` // masked key for display
-	RawKey        string    `json:"raw_key,omitempty"`
-	Prefix        string    `json:"prefix"`
-	Name          string    `json:"name"`
-	IsActive      bool      `json:"is_active"`
-	AllowedModels []string  `json:"allowed_models"`
-	TotalRequests int       `json:"total_requests"`
-	TotalTokens   int       `json:"total_tokens"`
-	LastUsedAt    *string   `json:"last_used_at,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID              string    `json:"id"`
+	Key             string    `json:"key"` // masked key for display
+	RawKey          string    `json:"raw_key,omitempty"`
+	Prefix          string    `json:"prefix"`
+	Name            string    `json:"name"`
+	IsActive        bool      `json:"is_active"`
+	ModelAccessMode string    `json:"model_access_mode"` // "all", "group", "custom"
+	ModelGroupIDs   []string  `json:"model_group_ids"`
+	AllowedModels   []string  `json:"allowed_models"`
+	TotalRequests   int       `json:"total_requests"`
+	TotalTokens     int       `json:"total_tokens"`
+	LastUsedAt      *string   `json:"last_used_at,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+
+	manager *Manager `json:"-"`
 }
 
 func ParseAllowedModels(raw string) []string {
@@ -79,11 +83,110 @@ func SerializeAllowedModels(models []string) string {
 }
 
 func (ki *KeyInfo) IsAllModelsAllowed() bool {
-	if ki == nil || len(ki.AllowedModels) == 0 {
+	if ki == nil {
 		return true
 	}
-	for _, m := range ki.AllowedModels {
-		if m == "*" || strings.EqualFold(m, "all") {
+	mode := ki.ModelAccessMode
+	if mode == "" {
+		if len(ki.ModelGroupIDs) > 0 {
+			mode = "group"
+		} else if len(ki.AllowedModels) > 0 {
+			mode = "custom"
+		} else {
+			mode = "all"
+		}
+	}
+
+	switch mode {
+	case "all":
+		return true
+	case "group":
+		for _, m := range ki.GetEffectiveAllowedModels() {
+			if m == "*" || strings.EqualFold(m, "all") {
+				return true
+			}
+		}
+		return false
+	case "custom":
+		if len(ki.AllowedModels) == 0 {
+			return true
+		}
+		for _, m := range ki.AllowedModels {
+			if m == "*" || strings.EqualFold(m, "all") {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
+	}
+}
+
+func (ki *KeyInfo) GetEffectiveAllowedModels() []string {
+	if ki == nil {
+		return []string{"*"}
+	}
+	mode := ki.ModelAccessMode
+	if mode == "" {
+		if len(ki.ModelGroupIDs) > 0 {
+			mode = "group"
+		} else if len(ki.AllowedModels) > 0 {
+			mode = "custom"
+		} else {
+			mode = "all"
+		}
+	}
+
+	switch mode {
+	case "all":
+		return []string{"*"}
+	case "group":
+		if ki.manager != nil {
+			return ki.manager.GetModelsForGroups(ki.ModelGroupIDs)
+		}
+		return ki.AllowedModels
+	case "custom":
+		return ki.AllowedModels
+	default:
+		return []string{"*"}
+	}
+}
+
+func matchModelPattern(allowed, model string) bool {
+	allowed = strings.TrimSpace(allowed)
+	if allowed == "*" || allowed == "" || strings.EqualFold(allowed, "all") {
+		return true
+	}
+	// Exact match (case-insensitive)
+	if strings.EqualFold(allowed, model) {
+		return true
+	}
+	// Wildcard match e.g. "prefix/*"
+	if strings.HasSuffix(allowed, "/*") {
+		prefix := strings.TrimSuffix(allowed, "/*")
+		if strings.HasPrefix(strings.ToLower(model), strings.ToLower(prefix)+"/") {
+			return true
+		}
+	}
+	// Suffix match e.g. "*.flash"
+	if strings.HasPrefix(allowed, "*.") {
+		suffix := strings.TrimPrefix(allowed, "*")
+		if strings.HasSuffix(strings.ToLower(model), strings.ToLower(suffix)) {
+			return true
+		}
+	}
+	// Provider prefix matching:
+	// 1. Key allows "gpt-4o", but request is "provider/gpt-4o"
+	if strings.Contains(model, "/") {
+		parts := strings.SplitN(model, "/", 2)
+		if strings.EqualFold(parts[1], allowed) {
+			return true
+		}
+	}
+	// 2. Key allows "provider/gpt-4o", but request is "gpt-4o"
+	if strings.Contains(allowed, "/") {
+		parts := strings.SplitN(allowed, "/", 2)
+		if strings.EqualFold(parts[1], model) {
 			return true
 		}
 	}
@@ -98,43 +201,13 @@ func (ki *KeyInfo) IsModelAllowed(model string) bool {
 	if model == "" {
 		return true
 	}
-	for _, allowed := range ki.AllowedModels {
-		allowed = strings.TrimSpace(allowed)
-		if allowed == "*" || allowed == "" || strings.EqualFold(allowed, "all") {
+	effective := ki.GetEffectiveAllowedModels()
+	if len(effective) == 0 {
+		return false
+	}
+	for _, allowed := range effective {
+		if matchModelPattern(allowed, model) {
 			return true
-		}
-		// Exact match (case-insensitive)
-		if strings.EqualFold(allowed, model) {
-			return true
-		}
-		// Wildcard match e.g. "prefix/*"
-		if strings.HasSuffix(allowed, "/*") {
-			prefix := strings.TrimSuffix(allowed, "/*")
-			if strings.HasPrefix(strings.ToLower(model), strings.ToLower(prefix)+"/") {
-				return true
-			}
-		}
-		// Suffix match e.g. "*.flash"
-		if strings.HasPrefix(allowed, "*.") {
-			suffix := strings.TrimPrefix(allowed, "*")
-			if strings.HasSuffix(strings.ToLower(model), strings.ToLower(suffix)) {
-				return true
-			}
-		}
-		// Provider prefix matching:
-		// 1. Key allows "gpt-4o", but request is "provider/gpt-4o"
-		if strings.Contains(model, "/") {
-			parts := strings.SplitN(model, "/", 2)
-			if strings.EqualFold(parts[1], allowed) {
-				return true
-			}
-		}
-		// 2. Key allows "provider/gpt-4o", but request is "gpt-4o"
-		if strings.Contains(allowed, "/") {
-			parts := strings.SplitN(allowed, "/", 2)
-			if strings.EqualFold(parts[1], model) {
-				return true
-			}
 		}
 	}
 	return false
@@ -145,6 +218,7 @@ type Manager struct {
 	mu          sync.RWMutex
 	upstreamKey string
 	cache       map[string]*KeyInfo // rawKey -> KeyInfo
+	groupCache  map[string][]string // groupID -> []models
 }
 
 func NewManager(database *db.DB, defaultRouterAPIKey string) *Manager {
@@ -152,6 +226,7 @@ func NewManager(database *db.DB, defaultRouterAPIKey string) *Manager {
 		db:          database,
 		upstreamKey: strings.TrimSpace(defaultRouterAPIKey),
 		cache:       make(map[string]*KeyInfo),
+		groupCache:  make(map[string][]string),
 	}
 
 	// 1. Load Upstream 9router key from database settings (overrides env if set in UI)
@@ -161,13 +236,60 @@ func NewManager(database *db.DB, defaultRouterAPIKey string) *Manager {
 		m.upstreamKey = strings.TrimSpace(dbUpstream)
 	}
 
-	// 2. Load NineGuard API keys from database into cache
+	// 2. Load Model Groups cache
+	m.ReloadGroupCache()
+
+	// 3. Load NineGuard API keys from database into cache
 	m.loadLocalCache()
 
-	// 3. Ensure at least one default NineGuard API key exists if database is empty
+	// 4. Ensure at least one default NineGuard API key exists if database is empty
 	m.ensureDefaultKey()
 
 	return m
+}
+
+// ReloadGroupCache refreshes the in-memory cache of model groups
+func (m *Manager) ReloadGroupCache() {
+	rows, err := m.db.Query("SELECT id, models FROM model_groups")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	newCache := make(map[string][]string)
+	for rows.Next() {
+		var id, rawModels string
+		if err := rows.Scan(&id, &rawModels); err == nil {
+			newCache[id] = ParseAllowedModels(rawModels)
+		}
+	}
+
+	m.mu.Lock()
+	m.groupCache = newCache
+	m.mu.Unlock()
+}
+
+// GetModelsForGroups resolves the union of models for the given group IDs
+func (m *Manager) GetModelsForGroups(groupIDs []string) []string {
+	if len(groupIDs) == 0 {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	seen := make(map[string]bool)
+	var result []string
+	for _, gid := range groupIDs {
+		if models, ok := m.groupCache[gid]; ok {
+			for _, mod := range models {
+				if !seen[mod] {
+					seen[mod] = true
+					result = append(result, mod)
+				}
+			}
+		}
+	}
+	return result
 }
 
 func MaskKey(key string) string {
@@ -260,7 +382,13 @@ func (m *Manager) GetUpstreamInfo() map[string]interface{} {
 // ── NineGuard Client API Keys Management ──
 
 func (m *Manager) loadLocalCache() {
-	rows, err := m.db.Query("SELECT id, key, prefix, name, is_active, COALESCE(allowed_models, '') FROM api_keys")
+	rows, err := m.db.Query(`
+		SELECT id, key, prefix, name, is_active, 
+		       COALESCE(model_access_mode, 'all'), 
+		       COALESCE(model_group_ids, '[]'), 
+		       COALESCE(allowed_models, '') 
+		FROM api_keys
+	`)
 	if err != nil {
 		return
 	}
@@ -272,11 +400,21 @@ func (m *Manager) loadLocalCache() {
 	for rows.Next() {
 		var ki KeyInfo
 		var isAct int
-		var rawModels string
-		if err := rows.Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct, &rawModels); err == nil {
+		var mode, rawGroupIDs, rawModels string
+		if err := rows.Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct, &mode, &rawGroupIDs, &rawModels); err == nil {
 			ki.IsActive = (isAct == 1)
 			ki.Key = MaskKey(ki.RawKey)
+			ki.ModelAccessMode = mode
+			ki.ModelGroupIDs = ParseAllowedModels(rawGroupIDs)
 			ki.AllowedModels = ParseAllowedModels(rawModels)
+			ki.manager = m
+			if ki.ModelAccessMode == "" {
+				if len(ki.AllowedModels) > 0 {
+					ki.ModelAccessMode = "custom"
+				} else {
+					ki.ModelAccessMode = "all"
+				}
+			}
 			m.cache[ki.RawKey] = &ki
 		}
 	}
@@ -286,16 +424,27 @@ func (m *Manager) ensureDefaultKey() {
 	var count int
 	_ = m.db.QueryRow("SELECT COUNT(*) FROM api_keys").Scan(&count)
 	if count == 0 {
-		_, _ = m.CreateKey("Default Agent Key", nil)
+		_, _ = m.CreateKey("Default Agent Key", "all", nil, nil)
 		slog.Info("created initial default NineGuard API key")
 	}
 }
 
-// CreateKey issues a new NineGuard API key with customizable allowed models
-func (m *Manager) CreateKey(name string, allowedModels []string) (*KeyInfo, error) {
+// CreateKey issues a new NineGuard API key with customizable model access mode, groups, and allowed models
+func (m *Manager) CreateKey(name, modelAccessMode string, modelGroupIDs, allowedModels []string) (*KeyInfo, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "Agent Key"
+	}
+
+	modelAccessMode = strings.ToLower(strings.TrimSpace(modelAccessMode))
+	if modelAccessMode == "" {
+		if len(modelGroupIDs) > 0 {
+			modelAccessMode = "group"
+		} else if len(allowedModels) > 0 {
+			modelAccessMode = "custom"
+		} else {
+			modelAccessMode = "all"
+		}
 	}
 
 	rawKey, prefix, err := generateSecureToken("sk-ng-")
@@ -307,30 +456,36 @@ func (m *Manager) CreateKey(name string, allowedModels []string) (*KeyInfo, erro
 	_, _ = rand.Read(idBytes)
 	id := hex.EncodeToString(idBytes)
 
+	serializedGroups := SerializeAllowedModels(modelGroupIDs)
+	cleanGroups := ParseAllowedModels(serializedGroups)
+
 	serializedModels := SerializeAllowedModels(allowedModels)
 	cleanModels := ParseAllowedModels(serializedModels)
 
 	now := time.Now()
 	_, err = m.db.Exec(`
-		INSERT INTO api_keys (id, key, prefix, name, is_active, allowed_models, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-	`, id, rawKey, prefix, name, serializedModels)
+		INSERT INTO api_keys (id, key, prefix, name, is_active, model_access_mode, model_group_ids, allowed_models, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`, id, rawKey, prefix, name, modelAccessMode, serializedGroups, serializedModels)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save new key: %w", err)
 	}
 
 	ki := &KeyInfo{
-		ID:            id,
-		Key:           MaskKey(rawKey),
-		RawKey:        rawKey,
-		Prefix:        prefix,
-		Name:          name,
-		IsActive:      true,
-		AllowedModels: cleanModels,
-		TotalRequests: 0,
-		TotalTokens:   0,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:              id,
+		Key:             MaskKey(rawKey),
+		RawKey:          rawKey,
+		Prefix:          prefix,
+		Name:            name,
+		IsActive:        true,
+		ModelAccessMode: modelAccessMode,
+		ModelGroupIDs:   cleanGroups,
+		AllowedModels:   cleanModels,
+		TotalRequests:   0,
+		TotalTokens:     0,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		manager:         m,
 	}
 
 	m.mu.Lock()
@@ -340,20 +495,32 @@ func (m *Manager) CreateKey(name string, allowedModels []string) (*KeyInfo, erro
 	return ki, nil
 }
 
-// UpdateKey updates key name and allowed models
-func (m *Manager) UpdateKey(id, name string, allowedModels []string) (*KeyInfo, error) {
+// UpdateKey updates key name, model access mode, model groups, and allowed models
+func (m *Manager) UpdateKey(id, name, modelAccessMode string, modelGroupIDs, allowedModels []string) (*KeyInfo, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, fmt.Errorf("key name cannot be empty")
 	}
 
+	modelAccessMode = strings.ToLower(strings.TrimSpace(modelAccessMode))
+	if modelAccessMode == "" {
+		if len(modelGroupIDs) > 0 {
+			modelAccessMode = "group"
+		} else if len(allowedModels) > 0 {
+			modelAccessMode = "custom"
+		} else {
+			modelAccessMode = "all"
+		}
+	}
+
+	serializedGroups := SerializeAllowedModels(modelGroupIDs)
 	serializedModels := SerializeAllowedModels(allowedModels)
 
 	res, err := m.db.Exec(`
 		UPDATE api_keys
-		SET name = ?, allowed_models = ?, updated_at = CURRENT_TIMESTAMP
+		SET name = ?, model_access_mode = ?, model_group_ids = ?, allowed_models = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, name, serializedModels, id)
+	`, name, modelAccessMode, serializedGroups, serializedModels, id)
 	if err != nil {
 		return nil, err
 	}
@@ -371,18 +538,25 @@ func (m *Manager) GetKey(id string) (*KeyInfo, error) {
 	var ki KeyInfo
 	var rawKey string
 	var isActiveInt int
-	var rawModels string
+	var mode, rawGroupIDs, rawModels string
 	err := m.db.QueryRow(`
-		SELECT id, key, prefix, name, is_active, COALESCE(allowed_models, ''), created_at, updated_at
+		SELECT id, key, prefix, name, is_active, 
+		       COALESCE(model_access_mode, 'all'), 
+		       COALESCE(model_group_ids, '[]'), 
+		       COALESCE(allowed_models, ''), 
+		       created_at, updated_at
 		FROM api_keys WHERE id = ?
-	`, id).Scan(&ki.ID, &rawKey, &ki.Prefix, &ki.Name, &isActiveInt, &rawModels, &ki.CreatedAt, &ki.UpdatedAt)
+	`, id).Scan(&ki.ID, &rawKey, &ki.Prefix, &ki.Name, &isActiveInt, &mode, &rawGroupIDs, &rawModels, &ki.CreatedAt, &ki.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	ki.IsActive = (isActiveInt == 1)
 	ki.Key = MaskKey(rawKey)
 	ki.RawKey = rawKey
+	ki.ModelAccessMode = mode
+	ki.ModelGroupIDs = ParseAllowedModels(rawGroupIDs)
 	ki.AllowedModels = ParseAllowedModels(rawModels)
+	ki.manager = m
 	return &ki, nil
 }
 
@@ -395,6 +569,8 @@ func (m *Manager) ListKeys() ([]KeyInfo, error) {
 			k.prefix,
 			k.name,
 			k.is_active,
+			COALESCE(k.model_access_mode, 'all'),
+			COALESCE(k.model_group_ids, '[]'),
 			COALESCE(k.allowed_models, ''),
 			k.created_at,
 			k.updated_at,
@@ -417,7 +593,7 @@ func (m *Manager) ListKeys() ([]KeyInfo, error) {
 		var ki KeyInfo
 		var rawKey string
 		var isActiveInt int
-		var rawModels string
+		var mode, rawGroupIDs, rawModels string
 		var lastUsed sql.NullString
 		if err := rows.Scan(
 			&ki.ID,
@@ -425,6 +601,8 @@ func (m *Manager) ListKeys() ([]KeyInfo, error) {
 			&ki.Prefix,
 			&ki.Name,
 			&isActiveInt,
+			&mode,
+			&rawGroupIDs,
 			&rawModels,
 			&ki.CreatedAt,
 			&ki.UpdatedAt,
@@ -437,7 +615,10 @@ func (m *Manager) ListKeys() ([]KeyInfo, error) {
 		ki.IsActive = (isActiveInt == 1)
 		ki.Key = MaskKey(rawKey)
 		ki.RawKey = rawKey
+		ki.ModelAccessMode = mode
+		ki.ModelGroupIDs = ParseAllowedModels(rawGroupIDs)
 		ki.AllowedModels = ParseAllowedModels(rawModels)
+		ki.manager = m
 		if lastUsed.Valid {
 			ki.LastUsedAt = &lastUsed.String
 		}
@@ -505,16 +686,19 @@ func (m *Manager) ValidateClientKey(rawKey string) (*KeyInfo, bool) {
 	// Fallback to checking SQLite
 	var ki KeyInfo
 	var isAct int
-	var rawModels string
-	err := m.db.QueryRow("SELECT id, key, prefix, name, is_active, COALESCE(allowed_models, '') FROM api_keys WHERE key = ? LIMIT 1", rawKey).
-		Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct, &rawModels)
+	var mode, rawGroupIDs, rawModels string
+	err := m.db.QueryRow("SELECT id, key, prefix, name, is_active, COALESCE(model_access_mode, 'all'), COALESCE(model_group_ids, '[]'), COALESCE(allowed_models, '') FROM api_keys WHERE key = ? LIMIT 1", rawKey).
+		Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct, &mode, &rawGroupIDs, &rawModels)
 	if err != nil {
 		return nil, false
 	}
 
 	ki.IsActive = (isAct == 1)
 	ki.Key = MaskKey(ki.RawKey)
+	ki.ModelAccessMode = mode
+	ki.ModelGroupIDs = ParseAllowedModels(rawGroupIDs)
 	ki.AllowedModels = ParseAllowedModels(rawModels)
+	ki.manager = m
 
 	m.mu.Lock()
 	m.cache[rawKey] = &ki

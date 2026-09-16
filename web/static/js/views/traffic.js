@@ -1,6 +1,6 @@
 // Traffic Explorer: Kibana/Discover-style HTTP request, latency and token telemetry.
 import { api } from '../api.js';
-import { h, icon, fmtTime, fmtNum, localDate, tzLabel, msOf, podColor, copy, toast, menu, emptyState, skeletonRows, debounce } from '../ui.js';
+import { h, icon, fmtTime, fmtNum, fmtCompact, localDate, tzLabel, msOf, podColor, copy, toast, menu, emptyState, skeletonRows, debounce, searchableSelect } from '../ui.js';
 import { patchRoute } from '../state.js';
 import { queryParams, rangeControls, searchTerms, highlight, toLocalInput, iso } from '../filters.js';
 import { volumeChart } from '../chart.js';
@@ -9,18 +9,20 @@ const PAGE = 500;
 const MAX_ROWS = 5000;
 
 const TRAFFIC_STATUSES = [
-  { id: '2xx', label: '2xx', cls: 'status-chip-2xx' },
-  { id: '4xx', label: '4xx', cls: 'status-chip-4xx' },
-  { id: '5xx', label: '5xx', cls: 'status-chip-5xx' },
+  { id: '2xx', label: '2xx OK', cls: 'status-chip-2xx' },
+  { id: '403', label: '403 Blocked', cls: 'status-chip-403' },
+  { id: '4xx', label: '4xx Error', cls: 'status-chip-4xx' },
+  { id: '5xx', label: '5xx Error', cls: 'status-chip-5xx' },
 ];
 
 const TRAFFIC_SERIES = [
   { label: '5xx', levels: ['5xx'], color: 'var(--danger)' },
-  { label: '4xx', levels: ['4xx', '403'], color: '#c42b1c' },
+  { label: '4xx', levels: ['4xx'], color: 'var(--lv-warn)' },
+  { label: '403', levels: ['403'], color: '#c42b1c' },
   { label: '2xx', levels: ['2xx'], color: 'var(--ok)' },
 ];
 
-const keyOf = (x) => JSON.stringify([x.key, x.model, x.provider, x.status, x.q, x.range, x.date, x.from, x.to]);
+const keyOf = (x) => JSON.stringify([x.key, x.model, x.provider, x.ip, x.status, x.q, x.range, x.date, x.from, x.to]);
 
 export function mount(root) {
   let p = {};
@@ -43,24 +45,28 @@ export function mount(root) {
   // Range controls with stepper and custom time inputs
   const range = rangeControls((c) => patch(c.range === 'custom' || c.from || c.date ? { ...c, live: '' } : c));
 
-  const select = (label, key, clears) => h('select', {
-    class: 'select', 'aria-label': label,
-    onchange: (e) => patch({ [key]: e.target.value, ...Object.fromEntries(clears.map((k) => [k, ''])) }),
+  const select = (label, key, clears, searchPlaceholder) => searchableSelect({
+    placeholder: label,
+    searchPlaceholder,
+    ariaLabel: label,
+    clearable: true,
+    compact: true,
+    onChange: (val) => patch({ [key]: val, ...Object.fromEntries(clears.map((k) => [k, ''])) }),
   });
 
-  const keySel = select('Client Key', 'key', []);
-  const modelSel = select('Model', 'model', []);
-  const providerSel = select('Provider', 'provider', []);
+  const keySel = select('All client keys', 'key', [], 'Search client keys...');
+  const modelSel = select('All models', 'model', [], 'Search models...');
+  const providerSel = select('All providers', 'provider', [], 'Search providers...');
 
   const clearBtn = h('button', {
     class: 'btn btn-sm', type: 'button',
-    onclick: () => patch({ key: '', model: '', provider: '', status: '', q: '' }),
+    onclick: () => patch({ key: '', model: '', provider: '', ip: '', status: '', q: '' }),
   }, icon('x'), 'Clear');
 
   const searchIn = h('input', {
     type: 'search', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Search traffic logs', 'data-log-search': '',
     placeholder: 'Search traffic logs  (press /)',
-    title: 'Words are ANDed. "exact phrase", -exclude, or field filters key: model: provider: status:',
+    title: 'Words are ANDed. "exact phrase", -exclude, or field filters key: model: provider: ip: status:',
   });
 
   const pushQuery = debounce(() => patch({ q: searchIn.value.trim() }), 400);
@@ -98,12 +104,15 @@ export function mount(root) {
       searchBox, range.el, h('span', { class: 'sep' }), keySel, modelSel, providerSel, clearBtn,
       h('span', { class: 'spacer' }), h('span', { class: 'chips' }, chips), liveBtn, exportBtn),
     chartBox,
-    h('div', { class: 'log-table' },
+    h('div', { class: 'log-table traffic-table' },
       h('div', { class: 'log-head' },
-        h('span', { title: 'Local time zone' }, `Time (${tzLabel()})`),
-        h('span', null, 'Status'),
-        h('span', { class: 'c-src' }, 'Source'),
-        h('span', null, 'Message')),
+        h('span', { title: `Local time zone (${tzLabel()})` }, 'Time'),
+        h('span', null, 'Guard Status'),
+        h('span', null, 'Client Key'),
+        h('span', null, 'Target Model'),
+        h('span', { class: 'num' }, 'Tokens'),
+        h('span', { class: 'num' }, 'Latency'),
+        h('span', null, 'Client IP')),
       body),
     status));
 
@@ -128,23 +137,84 @@ export function mount(root) {
   }
 
   function fill(sel, all, options, value) {
+    if (sel.setOptions) {
+      sel.setOptions(options, value, all);
+      return;
+    }
     const opts = value && !options.includes(value) ? [value, ...options] : options;
     sel.replaceChildren(h('option', { value: '' }, all), ...opts.map((o) => h('option', { value: o }, o)));
     sel.value = value || '';
     sel.classList.toggle('has-value', !!value);
   }
 
+  function getModelOptions() {
+    const map = new Map();
+    availableModels.forEach((m) => {
+      const id = typeof m === 'string' ? m : (m.id || m.name);
+      if (id) {
+        let badge = (typeof m === 'object' && m.provider_id) ? m.provider_id : '';
+        if (!badge && id.includes('/')) badge = id.split('/')[0];
+        map.set(id, { value: id, label: id, badge });
+      }
+    });
+    entries.forEach((e) => {
+      if (e.model && !map.has(e.model)) {
+        const badge = e.provider_id || (e.model.includes('/') ? e.model.split('/')[0] : '');
+        map.set(e.model, { value: e.model, label: e.model, badge });
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  function getKeyOptions() {
+    const map = new Map();
+    availableKeys.forEach((k) => {
+      const name = typeof k === 'string' ? k : (k.name || k.key);
+      const val = typeof k === 'string' ? k : (k.name || k.key);
+      if (name) {
+        const label = (typeof k === 'object' && k.name && k.key) ? `${k.name} (${k.key})` : name;
+        map.set(val, { value: val, label, badge: (typeof k === 'object' && k.role) ? k.role : 'key' });
+      }
+    });
+    entries.forEach((e) => {
+      const id = e.api_key_name || e.api_key;
+      if (id && !map.has(id)) {
+        const label = (e.api_key_name && e.api_key) ? `${e.api_key_name} (${e.api_key})` : id;
+        map.set(id, { value: id, label, badge: 'traffic' });
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  function getProviderOptions() {
+    const map = new Map();
+    availableProviders.forEach((pr) => {
+      const id = typeof pr === 'string' ? pr : (pr.id || pr.prefix || pr.name);
+      if (id) {
+        const label = (typeof pr === 'object' && pr.name) ? `${pr.name} (${pr.prefix || id})` : id;
+        const badge = (typeof pr === 'object' && pr.prefix) ? pr.prefix : 'provider';
+        map.set(id, { value: id, label, badge });
+      }
+    });
+    entries.forEach((e) => {
+      if (e.provider_id && !map.has(e.provider_id)) {
+        map.set(e.provider_id, { value: e.provider_id, label: e.provider_id, badge: 'traffic' });
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }
+
   function syncControls() {
     range.sync(p);
     if (document.activeElement !== searchIn) searchIn.value = p.q || '';
 
-    fill(keySel, 'All client keys', availableKeys.map((k) => k.name || k.key), p.key);
-    fill(modelSel, 'All models', availableModels.map((m) => m.id || m.name), p.model);
-    fill(providerSel, 'All providers', availableProviders.map((pr) => pr.id || pr.name), p.provider);
+    fill(keySel, 'All client keys', getKeyOptions(), p.key);
+    fill(modelSel, 'All models', getModelOptions(), p.model);
+    fill(providerSel, 'All providers', getProviderOptions(), p.provider);
 
     const set = statusSet();
     chips.forEach((c, i) => c.classList.toggle('active', set.has(TRAFFIC_STATUSES[i].id)));
-    clearBtn.hidden = !(p.key || p.model || p.provider || p.status || p.q);
+    clearBtn.hidden = !(p.key || p.model || p.provider || p.ip || p.status || p.q);
 
     liveBtn.classList.toggle('active', !!p.live);
     liveBtn.title = p.live ? 'Stop following new requests' : 'Follow new requests in real time';
@@ -159,9 +229,15 @@ export function mount(root) {
         api.get('/models'),
         api.get('/providers'),
       ]);
-      if (keysRes.status === 'fulfilled' && keysRes.value?.keys) availableKeys = keysRes.value.keys;
-      if (modelsRes.status === 'fulfilled' && modelsRes.value?.models) availableModels = modelsRes.value.models;
-      if (providersRes.status === 'fulfilled' && providersRes.value?.providers) availableProviders = providersRes.value.providers;
+      if (keysRes.status === 'fulfilled') {
+        availableKeys = Array.isArray(keysRes.value) ? keysRes.value : (keysRes.value?.keys || []);
+      }
+      if (modelsRes.status === 'fulfilled') {
+        availableModels = Array.isArray(modelsRes.value) ? modelsRes.value : (modelsRes.value?.models || []);
+      }
+      if (providersRes.status === 'fulfilled') {
+        availableProviders = Array.isArray(providersRes.value) ? providersRes.value : (providersRes.value?.providers || []);
+      }
       syncControls();
     } catch { /* ignore */ }
   }
@@ -273,6 +349,7 @@ export function mount(root) {
       for (let i = 0; i < excess; i++) body.lastElementChild?.remove();
     }
     if (top > 0) body.scrollTop = top + (body.scrollHeight - before);
+    syncControls();
     renderStatus();
   }
 
@@ -300,6 +377,7 @@ export function mount(root) {
   }
 
   function renderRows() {
+    syncControls();
     if (!entries.length) {
       body.replaceChildren(emptyView());
       return;
@@ -315,40 +393,73 @@ export function mount(root) {
     return emptyState('inbox', 'No traffic recorded yet', 'Nothing in this time range matches the current filters.',
       h('span', { class: 'input-group' },
         h('button', { class: 'btn btn-sm', onclick: () => patch({ range: '24h', date: '', from: '', to: '' }) }, 'Last 24 hours'),
-        h('button', { class: 'btn btn-sm', onclick: () => patch({ range: '', date: '', from: '', to: '', key: '', model: '', provider: '', status: '', q: '' }) }, 'Reset filters')));
+        h('button', { class: 'btn btn-sm', onclick: () => patch({ range: '', date: '', from: '', to: '', key: '', model: '', provider: '', ip: '', status: '', q: '' }) }, 'Reset filters')));
   }
 
   function renderStatusBadge(code) {
-    if (code >= 500) {
-      return h('span', { class: 'badge-status s-5xx' }, '5xx');
-    }
-    if (code >= 400) {
-      return h('span', { class: 'badge-status s-4xx' }, '4xx');
-    }
-    if (code >= 300) {
-      return h('span', { class: 'badge-status s-3xx' }, '3xx');
-    }
-    if (code >= 200) {
-      return h('span', { class: 'badge-status s-2xx' }, '2xx');
-    }
-    return h('span', { class: 'badge-status s-2xx' }, `${code}`);
+    const isOk = code >= 200 && code < 400;
+    const isBlk = code === 403;
+    const statusClass = isOk ? 's-2xx' : (isBlk ? 's-403' : (code < 500 ? 's-warn' : 's-err'));
+    const statusText = isBlk ? '403 Blocked' : (isOk ? `${code} OK` : `${code} Error`);
+    const statusIcon = isBlk ? icon('shield') : (isOk ? icon('checkmark') : icon('alert'));
+
+    return h('span', { class: `badge-status ${statusClass}` },
+      statusIcon,
+      statusText
+    );
   }
 
   function rowEl(e) {
     const ms = msOf(e);
-    const source = e.api_key_name || e.api_key || 'gateway';
     const isErr = e.status_code === 403 || e.status_code >= 500;
     const isWarn = e.status_code >= 400 && !isErr;
-    const rowCls = isErr ? 'lv-ERROR' : isWarn ? 'lv-WARN' : '';
+    const rowCls = e.status_code === 403 ? 's-row-403' : (isErr ? 'lv-ERROR' : (isWarn ? 'lv-WARN' : ''));
+
+    // Time: formatted e.g. "09:59:58 AM" matching dashboard
+    const dateObj = e.timestamp ? new Date(e.timestamp) : (ms ? new Date(ms) : null);
+    const timeStr = dateObj ? dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
+
+    // Model prefix and short name
+    const slashIdx = (e.model || '').lastIndexOf('/');
+    const modShort = slashIdx >= 0 ? e.model.slice(slashIdx + 1) : (e.model || '-');
+    const modPrefix = slashIdx >= 0 ? e.model.slice(0, slashIdx + 1) : '';
+
+    // Latency and Stream badge
+    const latStr = e.duration_ms > 0 ? `${fmtNum(e.duration_ms)}ms` : '< 1ms';
+    const streamBadge = e.stream ? h('span', { class: 'badge', style: { fontSize: '9.5px', padding: '1px 4px', marginLeft: '4px' } }, 'SSE') : null;
 
     const row = h('div', { class: `row ${rowCls}`, onclick: () => toggleDetail(row, e) },
-      h('span', { class: 'c-time', title: e.timestamp }, fmtTime(ms)),
+      // 1. Time
+      h('span', { class: 'c-time', title: e.timestamp ? new Date(e.timestamp).toLocaleString() : timeStr }, timeStr),
+      // 2. Guard Status
       h('span', null, renderStatusBadge(e.status_code)),
-      h('span', { class: 'c-src', title: `Client: ${source}\nModel: ${e.model}` },
-        h('i', { class: 'pod-dot', style: { background: podColor(source) } }),
-        h('span', { class: 'src-wl' }, source),
-        h('span', { class: 'src-pod' }, e.model)),
-      h('span', { class: 'c-msg' }, highlight(e.message || `${e.model} (${e.duration_ms}ms)`, terms)));
+      // 3. Client Key
+      h('span', { class: 'c-key', title: `${e.api_key_name || 'Client Key'}${e.api_key ? ` (${e.api_key})` : ''}` },
+        h('b', null, highlight(e.api_key_name || 'Client Key', terms)),
+        e.api_key ? h('span', { class: 'muted' }, highlight(e.api_key, terms)) : null
+      ),
+      // 4. Target Model
+      h('span', { class: 'c-model', title: `${e.model || '-'}${e.error_message ? `\nError: ${e.error_message}` : ''}` },
+        modPrefix ? h('span', { class: 'source-ns' }, modPrefix) : null,
+        h('span', { class: 'strong' }, highlight(modShort, terms)),
+        e.error_message ? h('span', { class: 'traffic-err-msg' }, '(', highlight(e.error_message, terms), ')') : null
+      ),
+      // 5. Tokens
+      h('span', { class: 'num c-tokens' },
+        h('span', { title: `Prompt: ${fmtNum(e.prompt_tokens || 0)} · Comp: ${fmtNum(e.completion_tokens || 0)}` },
+          fmtCompact(e.total_tokens || 0)
+        )
+      ),
+      // 6. Latency
+      h('span', { class: 'num c-lat' },
+        latStr,
+        streamBadge
+      ),
+      // 7. Client IP
+      h('span', { class: 'c-ip muted', title: e.client_ip || '' },
+        highlight(e.client_ip || '-', terms)
+      )
+    );
     return row;
   }
 
@@ -388,14 +499,12 @@ export function mount(root) {
 
     const meta = [
       ['Timestamp', e.timestamp ? new Date(e.timestamp).toLocaleString() : '-'],
-      ['HTTP Status', statusText],
-      ['Model', e.model || '-'],
+      ['Guard Status', statusText],
+      ['Client Key', e.api_key_name ? `${e.api_key_name} (${e.api_key})` : (e.api_key || '-')],
+      ['Target Model', e.model || '-'],
       ['Provider', e.provider_id || '(default upstream)'],
-      ['Client Key', e.api_key_name ? `${e.api_key_name} (${e.api_key})` : e.api_key || '-'],
+      ['Tokens', `${fmtNum(e.total_tokens)} (prompt: ${fmtNum(e.prompt_tokens)}, completion: ${fmtNum(e.completion_tokens)})`],
       ['Latency', formatDuration(e.duration_ms)],
-      ['Prompt Tokens', fmtNum(e.prompt_tokens)],
-      ['Comp Tokens', fmtNum(e.completion_tokens)],
-      ['Total Tokens', fmtNum(e.total_tokens)],
       ['Mode', e.stream ? 'Server-Sent Events (SSE)' : 'Synchronous JSON'],
       ['Client IP', e.client_ip || '-'],
     ];
@@ -409,10 +518,13 @@ export function mount(root) {
       h('div', { class: 'detail-actions' },
         action('copy', 'Copy message', () => copy(e.message || '')),
         action('copy', 'Copy JSON', () => copy(JSON.stringify(e, null, 2))),
-        e.api_key_name || e.api_key ? action('key', 'Only this key', () => patch({ key: e.api_key_name || e.api_key })) : null,
-        e.model ? action('box', 'Only this model', () => patch({ model: e.model })) : null,
+        e.api_key_name || e.api_key ? action('key', 'Filter key', () => patch({ key: e.api_key_name || e.api_key })) : null,
+        e.model ? action('box', 'Filter model', () => patch({ model: e.model })) : null,
+        e.provider_id ? action('server', 'Filter provider', () => patch({ provider: e.provider_id })) : null,
+        e.status_code ? action('shield', `Filter status ${e.status_code}`, () => patch({ status: `${e.status_code}` })) : null,
+        e.client_ip ? action('search', 'Filter IP', () => patch({ q: `ip:${e.client_ip}` })) : null,
         action('crosshair', 'Surrounding requests', () => patch({
-          key: '', model: '', provider: '', status: '', q: '', live: '', date: '',
+          key: '', model: '', provider: '', ip: '', status: '', q: '', live: '', date: '',
           range: 'custom', from: toLocalInput(ms - 60e3), to: toLocalInput(ms + 60e3),
         }))));
   }

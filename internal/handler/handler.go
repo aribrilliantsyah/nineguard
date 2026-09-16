@@ -177,6 +177,116 @@ func (h *Handler) GetProfile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		jsonError(w, http.StatusUnauthorized, "Sign in required")
+		return
+	}
+	var body struct {
+		DisplayName string `json:"display_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	updated, err := h.auth.UpdateProfile(user.ID, body.DisplayName)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status": "ok",
+		"user":   updated,
+	})
+}
+
+func (h *Handler) SetRecoveryQuestion(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		jsonError(w, http.StatusUnauthorized, "Sign in required")
+		return
+	}
+	var body struct {
+		Question        string `json:"question"`
+		Answer          string `json:"answer"`
+		CurrentPassword string `json:"current_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	if strings.TrimSpace(body.Question) == "" {
+		jsonError(w, http.StatusBadRequest, "Recovery question cannot be empty")
+		return
+	}
+	if strings.TrimSpace(body.Answer) == "" {
+		jsonError(w, http.StatusBadRequest, "Recovery answer cannot be empty")
+		return
+	}
+	if h.auth.IsAuthEnabled() {
+		if _, _, err := h.auth.Login(user.Username, body.CurrentPassword); err != nil {
+			jsonError(w, http.StatusBadRequest, "Current password incorrect")
+			return
+		}
+	}
+	if err := h.auth.SetRecoveryQuestion(user.ID, body.Question, body.Answer); err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":            "ok",
+		"has_recovery":      true,
+		"recovery_question": strings.TrimSpace(body.Question),
+	})
+}
+
+func (h *Handler) GetRecoveryQuestion(w http.ResponseWriter, r *http.Request) {
+	username := strings.TrimSpace(r.URL.Query().Get("username"))
+	if username == "" {
+		jsonError(w, http.StatusBadRequest, "Username is required")
+		return
+	}
+	q, err := h.auth.GetRecoveryQuestion(username)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":   "ok",
+		"username": username,
+		"question": q,
+	})
+}
+
+func (h *Handler) RecoverPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username    string `json:"username"`
+		Answer      string `json:"answer"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	if strings.TrimSpace(body.Username) == "" || strings.TrimSpace(body.Answer) == "" {
+		jsonError(w, http.StatusBadRequest, "Username and recovery answer are required")
+		return
+	}
+	if len(body.NewPassword) < 6 {
+		jsonError(w, http.StatusBadRequest, "New password must be at least 6 characters")
+		return
+	}
+	if err := h.auth.RecoverPassword(body.Username, body.Answer, body.NewPassword); err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"message": "Password updated successfully. You can now log in.",
+	})
+}
+
 func (h *Handler) UpdatePassword(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	if user == nil {
@@ -313,6 +423,113 @@ func (h *Handler) DeleteModel(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// ── Model Groups Handlers ──
+
+func (h *Handler) ListModelGroups(w http.ResponseWriter, r *http.Request) {
+	if h.models == nil {
+		jsonResponse(w, http.StatusOK, map[string]interface{}{"groups": []models.ModelGroup{}})
+		return
+	}
+	groups, err := h.models.ListGroups()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if groups == nil {
+		groups = []models.ModelGroup{}
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"groups": groups})
+}
+
+func (h *Handler) GetModelGroup(w http.ResponseWriter, r *http.Request) {
+	if h.models == nil {
+		jsonError(w, http.StatusBadRequest, "Models manager not available")
+		return
+	}
+	id := r.PathValue("id")
+	group, err := h.models.GetGroup(id)
+	if err != nil {
+		jsonError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, group)
+}
+
+func (h *Handler) CreateModelGroup(w http.ResponseWriter, r *http.Request) {
+	if h.models == nil {
+		jsonError(w, http.StatusBadRequest, "Models manager not available")
+		return
+	}
+	var body struct {
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Models      []string `json:"models"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+
+	group, err := h.models.CreateGroup(body.Name, body.Description, body.Models)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if h.keys != nil {
+		h.keys.ReloadGroupCache()
+	}
+
+	jsonResponse(w, http.StatusCreated, group)
+}
+
+func (h *Handler) UpdateModelGroup(w http.ResponseWriter, r *http.Request) {
+	if h.models == nil {
+		jsonError(w, http.StatusBadRequest, "Models manager not available")
+		return
+	}
+	id := r.PathValue("id")
+	var body struct {
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Models      []string `json:"models"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+
+	group, err := h.models.UpdateGroup(id, body.Name, body.Description, body.Models)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if h.keys != nil {
+		h.keys.ReloadGroupCache()
+	}
+
+	jsonResponse(w, http.StatusOK, group)
+}
+
+func (h *Handler) DeleteModelGroup(w http.ResponseWriter, r *http.Request) {
+	if h.models == nil {
+		jsonError(w, http.StatusBadRequest, "Models manager not available")
+		return
+	}
+	id := r.PathValue("id")
+	if err := h.models.DeleteGroup(id); err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if h.keys != nil {
+		h.keys.ReloadGroupCache()
+	}
+
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -474,6 +691,11 @@ func parseFilterParams(q url.Values) traffic.FilterParams {
 		apiKey = q.Get("key")
 	}
 
+	clientIP := q.Get("client_ip")
+	if clientIP == "" {
+		clientIP = q.Get("ip")
+	}
+
 	return traffic.FilterParams{
 		Period:    q.Get("period"),
 		StartDate: startDate,
@@ -483,6 +705,7 @@ func parseFilterParams(q url.Values) traffic.FilterParams {
 		Model:     q.Get("model"),
 		APIKey:    apiKey,
 		Provider:  q.Get("provider"),
+		ClientIP:  clientIP,
 		Status:    q.Get("status"),
 		Level:     q.Get("level"),
 		Search:    search,
@@ -562,12 +785,16 @@ func (h *Handler) ExportTrafficLogs(w http.ResponseWriter, r *http.Request) {
 		cw := csv.NewWriter(w)
 		_ = cw.Write([]string{
 			"timestamp", "level", "status_code", "model", "provider", "client_key_name", "client_key",
-			"duration_ms", "prompt_tokens", "completion_tokens", "total_tokens", "stream", "client_ip", "message",
+			"duration_ms", "prompt_tokens", "completion_tokens", "total_tokens", "stream", "client_ip", "error_message", "message",
 		})
 		for _, e := range logs {
 			streamStr := "false"
 			if e.Stream {
 				streamStr = "true"
+			}
+			errStr := ""
+			if e.ErrorMessage != nil {
+				errStr = *e.ErrorMessage
 			}
 			_ = cw.Write([]string{
 				e.Timestamp.Format(time.RFC3339Nano),
@@ -583,6 +810,7 @@ func (h *Handler) ExportTrafficLogs(w http.ResponseWriter, r *http.Request) {
 				strconv.Itoa(e.TotalTokens),
 				streamStr,
 				e.ClientIP,
+				errStr,
 				e.Message,
 			})
 		}
@@ -656,12 +884,14 @@ func (h *Handler) CreateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name          string   `json:"name"`
-		AllowedModels []string `json:"allowed_models"`
+		Name            string   `json:"name"`
+		ModelAccessMode string   `json:"model_access_mode"`
+		ModelGroupIDs   []string `json:"model_group_ids"`
+		AllowedModels   []string `json:"allowed_models"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	keyInfo, err := h.keys.CreateKey(body.Name, body.AllowedModels)
+	keyInfo, err := h.keys.CreateKey(body.Name, body.ModelAccessMode, body.ModelGroupIDs, body.AllowedModels)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -676,15 +906,17 @@ func (h *Handler) UpdateKey(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	var body struct {
-		Name          string   `json:"name"`
-		AllowedModels []string `json:"allowed_models"`
+		Name            string   `json:"name"`
+		ModelAccessMode string   `json:"model_access_mode"`
+		ModelGroupIDs   []string `json:"model_group_ids"`
+		AllowedModels   []string `json:"allowed_models"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
 
-	keyInfo, err := h.keys.UpdateKey(id, body.Name, body.AllowedModels)
+	keyInfo, err := h.keys.UpdateKey(id, body.Name, body.ModelAccessMode, body.ModelGroupIDs, body.AllowedModels)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -809,6 +1041,19 @@ func (h *Handler) ToggleProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.providers.ToggleProvider(id, body.Active); err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) SetDefaultProvider(w http.ResponseWriter, r *http.Request) {
+	if h.providers == nil {
+		jsonError(w, http.StatusBadRequest, "Providers manager not available")
+		return
+	}
+	id := r.PathValue("id")
+	if err := h.providers.SetDefaultProvider(id); err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

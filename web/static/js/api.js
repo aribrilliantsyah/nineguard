@@ -22,16 +22,24 @@ export function redirectToLogin() {
   location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search) + location.hash;
 }
 
-async function request(method, path, { params, body } = {}) {
+async function request(method, path, { params, body, timeout = 12000 } = {}) {
   let resp;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
   try {
     resp = await fetch('/api/v1' + path + qs(params), {
       method,
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
     });
-  } catch {
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new ApiError(0, 'Request timed out — server took too long to respond');
+    }
     throw new ApiError(0, 'Cannot reach the NineGuard server');
+  } finally {
+    clearTimeout(timer);
   }
   if (resp.status === 401 && !path.startsWith('/auth/')) {
     redirectToLogin();

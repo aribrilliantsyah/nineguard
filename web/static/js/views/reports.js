@@ -7,6 +7,7 @@ export function mount(root) {
   let alive = true;
   let currentPeriod = 'today';
   let currentGroup = 'keys'; // 'keys' or 'models'
+  let currentSort = 'tokens_desc'; // 'tokens_desc' | 'prompt_desc' | 'comp_desc' | 'requests_desc' | 'latency_desc' | 'name_asc'
   let queryFilter = '';
   let customStart = '';
   let customEnd = '';
@@ -143,7 +144,7 @@ export function mount(root) {
   groupSegmented.append(btnGroupKeys, btnGroupModels);
 
   // ── Search Input ──
-  const searchInput = h('div', { class: 'tool-search', style: { width: '220px' } },
+  const searchInput = h('div', { class: 'tool-search', style: { width: '210px' } },
     icon('search'),
     h('input', {
       type: 'text',
@@ -156,6 +157,23 @@ export function mount(root) {
     })
   );
 
+  // ── Sort Selector ──
+  const sortSelect = h('select', {
+    class: 'select',
+    style: { height: '28px', fontSize: '11.5px', minWidth: '175px' },
+    onchange: (e) => {
+      currentSort = e.target.value;
+      renderContent();
+    }
+  },
+    h('option', { value: 'tokens_desc' }, '🔥 Total Tokens (Terbanyak)'),
+    h('option', { value: 'prompt_desc' }, '📥 Input Tokens (Prompt)'),
+    h('option', { value: 'comp_desc' }, '📤 Output Tokens (Response)'),
+    h('option', { value: 'requests_desc' }, '⚡ Requests (Paling Sering)'),
+    h('option', { value: 'latency_desc' }, '⏱️ Latensi (Paling Lambat)'),
+    h('option', { value: 'name_asc' }, '🔤 Nama (A - Z)')
+  );
+
   // ── Filter Toolbar Card ──
   const filterToolbar = h('div', { class: 'filter-card mt' },
     h('div', { class: 'filter-row' },
@@ -164,6 +182,10 @@ export function mount(root) {
         groupSegmented
       ),
       searchInput,
+      h('div', { class: 'filter-group' },
+        h('span', { class: 'muted', style: { fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.04em' } }, 'Sort:'),
+        sortSelect
+      ),
       h('div', { class: 'filter-group' },
         h('span', { class: 'muted', style: { fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.04em' } }, 'Period:'),
         periodSegmented
@@ -205,6 +227,26 @@ export function mount(root) {
     });
   }
 
+  // ── Visual Token Ratio Bar Helper ──
+  function renderRatioBar(promptTokens, compTokens, title = '') {
+    const prompt = promptTokens || 0;
+    const comp = compTokens || 0;
+    const total = prompt + comp;
+    if (total <= 0) return null;
+
+    const promptPct = ((prompt / total) * 100);
+    const compPct = ((comp / total) * 100);
+    const minPrompt = prompt > 0 ? Math.max(2, promptPct) : 0;
+    const minComp = comp > 0 ? Math.max(2, compPct) : 0;
+
+    const tooltip = title || `Input (Prompt): ${fmtNum(prompt)} (${promptPct.toFixed(1)}%) | Output (Response): ${fmtNum(comp)} (${compPct.toFixed(1)}%)`;
+
+    return h('div', { class: 'token-ratio-bar', title: tooltip },
+      prompt > 0 ? h('div', { class: 'token-ratio-prompt', style: { width: `${minPrompt}%` } }) : null,
+      comp > 0 ? h('div', { class: 'token-ratio-comp', style: { width: `${minComp}%` } }) : null
+    );
+  }
+
   // ── KPI Helper ──
   function kpiCard(title, mainVal, subVal, ic = 'activity', badgeText = null, isWarn = false) {
     return h('div', { class: 'card stat-tile' },
@@ -235,20 +277,128 @@ export function mount(root) {
     const promptToks = reportData.prompt_tokens || 0;
     const compToks = reportData.completion_tokens || 0;
 
-    const promptPct = totToks > 0 ? Math.round((promptToks / totToks) * 100) : 0;
-    const compPct = totToks > 0 ? Math.round((compToks / totToks) * 100) : 0;
+    const promptPct = totToks > 0 ? ((promptToks / totToks) * 100) : 0;
+    const compPct = totToks > 0 ? ((compToks / totToks) * 100) : 0;
+
+    const totalReq = reportData.total_requests || 0;
+    let totalSuccess = 0;
+    let totalBlocked = 0;
+    (reportData.keys_breakdown || []).forEach(k => {
+      totalSuccess += (k.success_requests || 0);
+      totalBlocked += (k.blocked_requests || 0);
+    });
+
+    // Sub-content for Total Tokens Card
+    const tokensSub = h('div', null,
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', marginBottom: '5px' } },
+        h('span', { class: 'tok-in', title: `Input Prompt: ${fmtNum(promptToks)}` }, `↓ ${fmtCompact(promptToks)} in (${promptPct.toFixed(0)}%)`),
+        h('span', { class: 'muted' }, '·'),
+        h('span', { class: 'tok-out', title: `Output Response: ${fmtNum(compToks)}` }, `↑ ${fmtCompact(compToks)} out (${compPct.toFixed(0)}%)`)
+      ),
+      totToks > 0 ? renderRatioBar(promptToks, compToks) : null
+    );
+
+    // Sub-content for Total Requests Card
+    const requestsSub = h('div', { style: { fontSize: '11px', display: 'flex', flexDirection: 'column', gap: '2px' } },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+        h('span', { style: { color: 'var(--ok)', fontWeight: '600' } }, `✓ ${fmtNum(totalSuccess)} ok`),
+        totalBlocked > 0 ? h('span', { style: { color: 'var(--danger)', fontWeight: '600' } }, `✕ ${fmtNum(totalBlocked)} blk`) : null
+      ),
+      h('div', { class: 'muted', style: { fontSize: '10.5px' } }, `${reportData.keys_breakdown?.length || 0} active keys · ${reportData.models_breakdown?.length || 0} models`)
+    );
 
     topKPI.replaceChildren(
       kpiCard('Top Token Consumer', topKey, 'Key consuming the most tokens', 'key', 'Top Key'),
       kpiCard('Top Utilized Model', topMod, 'Model handling highest token load', 'box', 'Top Model'),
-      kpiCard('Total Tokens', fmtCompact(totToks), `${fmtCompact(promptToks)} in (${promptPct}%) · ${fmtCompact(compToks)} out (${compPct}%)`, 'sparkles'),
-      kpiCard('Total Requests', fmtNum(reportData.total_requests || 0), `${reportData.keys_breakdown?.length || 0} active keys · ${reportData.models_breakdown?.length || 0} models`, 'activity')
+      kpiCard('Total Tokens', h('span', { title: `${fmtNum(totToks)} total tokens` }, fmtCompact(totToks)), tokensSub, 'sparkles'),
+      kpiCard('Total Requests', fmtNum(totalReq), requestsSub, 'activity')
+    );
+  }
+
+  // ── Sort Helper ──
+  function sortItems(list, group) {
+    return [...list].sort((a, b) => {
+      switch (currentSort) {
+        case 'tokens_desc':
+          return (b.total_tokens || 0) - (a.total_tokens || 0);
+        case 'prompt_desc':
+          return (b.prompt_tokens || 0) - (a.prompt_tokens || 0);
+        case 'comp_desc':
+          return (b.completion_tokens || 0) - (a.completion_tokens || 0);
+        case 'requests_desc':
+          return (b.total_requests || 0) - (a.total_requests || 0);
+        case 'latency_desc':
+          return (b.avg_duration_ms || 0) - (a.avg_duration_ms || 0);
+        case 'name_asc': {
+          const nameA = group === 'keys' ? (a.key_name || a.key || '') : (a.model || '');
+          const nameB = group === 'keys' ? (b.key_name || b.key || '') : (b.model || '');
+          return nameA.localeCompare(nameB);
+        }
+        default:
+          return (b.total_tokens || 0) - (a.total_tokens || 0);
+      }
+    });
+  }
+
+  // ── Legend & Status Bar Helper ──
+  function renderLegend(totalItems, filteredCount) {
+    let sortLabel = 'Total Tokens (Terbanyak)';
+    if (currentSort === 'prompt_desc') sortLabel = 'Input Tokens (Prompt)';
+    else if (currentSort === 'comp_desc') sortLabel = 'Output Tokens (Response)';
+    else if (currentSort === 'requests_desc') sortLabel = 'Requests (Paling Sering)';
+    else if (currentSort === 'latency_desc') sortLabel = 'Latensi (Paling Lambat)';
+    else if (currentSort === 'name_asc') sortLabel = 'Nama (A - Z)';
+
+    const countText = filteredCount < totalItems
+      ? `${filteredCount} of ${totalItems} ${currentGroup === 'keys' ? 'Keys' : 'Models'}`
+      : `${totalItems} ${currentGroup === 'keys' ? 'API Keys' : 'Models'}`;
+
+    return h('div', { class: 'report-legend mt' },
+      h('div', { class: 'legend-item' },
+        h('span', { class: 'tok-dot-in' }),
+        h('span', { class: 'strong tok-in' }, 'Input (Prompt):'),
+        h('span', { class: 'muted' }, 'Teks pertanyaan/instruksi yang dikirim ke AI')
+      ),
+      h('div', { class: 'legend-item' },
+        h('span', { class: 'tok-dot-out' }),
+        h('span', { class: 'strong tok-out' }, 'Output (Response):'),
+        h('span', { class: 'muted' }, 'Jawaban yang dihasilkan AI')
+      ),
+      h('div', { class: 'legend-item', style: { marginLeft: 'auto', gap: '8px' } },
+        h('span', { class: 'badge', style: { background: 'var(--hover)', fontSize: '11px' } }, countText),
+        h('span', { class: 'muted', style: { fontSize: '11px' } }, 'Urut: ', h('b', { style: { color: 'var(--text)' } }, sortLabel))
+      )
+    );
+  }
+
+  // ── Table-like Header Row for the Cards ──
+  function renderListHeader(group) {
+    return h('div', { class: 'report-list-header mt-sm' },
+      h('div', { class: 'col-entity' }, group === 'keys' ? 'Client API Key' : 'AI Model'),
+      h('div', { class: 'breakdown-metrics' },
+        h('div', { class: 'metric-col-tokens', style: { textAlign: 'right' } },
+          h('span', null, 'Total Tokens'),
+          h('div', { class: 'sub-hdr' }, '↓ Input · ↑ Output')
+        ),
+        h('div', { class: 'metric-col-requests', style: { textAlign: 'right' } },
+          h('span', null, 'Requests'),
+          h('div', { class: 'sub-hdr' }, '✓ OK · ✕ Blk')
+        ),
+        h('div', { class: 'metric-col-latency', style: { textAlign: 'right' } },
+          h('span', null, 'Avg Latency')
+        ),
+        h('div', { class: 'metric-col-share', style: { textAlign: 'left' } },
+          h('span', null, 'System Share')
+        )
+      ),
+      h('div', { style: { width: '85px', textAlign: 'right' } }, 'Action')
     );
   }
 
   // ── Render Group By Client API Key ──
   function renderKeysBreakdown() {
-    let list = reportData.keys_breakdown || [];
+    const rawList = reportData.keys_breakdown || [];
+    let list = rawList;
     if (queryFilter) {
       list = list.filter(k => (k.key_name || '').toLowerCase().includes(queryFilter) || (k.key || '').toLowerCase().includes(queryFilter));
     }
@@ -257,7 +407,11 @@ export function mount(root) {
       return emptyState('inbox', 'No API key activity found', 'Requests sent through NineGuard with client API keys will show full breakdown here.');
     }
 
-    const cards = list.map((k) => {
+    const sortedList = sortItems(list, 'keys');
+    const legendEl = renderLegend(rawList.length, sortedList.length);
+    const headerEl = renderListHeader('keys');
+
+    const cards = sortedList.map((k) => {
       const cardId = k.key_name + '||' + k.key;
       const isExpanded = expandedKeys.has(cardId);
 
@@ -285,7 +439,7 @@ export function mount(root) {
           }
         },
           // Left: Key Identity
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', minWidth: '220px' } },
+          h('div', { class: 'col-entity', style: { display: 'flex', alignItems: 'center', gap: '10px' } },
             chevron,
             h('span', { class: 'badge', style: { background: 'var(--hover)', fontWeight: 'bold', fontSize: '12.5px', padding: '4px 8px' } },
               icon('key'), ' ', k.key_name
@@ -293,26 +447,39 @@ export function mount(root) {
             h('code', { class: 'muted', style: { fontSize: '12px' } }, k.key)
           ),
 
-          // Middle: Metrics Pills
-          h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '20px', fontSize: '12px' } },
-            // Tokens
-            h('div', { style: { textAlign: 'right' } },
+          // Middle: Metrics Columns
+          h('div', { class: 'breakdown-metrics', style: { fontSize: '12px' } },
+            // Tokens Column
+            h('div', { class: 'metric-col-tokens', style: { textAlign: 'right' } },
               h('div', { style: { fontSize: '14px', fontWeight: 'bold' } }, fmtNum(k.total_tokens)),
-              h('div', { class: 'muted', style: { fontSize: '11px' } }, `${fmtCompact(k.prompt_tokens)} in / ${fmtCompact(k.completion_tokens)} out`)
+              h('div', { style: { fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '4px' } },
+                h('span', { class: 'tok-in', title: `Input Prompt: ${fmtNum(k.prompt_tokens)} tokens` }, `↓ ${fmtCompact(k.prompt_tokens)}`),
+                h('span', { class: 'muted' }, '/'),
+                h('span', { class: 'tok-out', title: `Output Response: ${fmtNum(k.completion_tokens)} tokens` }, `↑ ${fmtCompact(k.completion_tokens)}`)
+              ),
+              renderRatioBar(k.prompt_tokens, k.completion_tokens)
             ),
-            // Requests
-            h('div', { style: { textAlign: 'right' } },
-              h('div', { style: { fontSize: '14px', fontWeight: 'bold' } }, fmtNum(k.total_requests)),
-              h('div', { class: 'muted', style: { fontSize: '11px' } }, `${k.success_requests} ok · ${k.blocked_requests} blk`)
+            // Requests Column
+            h('div', { class: 'metric-col-requests', style: { textAlign: 'right' } },
+              h('div', { style: { fontSize: '14px', fontWeight: 'bold' } },
+                fmtNum(k.total_requests),
+                h('small', { class: 'muted', style: { fontSize: '11px', fontWeight: 'normal', marginLeft: '3px' } }, 'reqs')
+              ),
+              h('div', { style: { fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '4px' } },
+                h('span', { style: { color: 'var(--ok)', fontWeight: '600' }, title: `${fmtNum(k.success_requests)} successful requests` }, `✓ ${k.success_requests}`),
+                k.blocked_requests > 0
+                  ? h('span', { style: { color: 'var(--danger)', fontWeight: '600' }, title: `${fmtNum(k.blocked_requests)} blocked requests` }, `✕ ${k.blocked_requests}`)
+                  : null
+              )
             ),
-            // Latency
-            h('div', { style: { textAlign: 'right', minWidth: '60px' } },
+            // Latency Column
+            h('div', { class: 'metric-col-latency', style: { textAlign: 'right' } },
               h('div', { style: { fontSize: '13px', fontWeight: '600' } }, fmtDur(k.avg_duration_ms)),
               h('div', { class: 'muted', style: { fontSize: '11px' } }, 'avg lat')
             ),
-            // Share of System
-            h('div', { style: { minWidth: '90px' } },
-              h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginBottom: '2px' } },
+            // Share of System Column
+            h('div', { class: 'metric-col-share' },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginBottom: '3px' } },
                 h('span', { class: 'muted' }, 'Share'),
                 h('span', { style: { fontWeight: '600' } }, shareVal)
               ),
@@ -323,7 +490,7 @@ export function mount(root) {
           ),
 
           // Right: Action button
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+          h('div', { style: { width: '85px', display: 'flex', justifyContent: 'flex-end', alignItems: 'center' } },
             h('button', {
               class: 'btn btn-sm',
               type: 'button',
@@ -338,7 +505,7 @@ export function mount(root) {
 
       // Expanded Sub-table: Models used by this Key
       if (isExpanded) {
-        const models = k.model_usage || [];
+        const models = [...(k.model_usage || [])].sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
         const modelRows = models.map((m) => {
           const modShare = typeof m.share === 'number' ? `${m.share.toFixed(1)}%` : '-';
           return h('tr', null,
@@ -347,10 +514,11 @@ export function mount(root) {
               m.model
             ),
             h('td', { class: 'num' }, fmtNum(m.requests)),
-            h('td', { class: 'num' }, fmtNum(m.prompt_tokens)),
-            h('td', { class: 'num' }, fmtNum(m.comp_tokens)),
+            h('td', { class: 'num tok-in' }, fmtNum(m.prompt_tokens)),
+            h('td', { class: 'num tok-out' }, fmtNum(m.comp_tokens)),
+            h('td', null, renderRatioBar(m.prompt_tokens, m.comp_tokens)),
             h('td', { class: 'num strong' }, fmtNum(m.total_tokens)),
-            h('td', { style: { minWidth: '120px' } },
+            h('td', { style: { minWidth: '100px' } },
               h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
                 h('div', { style: { flex: '1', height: '5px', background: 'var(--border)', borderRadius: '3px', overflow: 'hidden' } },
                   h('div', { style: { width: `${Math.min(100, Math.max(2, m.share || 0))}%`, height: '100%', background: 'var(--lv-info)' } })
@@ -372,14 +540,19 @@ export function mount(root) {
                 h('tr', null,
                   h('th', null, 'Model'),
                   h('th', { class: 'num' }, 'Requests'),
-                  h('th', { class: 'num' }, 'Prompt Tok'),
-                  h('th', { class: 'num' }, 'Comp Tok'),
-                  h('th', { class: 'num' }, 'Total Tok'),
-                  h('th', null, 'Key Share')
+                  h('th', { class: 'num', style: { minWidth: '110px' } },
+                    h('span', { class: 'tok-in' }, '📥 Input (Prompt)')
+                  ),
+                  h('th', { class: 'num', style: { minWidth: '110px' } },
+                    h('span', { class: 'tok-out' }, '📤 Output (Response)')
+                  ),
+                  h('th', { style: { width: '90px' } }, 'In / Out Ratio'),
+                  h('th', { class: 'num' }, 'Total Tokens'),
+                  h('th', { style: { minWidth: '100px' } }, 'Key Share')
                 )
               ),
               h('tbody', null,
-                modelRows.length ? modelRows : h('tr', null, h('td', { colspan: 6, class: 'muted' }, 'No model breakdown available.'))
+                modelRows.length ? modelRows : h('tr', null, h('td', { colspan: 7, class: 'muted' }, 'No model breakdown available.'))
               )
             )
           )
@@ -391,12 +564,13 @@ export function mount(root) {
       return itemCard;
     });
 
-    return h('div', null, ...cards);
+    return h('div', null, legendEl, headerEl, ...cards);
   }
 
   // ── Render Group By Model ──
   function renderModelsBreakdown() {
-    let list = reportData.models_breakdown || [];
+    const rawList = reportData.models_breakdown || [];
+    let list = rawList;
     if (queryFilter) {
       list = list.filter(m => (m.model || '').toLowerCase().includes(queryFilter));
     }
@@ -405,7 +579,11 @@ export function mount(root) {
       return emptyState('inbox', 'No model activity found', 'Requests routed to AI models will display token consumers and shares here.');
     }
 
-    const cards = list.map((m) => {
+    const sortedList = sortItems(list, 'models');
+    const legendEl = renderLegend(rawList.length, sortedList.length);
+    const headerEl = renderListHeader('models');
+
+    const cards = sortedList.map((m) => {
       const isExpanded = expandedModels.has(m.model);
       const chevron = icon(isExpanded ? 'chevron-down' : 'chevron-right');
       const shareVal = typeof m.token_share === 'number' ? `${m.token_share.toFixed(1)}%` : '0%';
@@ -431,7 +609,7 @@ export function mount(root) {
           }
         },
           // Left: Model Identity
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', minWidth: '220px' } },
+          h('div', { class: 'col-entity', style: { display: 'flex', alignItems: 'center', gap: '10px' } },
             chevron,
             h('span', { style: { fontWeight: 'bold', fontSize: '13.5px' } }, m.model),
             m.enabled
@@ -439,26 +617,39 @@ export function mount(root) {
               : h('span', { class: 'badge err', style: { fontSize: '10px' } }, 'Disabled')
           ),
 
-          // Middle: Metrics Pills
-          h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '20px', fontSize: '12px' } },
-            // Tokens
-            h('div', { style: { textAlign: 'right' } },
+          // Middle: Metrics Columns
+          h('div', { class: 'breakdown-metrics', style: { fontSize: '12px' } },
+            // Tokens Column
+            h('div', { class: 'metric-col-tokens', style: { textAlign: 'right' } },
               h('div', { style: { fontSize: '14px', fontWeight: 'bold' } }, fmtNum(m.total_tokens)),
-              h('div', { class: 'muted', style: { fontSize: '11px' } }, `${fmtCompact(m.prompt_tokens)} in / ${fmtCompact(m.completion_tokens)} out`)
+              h('div', { style: { fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '4px' } },
+                h('span', { class: 'tok-in', title: `Input Prompt: ${fmtNum(m.prompt_tokens)} tokens` }, `↓ ${fmtCompact(m.prompt_tokens)}`),
+                h('span', { class: 'muted' }, '/'),
+                h('span', { class: 'tok-out', title: `Output Response: ${fmtNum(m.completion_tokens)} tokens` }, `↑ ${fmtCompact(m.completion_tokens)}`)
+              ),
+              renderRatioBar(m.prompt_tokens, m.completion_tokens)
             ),
-            // Requests
-            h('div', { style: { textAlign: 'right' } },
-              h('div', { style: { fontSize: '14px', fontWeight: 'bold' } }, fmtNum(m.total_requests)),
-              h('div', { class: 'muted', style: { fontSize: '11px' } }, `${m.success_requests} ok · ${m.blocked_requests} blk`)
+            // Requests Column
+            h('div', { class: 'metric-col-requests', style: { textAlign: 'right' } },
+              h('div', { style: { fontSize: '14px', fontWeight: 'bold' } },
+                fmtNum(m.total_requests),
+                h('small', { class: 'muted', style: { fontSize: '11px', fontWeight: 'normal', marginLeft: '3px' } }, 'reqs')
+              ),
+              h('div', { style: { fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '4px' } },
+                h('span', { style: { color: 'var(--ok)', fontWeight: '600' }, title: `${fmtNum(m.success_requests)} successful requests` }, `✓ ${m.success_requests}`),
+                m.blocked_requests > 0
+                  ? h('span', { style: { color: 'var(--danger)', fontWeight: '600' }, title: `${fmtNum(m.blocked_requests)} blocked requests` }, `✕ ${m.blocked_requests}`)
+                  : null
+              )
             ),
-            // Latency
-            h('div', { style: { textAlign: 'right', minWidth: '60px' } },
+            // Latency Column
+            h('div', { class: 'metric-col-latency', style: { textAlign: 'right' } },
               h('div', { style: { fontSize: '13px', fontWeight: '600' } }, fmtDur(m.avg_duration_ms)),
               h('div', { class: 'muted', style: { fontSize: '11px' } }, 'avg lat')
             ),
-            // Share of System
-            h('div', { style: { minWidth: '90px' } },
-              h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginBottom: '2px' } },
+            // Share of System Column
+            h('div', { class: 'metric-col-share' },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginBottom: '3px' } },
                 h('span', { class: 'muted' }, 'Share'),
                 h('span', { style: { fontWeight: '600' } }, shareVal)
               ),
@@ -469,7 +660,7 @@ export function mount(root) {
           ),
 
           // Right: Action button
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+          h('div', { style: { width: '85px', display: 'flex', justifyContent: 'flex-end', alignItems: 'center' } },
             h('button', {
               class: 'btn btn-sm',
               type: 'button',
@@ -484,7 +675,7 @@ export function mount(root) {
 
       // Expanded Sub-table: Who consumed this model ("Siapa saja pemakai model ini")
       if (isExpanded) {
-        const consumers = m.key_consumers || [];
+        const consumers = [...(m.key_consumers || [])].sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
         const consumerRows = consumers.map((c) => {
           const cShare = typeof c.share === 'number' ? `${c.share.toFixed(1)}%` : '-';
           return h('tr', null,
@@ -494,10 +685,11 @@ export function mount(root) {
             ),
             h('td', null, h('code', { class: 'muted' }, c.key)),
             h('td', { class: 'num' }, fmtNum(c.requests)),
-            h('td', { class: 'num' }, fmtNum(c.prompt_tokens)),
-            h('td', { class: 'num' }, fmtNum(c.comp_tokens)),
+            h('td', { class: 'num tok-in' }, fmtNum(c.prompt_tokens)),
+            h('td', { class: 'num tok-out' }, fmtNum(c.comp_tokens)),
+            h('td', null, renderRatioBar(c.prompt_tokens, c.comp_tokens)),
             h('td', { class: 'num strong' }, fmtNum(c.total_tokens)),
-            h('td', { style: { minWidth: '120px' } },
+            h('td', { style: { minWidth: '100px' } },
               h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
                 h('div', { style: { flex: '1', height: '5px', background: 'var(--border)', borderRadius: '3px', overflow: 'hidden' } },
                   h('div', { style: { width: `${Math.min(100, Math.max(2, c.share || 0))}%`, height: '100%', background: 'var(--ok)' } })
@@ -520,14 +712,19 @@ export function mount(root) {
                   h('th', null, 'Client Key Name'),
                   h('th', null, 'Masked Key'),
                   h('th', { class: 'num' }, 'Requests'),
-                  h('th', { class: 'num' }, 'Prompt Tok'),
-                  h('th', { class: 'num' }, 'Comp Tok'),
-                  h('th', { class: 'num' }, 'Total Tok'),
-                  h('th', null, 'Model Share')
+                  h('th', { class: 'num', style: { minWidth: '110px' } },
+                    h('span', { class: 'tok-in' }, '📥 Input (Prompt)')
+                  ),
+                  h('th', { class: 'num', style: { minWidth: '110px' } },
+                    h('span', { class: 'tok-out' }, '📤 Output (Response)')
+                  ),
+                  h('th', { style: { width: '90px' } }, 'In / Out Ratio'),
+                  h('th', { class: 'num' }, 'Total Tokens'),
+                  h('th', { style: { minWidth: '100px' } }, 'Model Share')
                 )
               ),
               h('tbody', null,
-                consumerRows.length ? consumerRows : h('tr', null, h('td', { colspan: 7, class: 'muted' }, 'No consumer breakdown available.'))
+                consumerRows.length ? consumerRows : h('tr', null, h('td', { colspan: 8, class: 'muted' }, 'No consumer breakdown available.'))
               )
             )
           )
@@ -539,7 +736,7 @@ export function mount(root) {
       return itemCard;
     });
 
-    return h('div', null, ...cards);
+    return h('div', null, legendEl, headerEl, ...cards);
   }
 
   // ── Render Content based on active group ──

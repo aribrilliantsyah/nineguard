@@ -38,6 +38,7 @@ type FilterParams struct {
 	Model     string
 	APIKey    string
 	Provider  string
+	ClientIP  string
 	Status    string // "ok", "blocked", "error" or status code
 	Level     string // comma-separated: "DEBUG,INFO,WARN,ERROR,FATAL"
 	Search    string // search term / query string
@@ -492,8 +493,15 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 		args = append(args, p.APIKey, p.APIKey, "%"+p.APIKey+"%", "%"+p.APIKey+"%")
 	}
 
+	if p.ClientIP != "" {
+		conditions = append(conditions, "(client_ip = ? OR client_ip LIKE ?)")
+		args = append(args, p.ClientIP, "%"+p.ClientIP+"%")
+	}
+
 	if p.Status != "" {
 		parts := strings.Split(p.Status, ",")
+		has403 := false
+		has4xx := false
 		var statusConds []string
 		for _, raw := range parts {
 			s := strings.ToLower(strings.TrimSpace(raw))
@@ -502,10 +510,10 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 				statusConds = append(statusConds, "(status_code >= 200 AND status_code < 300)")
 			case "3xx", "redirect":
 				statusConds = append(statusConds, "(status_code >= 300 AND status_code < 400)")
-			case "4xx", "client", "client_error":
-				statusConds = append(statusConds, "(status_code >= 400 AND status_code < 500)")
 			case "403", "blocked":
-				statusConds = append(statusConds, "(status_code = 403)")
+				has403 = true
+			case "4xx", "client", "client_error":
+				has4xx = true
 			case "5xx", "server", "server_error":
 				statusConds = append(statusConds, "(status_code >= 500)")
 			case "error", "errors":
@@ -516,7 +524,14 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 				}
 			}
 		}
-		if len(statusConds) > 0 && len(statusConds) < 5 {
+		if has403 && has4xx {
+			statusConds = append(statusConds, "(status_code >= 400 AND status_code < 500)")
+		} else if has403 {
+			statusConds = append(statusConds, "(status_code = 403)")
+		} else if has4xx {
+			statusConds = append(statusConds, "(status_code >= 400 AND status_code < 500 AND status_code != 403)")
+		}
+		if len(statusConds) > 0 {
 			conditions = append(conditions, "("+strings.Join(statusConds, " OR ")+")")
 		}
 	}
@@ -573,8 +588,22 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 					conditions = append(conditions, "provider_id LIKE ?")
 					args = append(args, "%"+val+"%")
 					continue
+				case "ip":
+					conditions = append(conditions, "client_ip LIKE ?")
+					args = append(args, "%"+val+"%")
+					continue
 				case "status":
-					if code, err := strconv.Atoi(val); err == nil {
+					sVal := strings.ToLower(val)
+					if sVal == "blocked" || sVal == "403" {
+						conditions = append(conditions, "status_code = 403")
+						continue
+					} else if sVal == "ok" || sVal == "200" || sVal == "2xx" {
+						conditions = append(conditions, "(status_code >= 200 AND status_code < 300)")
+						continue
+					} else if sVal == "error" || sVal == "errors" {
+						conditions = append(conditions, "status_code >= 400")
+						continue
+					} else if code, err := strconv.Atoi(val); err == nil {
 						conditions = append(conditions, "status_code = ?")
 						args = append(args, code)
 						continue
@@ -720,7 +749,7 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 		BucketNanos: bucketWidthSec * 1e9,
 		Buckets:     make([]VolumeBucket, buckets),
 		Totals: map[string]int64{
-			"2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0,
+			"2xx": 0, "3xx": 0, "403": 0, "4xx": 0, "5xx": 0,
 			"DEBUG": 0, "INFO": 0, "WARN": 0, "ERROR": 0, "FATAL": 0,
 		},
 	}
@@ -728,7 +757,7 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 		res.Buckets[i] = VolumeBucket{
 			Start: (fromUnix + int64(i)*bucketWidthSec) * 1e9,
 			Counts: map[string]int64{
-				"2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0,
+				"2xx": 0, "3xx": 0, "403": 0, "4xx": 0, "5xx": 0,
 				"DEBUG": 0, "INFO": 0, "WARN": 0, "ERROR": 0, "FATAL": 0,
 			},
 		}
@@ -755,8 +784,14 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 		conditions = append(conditions, "(api_key = ? OR api_key_name = ? OR api_key LIKE ? OR api_key_name LIKE ?)")
 		args = append(args, p.APIKey, p.APIKey, "%"+p.APIKey+"%", "%"+p.APIKey+"%")
 	}
+	if p.ClientIP != "" {
+		conditions = append(conditions, "(client_ip = ? OR client_ip LIKE ?)")
+		args = append(args, p.ClientIP, "%"+p.ClientIP+"%")
+	}
 	if p.Status != "" {
 		parts := strings.Split(p.Status, ",")
+		has403 := false
+		has4xx := false
 		var statusConds []string
 		for _, raw := range parts {
 			s := strings.ToLower(strings.TrimSpace(raw))
@@ -765,10 +800,10 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 				statusConds = append(statusConds, "(status_code >= 200 AND status_code < 300)")
 			case "3xx", "redirect":
 				statusConds = append(statusConds, "(status_code >= 300 AND status_code < 400)")
-			case "4xx", "client", "client_error":
-				statusConds = append(statusConds, "(status_code >= 400 AND status_code < 500)")
 			case "403", "blocked":
-				statusConds = append(statusConds, "(status_code = 403)")
+				has403 = true
+			case "4xx", "client", "client_error":
+				has4xx = true
 			case "5xx", "server", "server_error":
 				statusConds = append(statusConds, "(status_code >= 500)")
 			case "error", "errors":
@@ -779,7 +814,14 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 				}
 			}
 		}
-		if len(statusConds) > 0 && len(statusConds) < 5 {
+		if has403 && has4xx {
+			statusConds = append(statusConds, "(status_code >= 400 AND status_code < 500)")
+		} else if has403 {
+			statusConds = append(statusConds, "(status_code = 403)")
+		} else if has4xx {
+			statusConds = append(statusConds, "(status_code >= 400 AND status_code < 500 AND status_code != 403)")
+		}
+		if len(statusConds) > 0 {
 			conditions = append(conditions, "("+strings.Join(statusConds, " OR ")+")")
 		}
 	}
@@ -818,6 +860,44 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 			if term == "" {
 				continue
 			}
+			if colonIdx := strings.Index(term, ":"); colonIdx > 0 {
+				prefix := strings.ToLower(term[:colonIdx])
+				val := term[colonIdx+1:]
+				switch prefix {
+				case "model":
+					conditions = append(conditions, "model LIKE ?")
+					args = append(args, "%"+val+"%")
+					continue
+				case "key":
+					conditions = append(conditions, "(api_key LIKE ? OR api_key_name LIKE ?)")
+					args = append(args, "%"+val+"%", "%"+val+"%")
+					continue
+				case "provider":
+					conditions = append(conditions, "provider_id LIKE ?")
+					args = append(args, "%"+val+"%")
+					continue
+				case "ip":
+					conditions = append(conditions, "client_ip LIKE ?")
+					args = append(args, "%"+val+"%")
+					continue
+				case "status":
+					sVal := strings.ToLower(val)
+					if sVal == "blocked" || sVal == "403" {
+						conditions = append(conditions, "status_code = 403")
+						continue
+					} else if sVal == "ok" || sVal == "200" || sVal == "2xx" {
+						conditions = append(conditions, "(status_code >= 200 AND status_code < 300)")
+						continue
+					} else if sVal == "error" || sVal == "errors" {
+						conditions = append(conditions, "status_code >= 400")
+						continue
+					} else if code, err := strconv.Atoi(val); err == nil {
+						conditions = append(conditions, "status_code = ?")
+						args = append(args, code)
+						continue
+					}
+				}
+			}
 			likeTerm := "%" + term + "%"
 			conditions = append(conditions, `(
 				model LIKE ? OR 
@@ -835,6 +915,7 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 		SELECT 
 			(CAST(strftime('%%s', timestamp) AS INTEGER) - %d) / %d as b_idx,
 			CASE
+				WHEN status_code = 403 THEN '403'
 				WHEN status_code >= 500 THEN '5xx'
 				WHEN status_code >= 400 THEN '4xx'
 				WHEN status_code >= 300 THEN '3xx'
@@ -871,6 +952,9 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 			case "2xx":
 				res.Buckets[bIdx].Counts["INFO"] += cnt
 				res.Totals["INFO"] += cnt
+			case "403":
+				res.Buckets[bIdx].Counts["WARN"] += cnt
+				res.Totals["WARN"] += cnt
 			case "4xx":
 				res.Buckets[bIdx].Counts["ERROR"] += cnt
 				res.Totals["ERROR"] += cnt

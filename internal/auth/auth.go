@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -19,12 +20,14 @@ const userContextKey contextKey = "user"
 const SessionCookieName = "nineguard_session"
 
 type User struct {
-	ID          int64     `json:"id"`
-	Username    string    `json:"username"`
-	DisplayName string    `json:"display_name"`
-	Role        string    `json:"role"` // admin | operator
-	CreatedAt   time.Time `json:"created_at"`
-	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
+	ID               int64      `json:"id"`
+	Username         string     `json:"username"`
+	DisplayName      string     `json:"display_name"`
+	Role             string     `json:"role"` // admin | operator
+	CreatedAt        time.Time  `json:"created_at"`
+	LastLoginAt      *time.Time `json:"last_login_at,omitempty"`
+	HasRecovery      bool       `json:"has_recovery"`
+	RecoveryQuestion string     `json:"recovery_question,omitempty"`
 }
 
 type Manager struct {
@@ -99,11 +102,12 @@ func (m *Manager) Login(username, password string) (*User, string, error) {
 	var user User
 	var hash string
 	var lastLogin sql.NullTime
+	var recQ, recAns sql.NullString
 
 	err := m.db.QueryRow(`
-		SELECT id, username, display_name, password_hash, role, created_at, last_login_at
+		SELECT id, username, display_name, password_hash, role, created_at, last_login_at, recovery_question, recovery_answer_hash
 		FROM users WHERE username = ?
-	`, username).Scan(&user.ID, &user.Username, &user.DisplayName, &hash, &user.Role, &user.CreatedAt, &lastLogin)
+	`, username).Scan(&user.ID, &user.Username, &user.DisplayName, &hash, &user.Role, &user.CreatedAt, &lastLogin, &recQ, &recAns)
 
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -118,6 +122,11 @@ func (m *Manager) Login(username, password string) (*User, string, error) {
 
 	if lastLogin.Valid {
 		user.LastLoginAt = &lastLogin.Time
+	}
+
+	user.HasRecovery = recAns.Valid && strings.TrimSpace(recAns.String) != ""
+	if recQ.Valid {
+		user.RecoveryQuestion = recQ.String
 	}
 
 	_, _ = m.db.Exec("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", user.ID)
@@ -154,13 +163,14 @@ func (m *Manager) ValidateSession(token string) (*User, error) {
 	var user User
 	var expiresAt time.Time
 	var lastLogin sql.NullTime
+	var recQ, recAns sql.NullString
 
 	err := m.db.QueryRow(`
-		SELECT u.id, u.username, u.display_name, u.role, u.created_at, u.last_login_at, s.expires_at
+		SELECT u.id, u.username, u.display_name, u.role, u.created_at, u.last_login_at, s.expires_at, u.recovery_question, u.recovery_answer_hash
 		FROM sessions s
 		JOIN users u ON s.user_id = u.id
 		WHERE s.token = ?
-	`, token).Scan(&user.ID, &user.Username, &user.DisplayName, &user.Role, &user.CreatedAt, &lastLogin, &expiresAt)
+	`, token).Scan(&user.ID, &user.Username, &user.DisplayName, &user.Role, &user.CreatedAt, &lastLogin, &expiresAt, &recQ, &recAns)
 
 	if err != nil {
 		return nil, err
@@ -175,11 +185,16 @@ func (m *Manager) ValidateSession(token string) (*User, error) {
 		user.LastLoginAt = &lastLogin.Time
 	}
 
+	user.HasRecovery = recAns.Valid && strings.TrimSpace(recAns.String) != ""
+	if recQ.Valid {
+		user.RecoveryQuestion = recQ.String
+	}
+
 	return &user, nil
 }
 
 func (m *Manager) ListUsers() ([]User, error) {
-	rows, err := m.db.Query("SELECT id, username, display_name, role, created_at, last_login_at FROM users ORDER BY id ASC")
+	rows, err := m.db.Query("SELECT id, username, display_name, role, created_at, last_login_at, recovery_question, recovery_answer_hash FROM users ORDER BY id ASC")
 	if err != nil {
 		return nil, err
 	}
@@ -189,11 +204,16 @@ func (m *Manager) ListUsers() ([]User, error) {
 	for rows.Next() {
 		var u User
 		var lastLogin sql.NullTime
-		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.CreatedAt, &lastLogin); err != nil {
+		var recQ, recAns sql.NullString
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.CreatedAt, &lastLogin, &recQ, &recAns); err != nil {
 			return nil, err
 		}
 		if lastLogin.Valid {
 			u.LastLoginAt = &lastLogin.Time
+		}
+		u.HasRecovery = recAns.Valid && strings.TrimSpace(recAns.String) != ""
+		if recQ.Valid {
+			u.RecoveryQuestion = recQ.String
 		}
 		list = append(list, u)
 	}
@@ -235,13 +255,18 @@ func (m *Manager) UpdateUser(id int64, username, displayName, role string) (*Use
 	}
 	var u User
 	var lastLogin sql.NullTime
-	err = m.db.QueryRow("SELECT id, username, display_name, role, created_at, last_login_at FROM users WHERE id = ?", id).
-		Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.CreatedAt, &lastLogin)
+	var recQ, recAns sql.NullString
+	err = m.db.QueryRow("SELECT id, username, display_name, role, created_at, last_login_at, recovery_question, recovery_answer_hash FROM users WHERE id = ?", id).
+		Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.CreatedAt, &lastLogin, &recQ, &recAns)
 	if err != nil {
 		return nil, err
 	}
 	if lastLogin.Valid {
 		u.LastLoginAt = &lastLogin.Time
+	}
+	u.HasRecovery = recAns.Valid && strings.TrimSpace(recAns.String) != ""
+	if recQ.Valid {
+		u.RecoveryQuestion = recQ.String
 	}
 	return &u, nil
 }
@@ -267,6 +292,94 @@ func (m *Manager) DeleteUser(id int64) error {
 	return err
 }
 
+func (m *Manager) SetRecoveryQuestion(userID int64, question, answer string) error {
+	trimmedQ := strings.TrimSpace(question)
+	trimmedAns := strings.TrimSpace(strings.ToLower(answer))
+	if trimmedQ == "" {
+		return errors.New("recovery question cannot be empty")
+	}
+	if len(trimmedAns) < 2 {
+		return errors.New("recovery answer must be at least 2 characters")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(trimmedAns), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	_, err = m.db.Exec("UPDATE users SET recovery_question = ?, recovery_answer_hash = ? WHERE id = ?", trimmedQ, string(hash), userID)
+	return err
+}
+
+func (m *Manager) GetRecoveryQuestion(username string) (string, error) {
+	var q, ans sql.NullString
+	err := m.db.QueryRow("SELECT recovery_question, recovery_answer_hash FROM users WHERE username = ?", strings.TrimSpace(username)).Scan(&q, &ans)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", errors.New("user not found")
+		}
+		return "", err
+	}
+	if !ans.Valid || strings.TrimSpace(ans.String) == "" || !q.Valid || strings.TrimSpace(q.String) == "" {
+		return "", errors.New("no recovery question configured for this account")
+	}
+	return q.String, nil
+}
+
+func (m *Manager) RecoverPassword(username, answer, newPassword string) error {
+	if len(newPassword) < 6 {
+		return errors.New("password must be at least 6 characters")
+	}
+	var id int64
+	var ansHash string
+	err := m.db.QueryRow("SELECT id, recovery_answer_hash FROM users WHERE username = ?", strings.TrimSpace(username)).Scan(&id, &ansHash)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("invalid username or recovery answer")
+		}
+		return err
+	}
+	if strings.TrimSpace(ansHash) == "" {
+		return errors.New("no recovery question configured for this account")
+	}
+
+	trimmedAns := strings.TrimSpace(strings.ToLower(answer))
+	if err := bcrypt.CompareHashAndPassword([]byte(ansHash), []byte(trimmedAns)); err != nil {
+		return errors.New("incorrect recovery answer")
+	}
+
+	return m.ChangePassword(id, newPassword)
+}
+
+func (m *Manager) UpdateProfile(userID int64, displayName string) (*User, error) {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		return nil, errors.New("display name cannot be empty")
+	}
+	_, err := m.db.Exec("UPDATE users SET display_name = ? WHERE id = ?", displayName, userID)
+	if err != nil {
+		return nil, err
+	}
+	var u User
+	var lastLogin sql.NullTime
+	var recQ, recAns sql.NullString
+	err = m.db.QueryRow("SELECT id, username, display_name, role, created_at, last_login_at, recovery_question, recovery_answer_hash FROM users WHERE id = ?", userID).
+		Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.CreatedAt, &lastLogin, &recQ, &recAns)
+	if err != nil {
+		return nil, err
+	}
+	if lastLogin.Valid {
+		u.LastLoginAt = &lastLogin.Time
+	}
+	u.HasRecovery = recAns.Valid && strings.TrimSpace(recAns.String) != ""
+	if recQ.Valid {
+		u.RecoveryQuestion = recQ.String
+	}
+	return &u, nil
+}
+
+func ContextWithUser(ctx context.Context, u *User) context.Context {
+	return context.WithValue(ctx, userContextKey, u)
+}
+
 func UserFromContext(ctx context.Context) *User {
 	if u, ok := ctx.Value(userContextKey).(*User); ok {
 		return u
@@ -278,7 +391,7 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !m.authEnabled {
 			// Auth disabled: inject dummy admin
-			dummy := &User{ID: 1, Username: "admin", DisplayName: "Administrator", Role: "admin"}
+			dummy := &User{ID: 1, Username: "admin", DisplayName: "Administrator", Role: "admin", HasRecovery: true}
 			ctx := context.WithValue(r.Context(), userContextKey, dummy)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return

@@ -14,14 +14,18 @@ export const store = {
   displayName: '',
   role: '', // admin | operator
   authEnabled: true,
+  hasRecovery: false,
+  recoveryQuestion: '',
 };
 
-// setUser stores the signed-in identity ({id, username, display_name, role}).
+// setUser stores the signed-in identity ({id, username, display_name, role, has_recovery, recovery_question}).
 export function setUser(u) {
   store.userId = u.id || '';
   store.user = u.username || '';
   store.displayName = u.display_name || u.username || '';
   store.role = u.role || '';
+  store.hasRecovery = !!u.has_recovery;
+  store.recoveryQuestion = u.recovery_question || '';
   emit('user');
 }
 

@@ -6,7 +6,9 @@ export function mount(root) {
   let alive = true;
   let providersList = [];
 
-  const listContainer = h('div', { class: 'mt' });
+  const listContainer = h('div', { class: 'mt' },
+    h('div', { class: 'skel', style: { height: '120px', borderRadius: '8px' } })
+  );
 
   // ── Header ──
   const addBtn = h('button', {
@@ -66,7 +68,17 @@ export function mount(root) {
   function renderProviders() {
     if (!providersList.length) {
       listContainer.replaceChildren(
-        emptyState('server', 'No Upstream Providers Configured', 'Click "Add Provider" to register your first OpenAI-compatible upstream endpoint.')
+        emptyState(
+          'server',
+          'No Upstream Providers Configured',
+          'No upstream OpenAI-compatible providers registered yet. Click "Add Provider" to connect your first provider (e.g. OpenRouter, Ollama, OpenAI).',
+          h('button', {
+            class: 'btn btn-primary',
+            type: 'button',
+            style: { marginTop: '12px' },
+            onclick: () => openProviderModal()
+          }, icon('plus'), 'Add Provider')
+        )
       );
       return;
     }
@@ -134,8 +146,24 @@ export function mount(root) {
         : h('span', { class: 'badge muted' }, 'no prefix');
 
       const defaultTag = p.is_default
-        ? h('span', { class: 'badge ok', style: { fontSize: '10px' } }, 'Default Fallback')
-        : null;
+        ? h('span', {
+            class: 'badge ok',
+            style: { fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }
+          }, icon('check'), 'Default Fallback')
+        : h('button', {
+            class: 'badge muted badge-btn',
+            type: 'button',
+            title: 'Set this provider as the default fallback for non-prefixed models',
+            onclick: async () => {
+              try {
+                await api.post(`/providers/${p.id}/default`);
+                toast(`"${p.name}" is now the default provider`, 'ok');
+                await load();
+              } catch (e) {
+                toast(`Failed: ${e.message}`, 'error');
+              }
+            }
+          }, 'Set as Default');
 
       return h('div', { class: 'card', style: { marginBottom: '12px' } },
         h('div', { class: 'card-head', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
@@ -211,7 +239,7 @@ export function mount(root) {
 
     const defaultCheck = h('input', {
       type: 'checkbox',
-      checked: existing ? existing.is_default : (providersList.length === 0)
+      checked: existing ? Boolean(existing.is_default) : (providersList.length === 0)
     });
 
     const defaultLabel = h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '12px' } },
@@ -264,7 +292,7 @@ export function mount(root) {
         const route = routeInput.value.trim();
         const prefix = prefixInput.value.trim();
         const apiKey = keyField.input.value.trim();
-        const isDef = defaultCheck.checked;
+        const isDef = Boolean(defaultCheck.checked);
 
         if (!name) throw new Error('Provider name is required');
         if (!route) throw new Error('Route target URL is required');
@@ -307,9 +335,25 @@ export function mount(root) {
   async function load() {
     try {
       const res = await api.get('/providers');
-      providersList = (res && res.providers) ? res.providers : [];
-    } catch {
+      providersList = (res && Array.isArray(res.providers)) ? res.providers : [];
+    } catch (err) {
       providersList = [];
+      toast(`Failed to load providers: ${err.message || 'Server error'}`, 'error');
+      if (!alive) return;
+      listContainer.replaceChildren(
+        emptyState(
+          'alert',
+          'Could Not Load Providers',
+          err.message || 'Failed to fetch upstream providers from server.',
+          h('button', {
+            class: 'btn btn-sm',
+            type: 'button',
+            style: { marginTop: '10px' },
+            onclick: load
+          }, icon('refresh'), 'Retry')
+        )
+      );
+      return;
     }
     if (!alive) return;
     renderProviders();

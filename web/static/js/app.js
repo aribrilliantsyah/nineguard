@@ -214,7 +214,13 @@ async function start() {
   // An administrator without a recovery question can only be rescued by another admin.
   if (isAdmin()) {
     api.get('/profile').then((p) => {
-      if (!p.user.has_recovery) toast('Set a recovery question in your profile, so a lost password or phone can be recovered', 'error');
+      if (p.user) setUser(p.user);
+      if (!p.user.has_recovery) {
+        toast('Set a recovery question in your profile, so a lost password or phone can be recovered', 'error', {
+          text: 'Set Up Now',
+          onClick: () => setRoute('profile'),
+        });
+      }
     }).catch(() => {});
   }
 }

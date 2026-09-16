@@ -1,6 +1,6 @@
 // Endpoints & Agent Setup: Upstream provider configuration, NineGuard API key generation, and IDE guides.
 import { api } from '../api.js';
-import { h, icon, toast, fmtNum, fmtCompact, emptyState, formDialog, confirmDialog } from '../ui.js';
+import { h, icon, toast, fmtNum, fmtCompact, emptyState, formDialog, confirmDialog, searchableSelect } from '../ui.js';
 import { setRoute } from '../state.js';
 
 export function mount(root) {
@@ -8,6 +8,7 @@ export function mount(root) {
   let activeTab = 'cursor';
   let modelsList = [];
   let keysList = [];
+  let modelGroupsList = [];
   let upstreamInfo = { configured: false, masked_key: '', key: '', router_target: '' };
 
   const origin = location.origin || `${location.protocol}//${location.host}` || 'http://localhost:8080';
@@ -181,17 +182,38 @@ export function mount(root) {
             }
           }, k.is_active ? 'Active' : 'Disabled');
 
-          // Allowed Models Display
-          const allowedList = Array.isArray(k.allowed_models) ? k.allowed_models : [];
-          const isAll = allowedList.length === 0 || allowedList.includes('*') || allowedList.includes('all');
+          // Allowed Models / Groups Display
+          const keyMode = k.model_access_mode || (
+            (!k.allowed_models || k.allowed_models.length === 0 || k.allowed_models.includes('*') || k.allowed_models.includes('all'))
+              ? 'all'
+              : 'custom'
+          );
+
           let allowedCell;
-          if (isAll) {
+          if (keyMode === 'all') {
             allowedCell = h('td', null,
               h('span', { class: 'badge ok', style: { fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' } },
                 icon('check'), 'All Models (*)'
               )
             );
+          } else if (keyMode === 'group') {
+            const gids = Array.isArray(k.model_group_ids) ? k.model_group_ids : [];
+            const groupBadges = gids.map(gid => {
+              const grp = modelGroupsList.find(g => g.id === gid);
+              const label = grp ? grp.name : gid;
+              const modelPreview = grp && grp.models ? grp.models.join(', ') : '';
+              return h('span', {
+                class: 'badge',
+                style: { background: 'var(--accent)', color: '#fff', fontSize: '11px', marginRight: '4px', cursor: 'help', display: 'inline-flex', alignItems: 'center', gap: '4px' },
+                title: modelPreview ? `Models in ${label}:\n${grp.models.join('\n')}` : label
+              }, icon('sparkles'), label);
+            });
+            if (groupBadges.length === 0) {
+              groupBadges.push(h('span', { class: 'badge err', style: { fontSize: '11px' } }, 'No groups linked'));
+            }
+            allowedCell = h('td', null, h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '2px', alignItems: 'center' } }, ...groupBadges));
           } else {
+            const allowedList = Array.isArray(k.allowed_models) ? k.allowed_models : [];
             const count = allowedList.length;
             const badges = allowedList.slice(0, 2).map(m =>
               h('span', { class: 'badge', style: { background: 'var(--hover)', fontSize: '11px', fontFamily: 'monospace', marginRight: '4px' } }, m)
@@ -251,7 +273,16 @@ export function mount(root) {
   function openKeyModal(existingKey = null) {
     const isEdit = Boolean(existingKey);
     const existingModels = (existingKey && Array.isArray(existingKey.allowed_models)) ? existingKey.allowed_models : [];
-    const isAllByDefault = !existingKey || existingModels.length === 0 || existingModels.includes('*') || existingModels.includes('all');
+    const existingGroupIDs = new Set((existingKey && Array.isArray(existingKey.model_group_ids)) ? existingKey.model_group_ids : []);
+
+    let initialMode = 'all';
+    if (existingKey) {
+      if (existingKey.model_access_mode) {
+        initialMode = existingKey.model_access_mode;
+      } else if (existingModels.length > 0 && !existingModels.includes('*') && !existingModels.includes('all')) {
+        initialMode = 'custom';
+      }
+    }
 
     const nameInput = h('input', {
       class: 'input',
@@ -260,55 +291,195 @@ export function mount(root) {
       value: existingKey ? existingKey.name : 'Cursor IDE'
     });
 
-    // Model selection mode
-    let mode = isAllByDefault ? 'all' : 'custom';
+    let mode = initialMode;
 
-    const radioAll = h('input', {
-      type: 'radio',
-      name: 'model_access_mode',
-      value: 'all',
-      checked: isAllByDefault
-    });
-    const radioCustom = h('input', {
-      type: 'radio',
-      name: 'model_access_mode',
-      value: 'custom',
-      checked: !isAllByDefault
-    });
+    // ── Segmented Mode Buttons ──
+    const tabBtnStyle = {
+      flex: '1 1 0',
+      minWidth: '0',
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '6px',
+      fontSize: '12px',
+      height: '32px',
+      padding: '0 10px',
+      whiteSpace: 'nowrap',
+      boxSizing: 'border-box',
+      cursor: 'pointer',
+      textAlign: 'center'
+    };
 
-    const customPanel = h('div', {
+    const btnAll = h('button', {
+      type: 'button',
+      class: `tab${mode === 'all' ? ' active' : ''}`,
+      style: { ...tabBtnStyle },
+      onclick: () => switchAccessMode('all')
+    }, icon('check'), 'All Models (Global)');
+
+    const btnGroup = h('button', {
+      type: 'button',
+      class: `tab${mode === 'group' ? ' active' : ''}`,
+      style: { ...tabBtnStyle },
+      onclick: () => switchAccessMode('group')
+    }, icon('sparkles'), 'Model Groups');
+
+    const btnCustom = h('button', {
+      type: 'button',
+      class: `tab${mode === 'custom' ? ' active' : ''}`,
+      style: { ...tabBtnStyle },
+      onclick: () => switchAccessMode('custom')
+    }, icon('pencil'), 'Custom Selection');
+
+    const modeSelector = h('div', {
+      class: 'tabs',
       style: {
-        display: isAllByDefault ? 'none' : 'flex',
+        width: '100%',
+        boxSizing: 'border-box',
+        marginBottom: '10px',
+        display: 'flex',
+        gap: '4px',
+        padding: '3px'
+      }
+    },
+      btnAll, btnGroup, btnCustom
+    );
+
+    // ── Panel 1: All Models ──
+    const panelAll = h('div', {
+      style: {
+        display: mode === 'all' ? 'block' : 'none',
+        padding: '12px 14px',
+        background: 'var(--hover)',
+        borderRadius: '8px',
+        border: '1px solid var(--border)'
+      }
+    },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', fontWeight: '600', marginBottom: '4px' } },
+        icon('check'), 'Inherit Global Firewall Configuration'
+      ),
+      h('p', { class: 'muted', style: { fontSize: '12px', margin: 0, lineHeight: 1.4 } },
+        'Memberi akses ke semua model yang aktif di global settings. Model baru yang ditambahkan di masa depan otomatis langsung bisa diakses tanpa perlu mengubah settingan API key ini.'
+      )
+    );
+
+    // ── Panel 2: Model Groups ──
+    const groupCheckboxes = new Map();
+    const groupListItems = [];
+
+    const previewContainer = h('div', {
+      style: {
+        marginTop: '10px',
+        padding: '10px 12px',
+        background: 'var(--panel)',
+        borderRadius: '6px',
+        border: '1px solid var(--border)'
+      }
+    });
+
+    function updateGroupPreview() {
+      const selectedGroups = [];
+      const unionModels = new Set();
+      modelGroupsList.forEach(g => {
+        const cb = groupCheckboxes.get(g.id);
+        if (cb && cb.checked) {
+          selectedGroups.push(g);
+          (g.models || []).forEach(m => unionModels.add(m));
+        }
+      });
+
+      if (selectedGroups.length === 0) {
+        previewContainer.replaceChildren(
+          h('div', { class: 'muted', style: { fontSize: '12px', fontStyle: 'italic' } },
+            'Belum ada group yang dipilih. Silakan centang minimal satu model group di atas.'
+          )
+        );
+        return;
+      }
+
+      const badges = Array.from(unionModels).map(m =>
+        h('span', {
+          class: 'badge',
+          style: { background: 'var(--hover)', fontSize: '11px', fontFamily: 'monospace', margin: '2px' }
+        }, m)
+      );
+
+      previewContainer.replaceChildren(
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' } },
+          h('b', { style: { fontSize: '12px' } }, `Preview Model yang Diizinkan (${unionModels.size} models):`),
+          h('span', { class: 'badge ok', style: { fontSize: '10px', display: 'inline-flex', alignItems: 'center', gap: '3px' } }, icon('sparkles'), 'Dynamic Sync')
+        ),
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px', maxHeight: '100px', overflowY: 'auto' } }, ...badges),
+        h('p', { class: 'muted', style: { fontSize: '11px', margin: '8px 0 0', lineHeight: 1.3 } },
+          '💡 Dynamic Reference: Jika ada model baru ditambahkan ke group di atas nanti, API key ini otomatis langsung mendapatkan akses tanpa perlu disentuh ulang.'
+        )
+      );
+    }
+
+    if (modelGroupsList.length === 0) {
+      groupListItems.push(
+        h('div', { class: 'muted', style: { padding: '12px', textAlign: 'center', fontSize: '12px' } },
+          'Belum ada Model Group. Buat group di menu Models > Model Groups.'
+        )
+      );
+    } else {
+      modelGroupsList.forEach(g => {
+        const cb = h('input', {
+          type: 'checkbox',
+          checked: existingGroupIDs.has(g.id)
+        });
+        groupCheckboxes.set(g.id, cb);
+        cb.onchange = updateGroupPreview;
+
+        const count = Array.isArray(g.models) ? g.models.length : 0;
+        const item = h('label', {
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            padding: '8px 10px',
+            borderRadius: '6px',
+            cursor: 'pointer',
+            fontSize: '12.5px',
+            background: 'var(--panel)',
+            border: '1px solid var(--border)',
+            userSelect: 'none'
+          },
+          onmouseenter: (e) => e.currentTarget.style.borderColor = 'var(--accent)',
+          onmouseleave: (e) => e.currentTarget.style.borderColor = 'var(--border)'
+        },
+          cb,
+          h('div', { style: { flex: 1, minWidth: 0 } },
+            h('div', { style: { fontWeight: '600', display: 'flex', alignItems: 'center', gap: '6px' } },
+              icon('sparkles'),
+              g.name
+            ),
+            g.description ? h('div', { class: 'muted', style: { fontSize: '11px', marginTop: '1px' } }, g.description) : null
+          ),
+          h('span', { class: 'badge', style: { fontSize: '11px', whiteSpace: 'nowrap' } }, `${count} model${count === 1 ? '' : 's'}`)
+        );
+        groupListItems.push(item);
+      });
+    }
+
+    const panelGroup = h('div', {
+      style: {
+        display: mode === 'group' ? 'flex' : 'none',
         flexDirection: 'column',
         gap: '8px',
-        marginTop: '10px',
         padding: '12px',
         borderRadius: '8px',
         border: '1px solid var(--border)',
         background: 'var(--hover)'
       }
-    });
-
-    radioAll.onchange = () => {
-      mode = 'all';
-      customPanel.style.display = 'none';
-    };
-    radioCustom.onchange = () => {
-      mode = 'custom';
-      customPanel.style.display = 'flex';
-    };
-
-    const modeSelector = h('div', { style: { display: 'flex', gap: '16px', marginTop: '4px' } },
-      h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: '500' } },
-        radioAll,
-        h('span', null, 'All Models (*)')
-      ),
-      h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: '500' } },
-        radioCustom,
-        h('span', null, 'Custom Allowed Models')
-      )
+    },
+      h('div', { style: { fontSize: '12px', fontWeight: '500', marginBottom: '2px' } }, 'Select Model Group(s):'),
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '170px', overflowY: 'auto' } }, ...groupListItems),
+      previewContainer
     );
+    updateGroupPreview();
 
+    // ── Panel 3: Custom Selection ──
     const filterInput = h('input', {
       class: 'input',
       type: 'text',
@@ -323,7 +494,7 @@ export function mount(root) {
 
     const initialSelected = new Set();
     const leftoverCustom = [];
-    if (!isAllByDefault) {
+    if (initialMode === 'custom') {
       existingModels.forEach(m => {
         if (m === '*' || m === 'all') return;
         if (availableModelIDs.has(m)) {
@@ -402,7 +573,42 @@ export function mount(root) {
       }
     }, 'Clear Selection');
 
+    // Detour helper: Load from Group dropdown
+    const detourSelect = searchableSelect({
+      placeholder: '⚡ Customize from Group...',
+      searchPlaceholder: 'Search model group...',
+      clearable: false,
+      compact: true,
+      style: { fontSize: '11.5px', height: '28px', maxWidth: '210px' },
+      options: [
+        { value: '', label: '⚡ Customize from Group...' },
+        ...modelGroupsList.map(g => ({
+          value: g.id,
+          label: `${g.name} (${(g.models || []).length})`,
+          badge: `${(g.models || []).length} models`
+        }))
+      ],
+      onChange: (gid) => {
+        if (!gid) return;
+        const grp = modelGroupsList.find(g => g.id === gid);
+        if (grp && Array.isArray(grp.models)) {
+          let added = 0;
+          grp.models.forEach(m => {
+            const cb = checkboxes.get(m);
+            if (cb) {
+              cb.checked = true;
+              added++;
+            }
+          });
+          updateCount();
+          toast(`Checked ${added} models from group "${grp.name}"`, 'ok');
+        }
+        detourSelect.setValue('');
+      }
+    });
+
     const actionsRow = h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+      detourSelect,
       selectAllBtn,
       clearAllBtn,
       selectedCount
@@ -431,7 +637,17 @@ export function mount(root) {
       style: { fontSize: '12px' }
     });
 
-    customPanel.append(
+    const panelCustom = h('div', {
+      style: {
+        display: mode === 'custom' ? 'flex' : 'none',
+        flexDirection: 'column',
+        gap: '8px',
+        padding: '12px',
+        borderRadius: '8px',
+        border: '1px solid var(--border)',
+        background: 'var(--hover)'
+      }
+    },
       actionsRow,
       filterInput,
       scrollList,
@@ -441,10 +657,22 @@ export function mount(root) {
       )
     );
 
+    function switchAccessMode(newMode) {
+      mode = newMode;
+      btnAll.classList.toggle('active', mode === 'all');
+      btnGroup.classList.toggle('active', mode === 'group');
+      btnCustom.classList.toggle('active', mode === 'custom');
+
+      panelAll.style.display = mode === 'all' ? 'block' : 'none';
+      panelGroup.style.display = mode === 'group' ? 'flex' : 'none';
+      panelCustom.style.display = mode === 'custom' ? 'flex' : 'none';
+    }
+
     formDialog({
       title: isEdit ? `Edit API Key: ${existingKey.name}` : 'Generate New NineGuard API Key',
       submitText: isEdit ? 'Save Changes' : 'Generate Key',
       wide: true,
+      extraWide: true,
       fields: [
         {
           label: 'Key Name / Description',
@@ -457,7 +685,9 @@ export function mount(root) {
           label: 'Allowed Models (Access Control)',
           node: h('div', null,
             modeSelector,
-            customPanel,
+            panelAll,
+            panelGroup,
+            panelCustom,
             h('p', { class: 'muted', style: { fontSize: '11.5px', marginTop: '6px' } },
               'Configure which models this API key can call. Unauthorized model calls are blocked with HTTP 403 Forbidden.'
             )
@@ -466,9 +696,18 @@ export function mount(root) {
       ],
       onSubmit: async () => {
         const name = nameInput.value.trim() || (isEdit ? existingKey.name : 'Agent Key');
+        let model_access_mode = mode;
+        let model_group_ids = [];
         let allowed_models = [];
 
-        if (mode === 'custom') {
+        if (mode === 'group') {
+          groupCheckboxes.forEach((cb, gid) => {
+            if (cb.checked) model_group_ids.push(gid);
+          });
+          if (model_group_ids.length === 0) {
+            throw new Error('Please select at least one Model Group or switch to "All Models".');
+          }
+        } else if (mode === 'custom') {
           const selected = [];
           checkboxes.forEach((cb, id) => {
             if (cb.checked) selected.push(id);
@@ -485,13 +724,20 @@ export function mount(root) {
           allowed_models = selected;
         }
 
+        const payload = {
+          name,
+          model_access_mode,
+          model_group_ids,
+          allowed_models
+        };
+
         try {
           if (isEdit) {
-            await api.put(`/keys/${existingKey.id}`, { name, allowed_models });
+            await api.put(`/keys/${existingKey.id}`, payload);
             toast(`Key "${name}" updated!`, 'ok');
             await load();
           } else {
-            const newKey = await api.post('/keys', { name, allowed_models });
+            const newKey = await api.post('/keys', payload);
             toast(`Key "${name}" created!`, 'ok');
             await load();
             showGeneratedKeyModal(newKey);
@@ -705,14 +951,40 @@ console.log(response.choices[0].message.content);`
 
   // ── Live Endpoint Tester ──
   function renderTester() {
-    const modelSelect = h('select', { class: 'select', style: { flex: '1' } });
-    modelsList.filter(m => m.enabled).forEach(m => {
-      modelSelect.append(h('option', { value: m.id }, m.id));
+    const enabledModels = modelsList.filter(m => m.enabled);
+    const activeKeys = keysList.filter(k => k.is_active);
+
+    const modelSelect = searchableSelect({
+      placeholder: enabledModels.length ? 'Select model...' : 'No models available',
+      searchPlaceholder: 'Search models...',
+      ariaLabel: 'Target Model',
+      wide: true,
+      compact: true,
+      style: { flex: '1', minWidth: '170px' },
+      options: enabledModels.map(m => {
+        const prov = m.provider_id || (m.id.includes('/') ? m.id.split('/')[0] : '');
+        return {
+          value: m.id,
+          label: m.id,
+          badge: prov || ''
+        };
+      }),
+      value: enabledModels[0]?.id || ''
     });
 
-    const keySelect = h('select', { class: 'select', style: { flex: '1' } });
-    keysList.filter(k => k.is_active).forEach(k => {
-      keySelect.append(h('option', { value: k.raw_key || k.key }, `${k.name} (${k.key})`));
+    const keySelect = searchableSelect({
+      placeholder: activeKeys.length ? 'Select API key...' : 'No keys available',
+      searchPlaceholder: 'Search keys...',
+      ariaLabel: 'NineGuard API Key',
+      wide: true,
+      compact: true,
+      style: { flex: '1', minWidth: '170px' },
+      options: activeKeys.map(k => ({
+        value: k.raw_key || k.key,
+        label: `${k.name} (${k.key})`,
+        badge: k.is_active ? 'active' : ''
+      })),
+      value: activeKeys[0] ? (activeKeys[0].raw_key || activeKeys[0].key) : ''
     });
 
     const promptInput = h('input', {
@@ -831,14 +1103,16 @@ console.log(response.choices[0].message.content);`
   // ── Main Load ──
   async function load() {
     try {
-      const [u, m, k] = await Promise.all([
+      const [u, m, k, g] = await Promise.all([
         api.get('/settings/upstream').catch(() => ({})),
         api.get('/models').catch(() => []),
-        api.get('/keys').catch(() => ({ keys: [] }))
+        api.get('/keys').catch(() => ({ keys: [] })),
+        api.get('/model-groups').catch(() => ({ groups: [] }))
       ]);
       upstreamInfo = u || {};
       modelsList = Array.isArray(m) ? m : [];
       keysList = (k && k.keys) ? k.keys : [];
+      modelGroupsList = (g && Array.isArray(g.groups)) ? g.groups : [];
     } catch {
       // ignore
     }

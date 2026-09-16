@@ -158,13 +158,32 @@ export function fmtBytes(b) {
 }
 
 // ── Feedback ──
-export function toast(msg, kind = 'ok') {
-  const t = h('div', { class: `toast ${kind}` }, icon(kind === 'error' ? 'alert' : 'check'), h('span', null, msg));
-  document.getElementById('toasts').append(t);
+export function toast(msg, kind = 'ok', action = null) {
+  const content = [icon(kind === 'error' ? 'alert' : (kind === 'warn' ? 'alert' : 'check'))];
+  if (typeof msg === 'string') {
+    content.push(h('span', { class: 'toast-text' }, msg));
+  } else if (msg instanceof Node) {
+    content.push(msg);
+  }
+  let t;
+  if (action && action.text) {
+    const actBtn = h('button', {
+      type: 'button',
+      class: 'btn btn-xs btn-primary toast-action',
+      onclick: (e) => {
+        e.stopPropagation();
+        t?.remove();
+        action.onClick?.();
+      }
+    }, action.text);
+    content.push(actBtn);
+  }
+  t = h('div', { class: `toast ${kind}${action ? ' has-action' : ''}` }, ...content);
+  document.getElementById('toasts')?.append(t);
   setTimeout(() => {
     t.classList.add('out');
     setTimeout(() => t.remove(), 250);
-  }, kind === 'error' ? 6000 : 3500);
+  }, action ? 9000 : (kind === 'error' ? 6000 : 3500));
 }
 
 export async function copy(text) {
@@ -250,7 +269,7 @@ export function skeletonRows(n = 10) {
 // Dialog with a small form. onSubmit(values) may throw to show the error and
 // keep the dialog open; its result resolves the promise (false on cancel).
 // fields: [{name, label, type, value, options: [[value, label]], hint, required, autocomplete, placeholder}]
-export function formDialog({ title, body, fields = [], submitText = 'Save', danger = false, wide = false, cancel = true, onSubmit = async () => true }) {
+export function formDialog({ title, body, fields = [], submitText = 'Save', danger = false, wide = false, extraWide = false, className = '', cancel = true, onSubmit = async () => true }) {
   return new Promise((resolve) => {
     const inputs = {};
     const err = h('p', { class: 'form-error' });
@@ -261,13 +280,27 @@ export function formDialog({ title, body, fields = [], submitText = 'Save', dang
         if (f.name) inputs[f.name] = f.input;
         return h('label', { class: 'field' }, f.label ? h('span', null, f.label) : null, f.input, f.hint ? h('small', { class: 'muted' }, f.hint) : null);
       }
-      const input = f.type === 'select'
-        ? h('select', { class: 'select wide', name: f.name }, f.options.map(([v, l]) => h('option', { value: v }, l)))
-        : h('input', {
+      let input;
+      if (f.type === 'search-select' || (f.type === 'select' && (f.searchable || (f.options && f.options.length > 8)))) {
+        input = searchableSelect({
+          placeholder: f.placeholder || 'Select...',
+          searchPlaceholder: f.searchPlaceholder || `Search ${f.label || ''}...`.trim(),
+          options: (f.options || []).map((opt) => (Array.isArray(opt) ? { value: opt[0], label: opt[1] } : opt)),
+          value: f.value ?? '',
+          wide: true,
+          compact: false,
+          ariaLabel: f.label || '',
+        });
+      } else if (f.type === 'select') {
+        input = h('select', { class: 'select wide', name: f.name }, f.options.map(([v, l]) => h('option', { value: v }, l)));
+        if (f.value != null) input.value = f.value;
+      } else {
+        input = h('input', {
           class: 'input', name: f.name, type: f.type || 'text', autocomplete: f.autocomplete || 'off', spellcheck: 'false',
           placeholder: f.placeholder || '', required: f.required !== false,
         });
-      if (f.value != null) input.value = f.value;
+        if (f.value != null) input.value = f.value;
+      }
       inputs[f.name] = input;
       return h('label', { class: 'field' }, h('span', null, f.label), input, f.hint ? h('small', { class: 'muted' }, f.hint) : null);
     });
@@ -277,7 +310,11 @@ export function formDialog({ title, body, fields = [], submitText = 'Save', dang
       resolve(v);
     };
     const onKey = (e) => { if (e.key === 'Escape') close(false); };
-    const form = h('form', { class: `dialog${wide ? ' wide' : ''}`, role: 'dialog', 'aria-modal': 'true' },
+    const formClasses = ['dialog'];
+    if (wide) formClasses.push('wide');
+    if (extraWide) formClasses.push('extra-wide');
+    if (className) formClasses.push(className);
+    const form = h('form', { class: formClasses.join(' '), role: 'dialog', 'aria-modal': 'true' },
       h('h3', null, title), body ? h('p', { class: 'dialog-body' }, body) : null, rows, err,
       h('div', { class: 'dialog-actions' }, cancel ? h('button', { class: 'btn', type: 'button', onclick: () => close(false) }, 'Cancel') : null, ok));
     form.addEventListener('submit', async (e) => {
@@ -365,6 +402,531 @@ export function passwordField(attrs = {}) {
 
   const wrap = h('div', { class: 'password-wrap' }, input, btn);
   return { input, wrap };
+}
+
+// ── Searchable Select (Combobox) ──
+function highlightMatches(text, terms) {
+  if (!terms || !terms.length || !text) return [document.createTextNode(text)];
+  const validTerms = terms.map((t) => t.trim()).filter(Boolean);
+  if (!validTerms.length) return [document.createTextNode(text)];
+
+  const escaped = validTerms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const re = new RegExp('(' + escaped.join('|') + ')', 'gi');
+  const fragments = [];
+  let lastIdx = 0;
+  for (const m of text.matchAll(re)) {
+    if (m.index > lastIdx) {
+      fragments.push(document.createTextNode(text.slice(lastIdx, m.index)));
+    }
+    const mark = document.createElement('mark');
+    mark.className = 'hl';
+    mark.textContent = m[0];
+    fragments.push(mark);
+    lastIdx = m.index + m[0].length;
+  }
+  if (lastIdx < text.length) {
+    fragments.push(document.createTextNode(text.slice(lastIdx)));
+  }
+  return fragments.length ? fragments : [document.createTextNode(text)];
+}
+
+function positionPopover(trigger, popover, minWidth = 220, maxWidth = 380) {
+  const r = trigger.getBoundingClientRect();
+  const pad = 8;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+
+  let width = Math.max(r.width, minWidth);
+  if (width > maxWidth && r.width <= maxWidth) width = maxWidth;
+  if (width > vw - pad * 2) width = vw - pad * 2;
+  popover.style.width = `${Math.round(width)}px`;
+
+  let left = r.left;
+  if (left + width > vw - pad) {
+    left = vw - pad - width;
+  }
+  if (left < pad) left = pad;
+
+  const spaceBelow = vh - r.bottom - pad;
+  const spaceAbove = r.top - pad;
+
+  let top;
+  const listEl = popover.querySelector('.search-select-list');
+
+  if (spaceBelow < 200 && spaceAbove > spaceBelow) {
+    const avail = Math.min(280, Math.max(120, spaceAbove - 46));
+    if (listEl) listEl.style.maxHeight = `${avail}px`;
+    const h = popover.offsetHeight;
+    top = Math.max(pad, r.top - h - 4);
+    popover.classList.add('open-up');
+    popover.classList.remove('open-down');
+  } else {
+    const avail = Math.min(280, Math.max(120, spaceBelow - 46));
+    if (listEl) listEl.style.maxHeight = `${avail}px`;
+    top = r.bottom + 4;
+    popover.classList.add('open-down');
+    popover.classList.remove('open-up');
+  }
+
+  popover.style.left = `${Math.round(left)}px`;
+  popover.style.top = `${Math.round(top)}px`;
+}
+
+export function searchableSelect({
+  placeholder = 'Select...',
+  searchPlaceholder = '',
+  ariaLabel = '',
+  value = '',
+  options = [],
+  clearable = true,
+  compact = true,
+  wide = false,
+  style = {},
+  className = '',
+  minDropdownWidth = 220,
+  maxDropdownWidth = 380,
+  onChange = null,
+} = {}) {
+  let currentValue = value != null ? String(value) : '';
+  let allOptions = [];
+  let filtered = [];
+  let isOpen = false;
+  let isDisabled = false;
+  let focusedIndex = -1;
+  let searchQuery = '';
+
+  const inputPlaceholder = searchPlaceholder || `Search ${ariaLabel || placeholder}...`.replace(/\.{2,}$/, '').trim();
+
+  const trigger = h('div', {
+    class: `search-select${compact ? '' : ' lg'}${wide ? ' wide' : ''}${className ? ' ' + className : ''}`,
+    role: 'combobox',
+    'aria-haspopup': 'listbox',
+    'aria-expanded': 'false',
+    'aria-label': ariaLabel || placeholder,
+    tabindex: '0',
+    style,
+  });
+
+  const labelEl = h('span', { class: 'search-select-label' });
+  const clearBtn = h('button', {
+    type: 'button',
+    class: 'search-select-clear',
+    title: 'Clear selection',
+    tabindex: '-1',
+    style: { display: 'none' },
+    onclick: (e) => {
+      e.stopPropagation();
+      setValue('', true);
+    },
+  }, icon('x'));
+
+  const arrowEl = h('span', { class: 'search-select-arrow' }, icon('chevron-down'));
+  const actionsWrap = h('span', { class: 'search-select-actions' }, clearBtn, arrowEl);
+
+  trigger.append(labelEl, actionsWrap);
+
+  let popover = null;
+  let searchInput = null;
+  let listEl = null;
+  let countBadge = null;
+  let inputClearBtn = null;
+
+  function normalizeOption(item) {
+    if (item == null) return null;
+    if (typeof item === 'string') {
+      let badge = '';
+      if (item.includes('/')) {
+        badge = item.split('/')[0];
+      }
+      return { value: item, label: item, badge, group: '', isAll: false };
+    }
+    if (typeof item === 'object') {
+      const val = item.value != null ? String(item.value) : String(item.id || item.key || item.name || '');
+      const lbl = item.label || item.name || item.id || val;
+      let badge = item.badge || item.provider_id || item.provider || '';
+      if (!badge && val.includes('/')) {
+        badge = val.split('/')[0];
+      }
+      return {
+        value: val,
+        label: String(lbl),
+        badge: String(badge || ''),
+        group: String(item.group || ''),
+        isAll: Boolean(item.isAll),
+      };
+    }
+    return { value: String(item), label: String(item), badge: '', group: '', isAll: false };
+  }
+
+  function findOption(val) {
+    return allOptions.find((o) => o.value === val);
+  }
+
+  function updateTriggerDisplay() {
+    const opt = findOption(currentValue);
+    const hasVal = currentValue !== '';
+    trigger.classList.toggle('has-value', hasVal);
+
+    if (hasVal) {
+      const text = opt ? opt.label : currentValue;
+      labelEl.textContent = text;
+      labelEl.classList.remove('placeholder');
+      trigger.title = text;
+      clearBtn.style.display = clearable ? 'inline-flex' : 'none';
+    } else {
+      const allOpt = allOptions.find((o) => o.value === '' || o.isAll);
+      const text = allOpt ? allOpt.label : placeholder;
+      labelEl.textContent = text;
+      labelEl.classList.add('placeholder');
+      trigger.title = text;
+      clearBtn.style.display = 'none';
+    }
+  }
+
+  function setValue(newVal, emit = false) {
+    const nextVal = newVal != null ? String(newVal) : '';
+    if (currentValue === nextVal && !emit) return;
+    currentValue = nextVal;
+    updateTriggerDisplay();
+    if (emit) {
+      const opt = findOption(currentValue);
+      onChange?.(currentValue, opt);
+      try {
+        if (typeof CustomEvent === 'function' && typeof trigger.dispatchEvent === 'function') {
+          trigger.dispatchEvent(new CustomEvent('change', { detail: { value: currentValue, option: opt } }));
+        }
+      } catch {}
+    }
+  }
+
+  function setOptions(newOpts = [], newVal = undefined, allLabel = undefined) {
+    const normalized = (Array.isArray(newOpts) ? newOpts : [])
+      .map(normalizeOption)
+      .filter(Boolean);
+
+    if (allLabel != null && allLabel !== false) {
+      const hasEmpty = normalized.some((o) => o.value === '');
+      if (!hasEmpty) {
+        normalized.unshift({
+          value: '',
+          label: typeof allLabel === 'string' ? allLabel : placeholder,
+          badge: '',
+          group: '',
+          isAll: true,
+        });
+      }
+    }
+
+    allOptions = normalized;
+
+    if (newVal !== undefined) {
+      currentValue = String(newVal || '');
+      if (currentValue && !allOptions.some((o) => o.value === currentValue)) {
+        allOptions.push(normalizeOption(currentValue));
+      }
+    }
+
+    updateTriggerDisplay();
+    if (isOpen) {
+      renderPopoverList();
+      reposition();
+    }
+  }
+
+  function createPopover() {
+    searchInput = h('input', {
+      class: 'search-select-input',
+      type: 'text',
+      autocomplete: 'off',
+      spellcheck: 'false',
+      placeholder: inputPlaceholder,
+      'aria-label': inputPlaceholder,
+    });
+
+    countBadge = h('span', { class: 'search-select-count' });
+
+    inputClearBtn = h('button', {
+      type: 'button',
+      class: 'search-select-clear',
+      title: 'Clear search',
+      style: { display: 'none' },
+      onclick: (e) => {
+        e.stopPropagation();
+        searchInput.value = '';
+        searchQuery = '';
+        inputClearBtn.style.display = 'none';
+        focusedIndex = 0;
+        renderPopoverList();
+        searchInput.focus();
+      },
+    }, icon('x'));
+
+    const header = h('div', { class: 'search-select-header' },
+      icon('search'),
+      searchInput,
+      countBadge,
+      inputClearBtn
+    );
+
+    listEl = h('div', { class: 'search-select-list', role: 'listbox' });
+
+    popover = h('div', { class: 'search-select-popover' }, header, listEl);
+
+    searchInput.addEventListener('input', () => {
+      searchQuery = searchInput.value.trim().toLowerCase();
+      inputClearBtn.style.display = searchQuery ? 'inline-flex' : 'none';
+      focusedIndex = 0;
+      renderPopoverList();
+    });
+
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        moveFocus(1);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        moveFocus(-1);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        selectFocused();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        close();
+        trigger.focus();
+      } else if (e.key === 'Tab') {
+        close();
+      }
+    });
+  }
+
+  function getFilteredOptions() {
+    if (!searchQuery) return allOptions.slice();
+    const qWords = searchQuery.split(/\s+/).filter(Boolean);
+    return allOptions.filter((opt) => {
+      const target = `${opt.label} ${opt.value} ${opt.badge || ''} ${opt.group || ''}`.toLowerCase();
+      return qWords.every((w) => target.includes(w));
+    });
+  }
+
+  function renderPopoverList() {
+    filtered = getFilteredOptions();
+
+    if (countBadge) {
+      if (searchQuery) {
+        countBadge.textContent = `${filtered.length} / ${allOptions.length}`;
+      } else {
+        countBadge.textContent = `${allOptions.length}`;
+      }
+    }
+
+    if (!filtered.length) {
+      listEl.replaceChildren(
+        h('div', { class: 'search-select-empty' },
+          h('div', null, 'No options found'),
+          h('span', null, `No match for "${searchInput.value}"`),
+          h('button', {
+            class: 'btn btn-sm',
+            type: 'button',
+            onclick: () => {
+              searchInput.value = '';
+              searchQuery = '';
+              inputClearBtn.style.display = 'none';
+              focusedIndex = 0;
+              renderPopoverList();
+              searchInput.focus();
+            },
+          }, 'Clear filter')
+        )
+      );
+      return;
+    }
+
+    const queryTerms = searchQuery ? searchQuery.split(/\s+/).filter(Boolean) : [];
+
+    const rows = filtered.map((opt, idx) => {
+      const isSelected = opt.value === currentValue;
+      const isFocused = idx === focusedIndex;
+
+      const row = h('div', {
+        class: `search-select-option${isSelected ? ' selected' : ''}${isFocused ? ' focused' : ''}${opt.isAll ? ' is-all' : ''}`,
+        role: 'option',
+        'aria-selected': isSelected ? 'true' : 'false',
+        title: opt.label || opt.value,
+        onmousemove: () => {
+          if (focusedIndex !== idx) {
+            focusedIndex = idx;
+            updateFocusedClass();
+          }
+        },
+        onclick: (e) => {
+          e.stopPropagation();
+          setValue(opt.value, true);
+          close();
+          trigger.focus();
+        },
+      });
+
+      const textSpan = h('span', { class: 'search-select-option-text' },
+        ...highlightMatches(opt.label, queryTerms)
+      );
+      row.append(textSpan);
+
+      if (opt.badge) {
+        row.append(h('span', { class: 'search-select-option-badge' }, opt.badge));
+      }
+
+      if (isSelected) {
+        row.append(icon('check', 'search-select-option-check'));
+      }
+
+      return row;
+    });
+
+    listEl.replaceChildren(...rows);
+
+    const targetRow = rows[focusedIndex >= 0 ? focusedIndex : 0];
+    if (targetRow) {
+      targetRow.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function moveFocus(delta) {
+    if (!filtered.length) return;
+    focusedIndex += delta;
+    if (focusedIndex < 0) focusedIndex = filtered.length - 1;
+    if (focusedIndex >= filtered.length) focusedIndex = 0;
+    updateFocusedClass();
+    const children = listEl.children;
+    if (children[focusedIndex]) {
+      children[focusedIndex].scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function updateFocusedClass() {
+    const children = listEl.children;
+    for (let i = 0; i < children.length; i++) {
+      children[i].classList.toggle('focused', i === focusedIndex);
+    }
+  }
+
+  function selectFocused() {
+    if (focusedIndex >= 0 && focusedIndex < filtered.length) {
+      const opt = filtered[focusedIndex];
+      setValue(opt.value, true);
+      close();
+      trigger.focus();
+    }
+  }
+
+  function open() {
+    if (isDisabled || isOpen) return;
+    document.querySelectorAll('.search-select.is-open').forEach((el) => el.close?.());
+    document.querySelectorAll('.search-select-popover').forEach((p) => p.remove());
+
+    isOpen = true;
+    trigger.classList.add('is-open');
+    trigger.setAttribute('aria-expanded', 'true');
+
+    if (!popover) createPopover();
+    searchQuery = '';
+    if (searchInput) searchInput.value = '';
+    if (inputClearBtn) inputClearBtn.style.display = 'none';
+
+    const selIdx = allOptions.findIndex((o) => o.value === currentValue);
+    focusedIndex = selIdx >= 0 ? selIdx : 0;
+
+    renderPopoverList();
+    document.body.append(popover);
+    reposition();
+
+    requestAnimationFrame(() => {
+      if (searchInput) searchInput.focus();
+    });
+
+    setTimeout(() => {
+      document.addEventListener('mousedown', onDocMouseDown, true);
+      window.addEventListener('resize', onWinResize);
+      window.addEventListener('scroll', onWinScroll, true);
+    }, 10);
+  }
+
+  function close() {
+    if (!isOpen) return;
+    isOpen = false;
+    trigger.classList.remove('is-open');
+    trigger.setAttribute('aria-expanded', 'false');
+    if (popover && popover.parentNode) {
+      popover.remove();
+    }
+    document.removeEventListener('mousedown', onDocMouseDown, true);
+    window.removeEventListener('resize', onWinResize);
+    window.removeEventListener('scroll', onWinScroll, true);
+  }
+
+  function onDocMouseDown(e) {
+    if (trigger.contains(e.target) || (popover && popover.contains(e.target))) {
+      return;
+    }
+    close();
+  }
+
+  function onWinResize() {
+    if (isOpen) reposition();
+  }
+
+  function onWinScroll(e) {
+    if (!isOpen) return;
+    if (popover && popover.contains(e.target)) return;
+    reposition();
+  }
+
+  function reposition() {
+    if (!isOpen || !popover || !trigger.isConnected) {
+      if (!trigger.isConnected) close();
+      return;
+    }
+    positionPopover(trigger, popover, minDropdownWidth, maxDropdownWidth);
+  }
+
+  trigger.addEventListener('click', () => {
+    if (isDisabled) return;
+    if (isOpen) close();
+    else open();
+  });
+
+  trigger.addEventListener('keydown', (e) => {
+    if (isDisabled) return;
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!isOpen) open();
+    }
+  });
+
+  Object.defineProperty(trigger, 'value', {
+    get() { return currentValue; },
+    set(v) { setValue(v, false); },
+    configurable: true,
+  });
+
+  Object.defineProperty(trigger, 'disabled', {
+    get() { return isDisabled; },
+    set(v) {
+      isDisabled = Boolean(v);
+      trigger.classList.toggle('disabled', isDisabled);
+      trigger.setAttribute('aria-disabled', isDisabled ? 'true' : 'false');
+      trigger.tabIndex = isDisabled ? -1 : 0;
+      if (isDisabled && isOpen) close();
+    },
+    configurable: true,
+  });
+
+  trigger.setValue = (val, emit = false) => setValue(val, emit);
+  trigger.setOptions = (newOpts, val, allLabel) => setOptions(newOpts, val, allLabel);
+  trigger.open = open;
+  trigger.close = close;
+
+  setOptions(options, value);
+  return trigger;
 }
 
 export { setRoute } from './state.js';

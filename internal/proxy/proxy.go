@@ -342,6 +342,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go func() {
+		durMs := int(time.Since(start).Milliseconds())
 		_ = p.traffic.Record(&traffic.LogEntry{
 			APIKey:           maskedKey,
 			APIKeyName:       keyName,
@@ -350,11 +351,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			PromptTokens:     promptTokens,
 			CompletionTokens: completionTokens,
 			TotalTokens:      totalTokens,
-			DurationMs:       int(time.Since(start).Milliseconds()),
+			DurationMs:       durMs,
 			StatusCode:       resp.StatusCode,
 			ClientIP:         clientIP,
 			Stream:           isSSE || req.Stream,
 			ErrorMessage:     responseErrMsg,
 		})
+		if resp.StatusCode >= 400 {
+			slog.Warn("proxy request failed", "model", modelName, "status", resp.StatusCode, "duration_ms", durMs, "source", "proxy")
+		} else {
+			slog.Info("proxy request completed", "model", modelName, "status", resp.StatusCode, "duration_ms", durMs, "tokens", totalTokens, "source", "proxy")
+		}
 	}()
 }

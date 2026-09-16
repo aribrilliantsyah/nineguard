@@ -87,6 +87,10 @@ func (m *Manager) GetProvider(id string) (*Provider, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	return m.getProviderUnlocked(id)
+}
+
+func (m *Manager) getProviderUnlocked(id string) (*Provider, error) {
 	var p Provider
 	var defInt, actInt int
 	err := m.db.QueryRow(`
@@ -132,11 +136,28 @@ func (m *Manager) CreateProvider(name, route, apiKey, prefix string, isDefault, 
 		}
 	}
 
+	tx, err := m.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
 	defInt := 0
 	if isDefault {
 		defInt = 1
-		// Only one default provider
-		_, _ = m.db.Exec("UPDATE providers SET is_default = 0")
+		// When newly set as default, clear default flag from all other providers
+		if _, err := tx.Exec("UPDATE providers SET is_default = 0"); err != nil {
+			return nil, fmt.Errorf("failed to clear existing default providers: %w", err)
+		}
+	} else {
+		// If not explicitly set as default, check if any default already exists.
+		// If none exists (e.g. first provider ever), make this one default.
+		var existingDefaultCount int
+		_ = tx.QueryRow("SELECT COUNT(*) FROM providers WHERE is_default = 1").Scan(&existingDefaultCount)
+		if existingDefaultCount == 0 {
+			defInt = 1
+			isDefault = true
+		}
 	}
 
 	actInt := 0
@@ -145,11 +166,15 @@ func (m *Manager) CreateProvider(name, route, apiKey, prefix string, isDefault, 
 	}
 
 	now := time.Now()
-	_, err := m.db.Exec(`
+	_, err = tx.Exec(`
 		INSERT INTO providers (id, name, route, api_key, prefix, is_default, is_active, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, name, route, apiKey, prefix, defInt, actInt, now, now)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 
@@ -183,10 +208,28 @@ func (m *Manager) UpdateProvider(id, name, route, apiKey, prefix string, isDefau
 		return nil, fmt.Errorf("route endpoint URL is required")
 	}
 
+	tx, err := m.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
 	defInt := 0
 	if isDefault {
 		defInt = 1
-		_, _ = m.db.Exec("UPDATE providers SET is_default = 0 WHERE id != ?", id)
+		// When set as default, reset all other providers so exactly this one is default
+		if _, err := tx.Exec("UPDATE providers SET is_default = 0 WHERE id != ?", id); err != nil {
+			return nil, fmt.Errorf("failed to clear existing default providers: %w", err)
+		}
+	} else {
+		// Check if another default provider exists
+		var otherDefaultCount int
+		_ = tx.QueryRow("SELECT COUNT(*) FROM providers WHERE is_default = 1 AND id != ?", id).Scan(&otherDefaultCount)
+		if otherDefaultCount == 0 {
+			// Ensure there is always at least one default provider
+			defInt = 1
+			isDefault = true
+		}
 	}
 
 	actInt := 0
@@ -194,7 +237,7 @@ func (m *Manager) UpdateProvider(id, name, route, apiKey, prefix string, isDefau
 		actInt = 1
 	}
 
-	_, err := m.db.Exec(`
+	_, err = tx.Exec(`
 		UPDATE providers SET name = ?, route = ?, api_key = ?, prefix = ?, is_default = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, name, route, apiKey, prefix, defInt, actInt, id)
@@ -202,7 +245,34 @@ func (m *Manager) UpdateProvider(id, name, route, apiKey, prefix string, isDefau
 		return nil, err
 	}
 
-	return m.GetProvider(id)
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return m.getProviderUnlocked(id)
+}
+
+func (m *Manager) SetDefaultProvider(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var exists int
+	if err := m.db.QueryRow("SELECT COUNT(*) FROM providers WHERE id = ?", id).Scan(&exists); err != nil || exists == 0 {
+		return fmt.Errorf("provider not found")
+	}
+
+	tx, err := m.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Atomically ensure only this provider is default and all others are not default
+	if _, err := tx.Exec("UPDATE providers SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END, updated_at = CURRENT_TIMESTAMP", id); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (m *Manager) ToggleProvider(id string, active bool) error {
@@ -221,24 +291,38 @@ func (m *Manager) DeleteProvider(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 1. Get provider info (prefix) before deleting
+	// 1. Get provider info (prefix, is_default) before deleting
 	var prefix string
-	_ = m.db.QueryRow("SELECT prefix FROM providers WHERE id = ?", id).Scan(&prefix)
+	var isDef int
+	_ = m.db.QueryRow("SELECT prefix, is_default FROM providers WHERE id = ?", id).Scan(&prefix, &isDef)
+
+	tx, err := m.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 
 	// 2. Delete provider from providers table
-	_, err := m.db.Exec("DELETE FROM providers WHERE id = ?", id)
-	if err != nil {
+	if _, err := tx.Exec("DELETE FROM providers WHERE id = ?", id); err != nil {
 		return err
 	}
 
 	// 3. Automatically delete all models belonging to this provider
 	if prefix != "" {
-		_, _ = m.db.Exec("DELETE FROM models WHERE provider_id = ? OR provider_id = ? OR id LIKE ?", id, prefix, prefix+"/%")
+		_, _ = tx.Exec("DELETE FROM models WHERE provider_id = ? OR provider_id = ? OR id LIKE ?", id, prefix, prefix+"/%")
 	} else {
-		_, _ = m.db.Exec("DELETE FROM models WHERE provider_id = ?", id)
+		_, _ = tx.Exec("DELETE FROM models WHERE provider_id = ?", id)
 	}
 
-	return nil
+	// 4. If the deleted provider was default, promote another active provider as default
+	if isDef == 1 {
+		_, _ = tx.Exec(`
+			UPDATE providers SET is_default = 1, updated_at = CURRENT_TIMESTAMP
+			WHERE id = (SELECT id FROM providers WHERE is_active = 1 ORDER BY created_at ASC LIMIT 1)
+		`)
+	}
+
+	return tx.Commit()
 }
 
 // FindProviderForModel routes a requested model to the right upstream provider.
