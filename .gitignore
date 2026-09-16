@@ -1,0 +1,32 @@
+# Binaries and executables
+/nineguard
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with 'go test -c'
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Environment variables & local configuration
+.env
+.env.local
+
+# Database & runtime storage
+data/*
+!data/.gitkeep
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# IDE & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
