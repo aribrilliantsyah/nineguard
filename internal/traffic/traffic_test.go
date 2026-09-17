@@ -178,3 +178,54 @@ func TestRecordAndQueryLogs(t *testing.T) {
 		t.Errorf("expected 1 2xx, 1 403, 1 5xx, got totals: %+v", vol.Totals)
 	}
 }
+
+func TestDateFilterParameterized(t *testing.T) {
+	mgr, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// 1. Verify buildDateFilter returns ? placeholders instead of raw string interpolation
+	clause, args := buildDateFilter("", "2026-01-01", "2026-01-02")
+	if clause != "timestamp >= datetime(?) AND timestamp <= datetime(?)" {
+		t.Fatalf("expected parameterized clause with '?', got %q", clause)
+	}
+	if len(args) != 2 || args[0] != "2026-01-01 00:00:00" || args[1] != "2026-01-02 23:59:59" {
+		t.Fatalf("unexpected date filter args: %v", args)
+	}
+
+	// 2. Verify buildPrevDateFilter returns ? placeholders
+	prevClause, prevArgs := buildPrevDateFilter("", "2026-01-01", "2026-01-02")
+	if prevClause != "timestamp >= datetime(?) AND timestamp <= datetime(?)" {
+		t.Fatalf("expected parameterized prev clause with '?', got %q", prevClause)
+	}
+	if len(prevArgs) != 2 {
+		t.Fatalf("expected 2 prev date filter args, got %v", prevArgs)
+	}
+
+	// 3. Record entries and test GetDashboardStats & GetUsageReports with date filters
+	_ = mgr.Record(&LogEntry{
+		APIKey:      "sk-test-client-1",
+		APIKeyName:  "test-client",
+		ProviderID:  "openai",
+		Model:       "gpt-4o",
+		StatusCode:  200,
+		TotalTokens: 100,
+		DurationMs:  50,
+		ClientIP:    "127.0.0.1",
+	})
+
+	stats, err := mgr.GetDashboardStats("today", "", "")
+	if err != nil {
+		t.Fatalf("GetDashboardStats failed: %v", err)
+	}
+	if stats.TotalRequests != 1 {
+		t.Errorf("expected 1 request, got %d", stats.TotalRequests)
+	}
+
+	report, err := mgr.GetUsageReports("today", "", "")
+	if err != nil {
+		t.Fatalf("GetUsageReports failed: %v", err)
+	}
+	if report.TotalRequests != 1 {
+		t.Errorf("expected 1 request in usage report, got %d", report.TotalRequests)
+	}
+}

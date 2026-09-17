@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,18 +20,33 @@ import (
 )
 
 type Proxy struct {
-	models    *models.Manager
-	traffic   *traffic.Manager
-	keys      *keys.Manager
-	providers *providers.Manager
+	models     *models.Manager
+	traffic    *traffic.Manager
+	keys       *keys.Manager
+	providers  *providers.Manager
+	httpClient *http.Client
 }
 
 func NewProxy(mm *models.Manager, tm *traffic.Manager, km *keys.Manager, pm *providers.Manager) (*Proxy, error) {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   15 * time.Minute, // Upper bound protection for long streaming
+	}
 	return &Proxy{
-		models:    mm,
-		traffic:   tm,
-		keys:      km,
-		providers: pm,
+		models:     mm,
+		traffic:    tm,
+		keys:       km,
+		providers:  pm,
+		httpClient: client,
 	}, nil
 }
 
@@ -68,6 +84,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !valid {
+		slog.Warn("unauthorized proxy request: invalid api key", "ip", clientIP)
+		errMsg := "invalid or inactive API key"
+		if p.traffic != nil {
+			_ = p.traffic.Record(&traffic.LogEntry{
+				APIKey:       "unauthorized",
+				APIKeyName:   "Unknown",
+				Model:        "unknown",
+				DurationMs:   int(time.Since(start).Milliseconds()),
+				StatusCode:   http.StatusUnauthorized,
+				ClientIP:     clientIP,
+				ErrorMessage: &errMsg,
+				Level:        "WARN",
+			})
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		errJSON := `{
@@ -243,8 +274,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		outReq.Header.Del("Authorization")
 	}
 
-	client := &http.Client{
-		Timeout: 0, // LLM generation can take minutes
+	client := p.httpClient
+	if client == nil {
+		transport := &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+		}
+		client = &http.Client{
+			Transport: transport,
+			Timeout:   15 * time.Minute,
+		}
 	}
 	resp, err := client.Do(outReq)
 	if err != nil {

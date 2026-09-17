@@ -97,7 +97,7 @@ export function mount(root) {
           probeResult.replaceChildren(h('span', { class: 'muted' }, 'Pinging ', p.route, '...'));
 
           try {
-            const res = await api.post('/providers/test', { route: p.route, api_key: p.api_key });
+            const res = await api.post('/providers/test', { id: p.id, route: p.route, api_key: p.api_key || '' });
             if (res.ok) {
               probeResult.style.background = 'color-mix(in srgb, var(--ok) 12%, var(--panel))';
               probeResult.style.border = '1px solid var(--ok)';
@@ -233,8 +233,8 @@ export function mount(root) {
     });
 
     const keyField = passwordField({
-      placeholder: 'Paste upstream API key (leave empty if not needed)',
-      value: existing ? (existing.api_key || '') : ''
+      placeholder: existing ? 'Leave blank to keep current key, or enter new key' : 'Paste upstream API key (leave empty if not needed)',
+      value: ''
     });
 
     const defaultCheck = h('input', {
@@ -298,9 +298,13 @@ export function mount(root) {
         if (!route) throw new Error('Route target URL is required');
 
         if (isEdit) {
-          await api.put(`/providers/${existing.id}`, {
-            name, route, prefix, api_key: apiKey, is_default: isDef, is_active: existing.is_active
-          });
+          const payload = {
+            name, route, prefix, is_default: isDef, is_active: existing.is_active
+          };
+          if (apiKey !== '') {
+            payload.api_key = apiKey;
+          }
+          await api.put(`/providers/${existing.id}`, payload);
           toast(`Provider "${name}" updated`, 'ok');
         } else {
           await api.post('/providers', {

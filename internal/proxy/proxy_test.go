@@ -170,3 +170,48 @@ func TestNoProvidersSeededByDefault(t *testing.T) {
 		t.Errorf("expected 0 providers seeded by default, got %d (%v)", len(list), list)
 	}
 }
+
+func TestProxyUnauthorizedTelemetry(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "unauth_test.db")
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+	defer database.Close()
+
+	keysMgr := keys.NewManager(database, "")
+	modelsMgr := models.NewManager(database)
+	providersMgr := providers.NewManager(database)
+	trafficMgr := traffic.NewManager(database)
+
+	p, err := proxy.NewProxy(modelsMgr, trafficMgr, keysMgr, providersMgr)
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	// 1. Request with invalid NineGuard key
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Authorization", "Bearer invalid-key-attempt")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized, got %d", rec.Code)
+	}
+
+	// 2. Verify traffic log was recorded for the 401 rejection
+	logs, total, err := trafficMgr.QueryLogs(traffic.FilterParams{})
+	if err != nil {
+		t.Fatalf("failed to query traffic logs: %v", err)
+	}
+	if total != 1 || len(logs) != 1 {
+		t.Fatalf("expected 1 traffic log entry recorded for 401, got %d", total)
+	}
+	if logs[0].StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected logged status code 401, got %d", logs[0].StatusCode)
+	}
+	if logs[0].Level != "WARN" {
+		t.Errorf("expected logged level WARN, got %s", logs[0].Level)
+	}
+}

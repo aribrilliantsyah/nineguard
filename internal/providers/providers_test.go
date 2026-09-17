@@ -1,7 +1,9 @@
 package providers_test
 
 import (
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"nineguard/internal/db"
@@ -144,5 +146,40 @@ func TestProvidersDefaultManagement(t *testing.T) {
 	}
 	if defProv.ID == p1.ID {
 		t.Fatalf("deleted provider cannot be default")
+	}
+}
+
+func TestProviderJSONMasking(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test_mask.db")
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+	defer database.Close()
+
+	mgr := providers.NewManager(database)
+	p, err := mgr.CreateProvider("OpenAI", "https://api.openai.com", "sk-secret-upstream-master-key-12345", "openai", true, true)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("failed to marshal provider: %v", err)
+	}
+
+	jsonStr := string(b)
+	if strings.Contains(jsonStr, "sk-secret-upstream-master-key-12345") {
+		t.Fatalf("JSON response exposed raw master api key: %s", jsonStr)
+	}
+	if strings.Contains(jsonStr, `"api_key"`) {
+		t.Fatalf("JSON response contains api_key field: %s", jsonStr)
+	}
+	if !strings.Contains(jsonStr, `"masked_key"`) {
+		t.Fatalf("JSON response should contain masked_key field: %s", jsonStr)
+	}
+	if !strings.Contains(jsonStr, p.MaskedKey) {
+		t.Fatalf("JSON response should contain masked key value %q: %s", p.MaskedKey, jsonStr)
 	}
 }

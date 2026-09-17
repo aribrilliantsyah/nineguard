@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ type contextKey string
 
 const userContextKey contextKey = "user"
 const SessionCookieName = "nineguard_session"
+const bcryptCost = 12
 
 type User struct {
 	ID               int64      `json:"id"`
@@ -64,7 +66,7 @@ func (m *Manager) Setup(username, password string) (*User, string, error) {
 		return nil, "", errors.New("setup has already been completed")
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
 	if err != nil {
 		return nil, "", err
 	}
@@ -86,6 +88,8 @@ func (m *Manager) Setup(username, password string) (*User, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+
+	slog.Info("setup completed", "source", "audit", "actor_id", uid, "username", username, "action", "auth.setup")
 
 	user := &User{
 		ID:          uid,
@@ -111,12 +115,14 @@ func (m *Manager) Login(username, password string) (*User, string, error) {
 
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			slog.Warn("login failure: user not found", "source", "audit", "username", username, "action", "auth.login.failure")
 			return nil, "", errors.New("invalid username or password")
 		}
 		return nil, "", err
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
+		slog.Warn("login failure: invalid password", "source", "audit", "actor_id", user.ID, "username", username, "action", "auth.login.failure")
 		return nil, "", errors.New("invalid username or password")
 	}
 
@@ -136,10 +142,13 @@ func (m *Manager) Login(username, password string) (*User, string, error) {
 		return nil, "", err
 	}
 
+	slog.Info("login success", "source", "audit", "actor_id", user.ID, "username", user.Username, "action", "auth.login.success")
+
 	return &user, token, nil
 }
 
 func (m *Manager) Logout(token string) error {
+	slog.Info("logout", "source", "audit", "action", "auth.logout")
 	_, err := m.db.Exec("DELETE FROM sessions WHERE token = ?", token)
 	return err
 }
@@ -221,7 +230,7 @@ func (m *Manager) ListUsers() ([]User, error) {
 }
 
 func (m *Manager) CreateUser(username, displayName, password, role string) (*User, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
 	if err != nil {
 		return nil, err
 	}
@@ -236,6 +245,7 @@ func (m *Manager) CreateUser(username, displayName, password, role string) (*Use
 	if err != nil {
 		return nil, err
 	}
+	slog.Info("user created", "source", "audit", "actor_id", id, "username", username, "role", role, "action", "user.create")
 	return &User{
 		ID:          id,
 		Username:    username,
@@ -272,11 +282,14 @@ func (m *Manager) UpdateUser(id int64, username, displayName, role string) (*Use
 }
 
 func (m *Manager) ChangePassword(userID int64, newPassword string) error {
-	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcryptCost)
 	if err != nil {
 		return err
 	}
 	_, err = m.db.Exec("UPDATE users SET password_hash = ? WHERE id = ?", string(hash), userID)
+	if err == nil {
+		slog.Info("password changed", "source", "audit", "actor_id", userID, "action", "auth.password.change")
+	}
 	return err
 }
 
@@ -289,6 +302,57 @@ func (m *Manager) DeleteUser(id int64) error {
 		return errors.New("cannot delete the last administrator")
 	}
 	_, err := m.db.Exec("DELETE FROM users WHERE id = ?", id)
+	if err == nil {
+		slog.Info("user deleted", "source", "audit", "target_user_id", id, "action", "user.delete")
+	}
+	return err
+}
+
+func (m *Manager) ResetUserPassword(targetUserID int64, newPassword string) error {
+	if len(newPassword) < 6 {
+		return errors.New("password must be at least 6 characters")
+	}
+	var role string
+	err := m.db.QueryRow("SELECT role FROM users WHERE id = ?", targetUserID).Scan(&role)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("user not found")
+		}
+		return err
+	}
+	if role == "admin" {
+		return errors.New("cannot reset password of an administrator account")
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcryptCost)
+	if err != nil {
+		return err
+	}
+	_, err = m.db.Exec("UPDATE users SET password_hash = ? WHERE id = ?", string(hash), targetUserID)
+	if err == nil {
+		_, _ = m.db.Exec("DELETE FROM sessions WHERE user_id = ?", targetUserID)
+		slog.Info("user password reset by admin", "source", "audit", "target_user_id", targetUserID, "action", "user.reset_password")
+	}
+	return err
+}
+
+func (m *Manager) ResetUserRecovery(targetUserID int64) error {
+	var role string
+	err := m.db.QueryRow("SELECT role FROM users WHERE id = ?", targetUserID).Scan(&role)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("user not found")
+		}
+		return err
+	}
+	if role == "admin" {
+		return errors.New("cannot reset recovery question of an administrator account")
+	}
+
+	_, err = m.db.Exec("UPDATE users SET recovery_question = '', recovery_answer_hash = '' WHERE id = ?", targetUserID)
+	if err == nil {
+		slog.Info("user recovery question reset by admin", "source", "audit", "target_user_id", targetUserID, "action", "user.reset_recovery")
+	}
 	return err
 }
 
@@ -301,7 +365,7 @@ func (m *Manager) SetRecoveryQuestion(userID int64, question, answer string) err
 	if len(trimmedAns) < 2 {
 		return errors.New("recovery answer must be at least 2 characters")
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(trimmedAns), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(trimmedAns), bcryptCost)
 	if err != nil {
 		return err
 	}
@@ -343,10 +407,15 @@ func (m *Manager) RecoverPassword(username, answer, newPassword string) error {
 
 	trimmedAns := strings.TrimSpace(strings.ToLower(answer))
 	if err := bcrypt.CompareHashAndPassword([]byte(ansHash), []byte(trimmedAns)); err != nil {
+		slog.Warn("password recovery failure: incorrect answer", "source", "audit", "username", username, "action", "auth.password.recover.failure")
 		return errors.New("incorrect recovery answer")
 	}
 
-	return m.ChangePassword(id, newPassword)
+	err = m.ChangePassword(id, newPassword)
+	if err == nil {
+		slog.Info("password recovered successfully", "source", "audit", "actor_id", id, "username", username, "action", "auth.password.recover.success")
+	}
+	return err
 }
 
 func (m *Manager) UpdateProfile(userID int64, displayName string) (*User, error) {
@@ -411,5 +480,38 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 		}
 
 		next.ServeHTTP(w, r)
+	})
+}
+
+func (m *Manager) RequireAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		// Exempt proxy (/v1/*), static UI assets, health check, and public auth endpoints
+		if !strings.HasPrefix(path, "/api/v1/") ||
+			strings.HasPrefix(path, "/api/v1/auth/") ||
+			path == "/api/v1/config" {
+			m.Middleware(next).ServeHTTP(w, r)
+			return
+		}
+
+		if !m.authEnabled {
+			m.Middleware(next).ServeHTTP(w, r)
+			return
+		}
+
+		cookie, err := r.Cookie(SessionCookieName)
+		if err != nil {
+			http.Error(w, `{"error":"Authentication required"}`, http.StatusUnauthorized)
+			return
+		}
+
+		user, err := m.ValidateSession(cookie.Value)
+		if err != nil || user == nil {
+			http.Error(w, `{"error":"Invalid or expired session"}`, http.StatusUnauthorized)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), userContextKey, user)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

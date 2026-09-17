@@ -231,43 +231,43 @@ func sanitizeDate(d string) string {
 	return ""
 }
 
-func buildDateFilter(period, startDate, endDate string) string {
+func buildDateFilter(period, startDate, endDate string) (string, []interface{}) {
 	sDate := sanitizeDate(startDate)
 	eDate := sanitizeDate(endDate)
 
 	if sDate != "" && eDate != "" {
-		return fmt.Sprintf("timestamp >= datetime('%s 00:00:00') AND timestamp <= datetime('%s 23:59:59')", sDate, eDate)
+		return "timestamp >= datetime(?) AND timestamp <= datetime(?)", []interface{}{sDate + " 00:00:00", eDate + " 23:59:59"}
 	}
 	if sDate != "" {
-		return fmt.Sprintf("timestamp >= datetime('%s 00:00:00')", sDate)
+		return "timestamp >= datetime(?)", []interface{}{sDate + " 00:00:00"}
 	}
 	if eDate != "" {
-		return fmt.Sprintf("timestamp <= datetime('%s 23:59:59')", eDate)
+		return "timestamp <= datetime(?)", []interface{}{eDate + " 23:59:59"}
 	}
 
 	switch period {
 	case "yesterday":
-		return "timestamp >= datetime('now', '-1 day', 'start of day') AND timestamp < date('now', 'start of day')"
+		return "timestamp >= datetime('now', '-1 day', 'start of day') AND timestamp < date('now', 'start of day')", nil
 	case "7d":
-		return "timestamp >= datetime('now', '-7 days')"
+		return "timestamp >= datetime('now', '-7 days')", nil
 	case "14d":
-		return "timestamp >= datetime('now', '-14 days')"
+		return "timestamp >= datetime('now', '-14 days')", nil
 	case "30d":
-		return "timestamp >= datetime('now', '-30 days')"
+		return "timestamp >= datetime('now', '-30 days')", nil
 	case "month", "this_month":
-		return "timestamp >= date('now', 'start of month')"
+		return "timestamp >= date('now', 'start of month')", nil
 	case "last_month":
-		return "timestamp >= date('now', 'start of month', '-1 month') AND timestamp < date('now', 'start of month')"
+		return "timestamp >= date('now', 'start of month', '-1 month') AND timestamp < date('now', 'start of month')", nil
 	case "all":
-		return "1=1"
+		return "1=1", nil
 	case "today":
 		fallthrough
 	default:
-		return "timestamp >= date('now', 'start of day')"
+		return "timestamp >= date('now', 'start of day')", nil
 	}
 }
 
-func buildPrevDateFilter(period, startDate, endDate string) string {
+func buildPrevDateFilter(period, startDate, endDate string) (string, []interface{}) {
 	sDate := sanitizeDate(startDate)
 	eDate := sanitizeDate(endDate)
 
@@ -281,25 +281,25 @@ func buildPrevDateFilter(period, startDate, endDate string) string {
 			}
 			prevStart := t1.AddDate(0, 0, -diffDays).Format("2006-01-02")
 			prevEnd := t1.AddDate(0, 0, -1).Format("2006-01-02")
-			return fmt.Sprintf("timestamp >= datetime('%s 00:00:00') AND timestamp <= datetime('%s 23:59:59')", prevStart, prevEnd)
+			return "timestamp >= datetime(?) AND timestamp <= datetime(?)", []interface{}{prevStart + " 00:00:00", prevEnd + " 23:59:59"}
 		}
 	}
 
 	switch period {
 	case "7d":
-		return "timestamp >= datetime('now', '-14 days') AND timestamp < datetime('now', '-7 days')"
+		return "timestamp >= datetime('now', '-14 days') AND timestamp < datetime('now', '-7 days')", nil
 	case "14d":
-		return "timestamp >= datetime('now', '-28 days') AND timestamp < datetime('now', '-14 days')"
+		return "timestamp >= datetime('now', '-28 days') AND timestamp < datetime('now', '-14 days')", nil
 	case "30d":
-		return "timestamp >= datetime('now', '-60 days') AND timestamp < datetime('now', '-30 days')"
+		return "timestamp >= datetime('now', '-60 days') AND timestamp < datetime('now', '-30 days')", nil
 	case "yesterday":
-		return "timestamp >= datetime('now', '-2 days', 'start of day') AND timestamp < datetime('now', '-1 day', 'start of day')"
+		return "timestamp >= datetime('now', '-2 days', 'start of day') AND timestamp < datetime('now', '-1 day', 'start of day')", nil
 	case "month", "this_month":
-		return "timestamp >= date('now', 'start of month', '-1 month') AND timestamp < date('now', 'start of month')"
+		return "timestamp >= date('now', 'start of month', '-1 month') AND timestamp < date('now', 'start of month')", nil
 	case "today":
 		fallthrough
 	default:
-		return "timestamp >= datetime('now', '-1 day', 'start of day') AND timestamp < date('now', 'start of day')"
+		return "timestamp >= datetime('now', '-1 day', 'start of day') AND timestamp < date('now', 'start of day')", nil
 	}
 }
 
@@ -472,9 +472,10 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 		args = append(args, tTo.Format("2006-01-02 15:04:05"))
 	}
 	if p.From == "" && p.To == "" {
-		dateCond := buildDateFilter(p.Period, p.StartDate, p.EndDate)
-		if dateCond != "1=1" {
+		dateCond, dateArgs := buildDateFilter(p.Period, p.StartDate, p.EndDate)
+		if dateCond != "" && dateCond != "1=1" {
 			conditions = append(conditions, dateCond)
+			args = append(args, dateArgs...)
 		}
 	}
 
@@ -972,8 +973,8 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 }
 
 func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*DashboardStats, error) {
-	dateFilter := buildDateFilter(period, startDate, endDate)
-	prevFilter := buildPrevDateFilter(period, startDate, endDate)
+	dateFilter, dateFilterArgs := buildDateFilter(period, startDate, endDate)
+	prevFilter, prevFilterArgs := buildPrevDateFilter(period, startDate, endDate)
 
 	stats := &DashboardStats{}
 
@@ -997,7 +998,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 		WHERE %s
 	`, dateFilter)
 
-	err := m.db.QueryRow(aggQuery).Scan(
+	err := m.db.QueryRow(aggQuery, dateFilterArgs...).Scan(
 		&stats.TotalRequests,
 		&stats.TotalTokens,
 		&stats.PromptTokens,
@@ -1038,7 +1039,8 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 	`, dateFilter)
 	offsetP95 := int(float64(stats.TotalRequests) * 0.95)
 	if offsetP95 > 0 {
-		_ = m.db.QueryRow(p95Query, offsetP95).Scan(&stats.P95DurationMs)
+		p95Args := append(append([]interface{}{}, dateFilterArgs...), offsetP95)
+		_ = m.db.QueryRow(p95Query, p95Args...).Scan(&stats.P95DurationMs)
 	} else {
 		stats.P95DurationMs = stats.AvgDurationMs
 	}
@@ -1056,7 +1058,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 	`, prevFilter)
 
 	var prevReqs, prevToks, prevBlk, prevSucc, prevErrs int
-	_ = m.db.QueryRow(prevAggQuery).Scan(&prevReqs, &prevToks, &prevBlk, &prevSucc, &prevErrs)
+	_ = m.db.QueryRow(prevAggQuery, prevFilterArgs...).Scan(&prevReqs, &prevToks, &prevBlk, &prevSucc, &prevErrs)
 
 	var prevErrRate float64
 	if prevReqs > 0 {
@@ -1206,7 +1208,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 		ORDER BY timestamp ASC
 	`, timeFmt, dateFilter, groupFmt)
 
-	rowsSeries, err := m.db.Query(seriesQuery)
+	rowsSeries, err := m.db.Query(seriesQuery, dateFilterArgs...)
 	if err == nil {
 		defer rowsSeries.Close()
 		for rowsSeries.Next() {
@@ -1253,7 +1255,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 		ORDER BY reqs DESC
 		LIMIT 5
 	`, dateFilter)
-	rows, err := m.db.Query(topModelsQuery)
+	rows, err := m.db.Query(topModelsQuery, dateFilterArgs...)
 	if err == nil {
 		for rows.Next() {
 			var ms ModelStat
@@ -1279,7 +1281,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 			WHERE %s
 			GROUP BY model, ts
 		`, timeFmt, dateFilter)
-		if rTr, errTr := m.db.Query(trendQ); errTr == nil {
+		if rTr, errTr := m.db.Query(trendQ, dateFilterArgs...); errTr == nil {
 			for rTr.Next() {
 				var mod, ts string
 				var cnt int
@@ -1307,7 +1309,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 		ORDER BY toks DESC, reqs DESC
 		LIMIT 8
 	`, dateFilter)
-	rowsKeys, err := m.db.Query(topKeysQuery)
+	rowsKeys, err := m.db.Query(topKeysQuery, dateFilterArgs...)
 	if err == nil {
 		for rowsKeys.Next() {
 			var ks KeyStat
@@ -1337,7 +1339,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 			WHERE %s
 			GROUP BY k_name, ts
 		`, timeFmt, dateFilter)
-		if rTr, errTr := m.db.Query(trendKeyQ); errTr == nil {
+		if rTr, errTr := m.db.Query(trendKeyQ, dateFilterArgs...); errTr == nil {
 			for rTr.Next() {
 				var kn, ts string
 				var cnt int
@@ -1371,7 +1373,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 		LIMIT 5
 	`, dateFilter)
 
-	rowsErr, err := m.db.Query(topErrQuery)
+	rowsErr, err := m.db.Query(topErrQuery, dateFilterArgs...)
 	if err == nil {
 		for rowsErr.Next() {
 			var es ErrorSourceStat
@@ -1397,7 +1399,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 			WHERE status_code >= 400 AND %s
 			GROUP BY model, ts
 		`, timeFmt, dateFilter)
-		if rTrend, errTrend := m.db.Query(trendErrQ); errTrend == nil {
+		if rTrend, errTrend := m.db.Query(trendErrQ, dateFilterArgs...); errTrend == nil {
 			for rTrend.Next() {
 				var mod, ts string
 				var cnt int
@@ -1427,7 +1429,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 		ORDER BY timestamp ASC
 	`, timeFmt, dateFilter, groupFmt)
 
-	rowsKeySeries, err := m.db.Query(keySeriesQuery)
+	rowsKeySeries, err := m.db.Query(keySeriesQuery, dateFilterArgs...)
 	if err == nil {
 		defer rowsKeySeries.Close()
 		for rowsKeySeries.Next() {
@@ -1442,7 +1444,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 }
 
 func (m *Manager) GetUsageReports(period, startDate, endDate string) (*UsageReport, error) {
-	dateFilter := buildDateFilter(period, startDate, endDate)
+	dateFilter, dateFilterArgs := buildDateFilter(period, startDate, endDate)
 
 	report := &UsageReport{
 		Period:          period,
@@ -1463,7 +1465,7 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string) (*UsageRepo
 		WHERE %s
 	`, dateFilter)
 
-	_ = m.db.QueryRow(aggQuery).Scan(
+	_ = m.db.QueryRow(aggQuery, dateFilterArgs...).Scan(
 		&report.TotalRequests,
 		&report.TotalTokens,
 		&report.PromptTokens,
@@ -1489,7 +1491,7 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string) (*UsageRepo
 		ORDER BY tot_toks DESC
 	`, dateFilter)
 
-	crossRows, err := m.db.Query(crossQuery)
+	crossRows, err := m.db.Query(crossQuery, dateFilterArgs...)
 	if err == nil {
 		defer crossRows.Close()
 		for crossRows.Next() {
@@ -1537,7 +1539,7 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string) (*UsageRepo
 		ORDER BY tot_toks DESC, tot_reqs DESC
 	`, dateFilter)
 
-	kRows, err := m.db.Query(keysQuery)
+	kRows, err := m.db.Query(keysQuery, dateFilterArgs...)
 	if err == nil {
 		defer kRows.Close()
 		for kRows.Next() {
@@ -1588,7 +1590,7 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string) (*UsageRepo
 		ORDER BY tot_toks DESC, tot_reqs DESC
 	`, dateFilter)
 
-	mRows, err := m.db.Query(modelsQuery)
+	mRows, err := m.db.Query(modelsQuery, dateFilterArgs...)
 	if err == nil {
 		defer mRows.Close()
 		for mRows.Next() {

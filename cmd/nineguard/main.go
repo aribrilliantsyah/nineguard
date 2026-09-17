@@ -213,6 +213,10 @@ func main() {
 	mux.HandleFunc("GET /api/v1/users", h.ListUsers)
 	mux.HandleFunc("POST /api/v1/users", h.CreateUser)
 	mux.HandleFunc("DELETE /api/v1/users/{id}", h.DeleteUser)
+	mux.HandleFunc("POST /api/v1/users/{id}/password", h.ResetUserPassword)
+	mux.HandleFunc("POST /api/v1/users/{id}/reset-password", h.ResetUserPassword)
+	mux.HandleFunc("POST /api/v1/users/{id}/reset-recovery", h.ResetUserRecovery)
+	mux.HandleFunc("POST /api/v1/users/{id}/reset", h.ResetUser)
 
 	mux.HandleFunc("GET /api/v1/models", h.ListModels)
 	mux.HandleFunc("POST /api/v1/models/toggle", h.ToggleModel)
@@ -281,7 +285,7 @@ func main() {
 		fileServer.ServeHTTP(w, r)
 	})
 
-	finalHandler := authMgr.Middleware(rootHandler)
+	finalHandler := authMgr.RequireAuthMiddleware(rootHandler)
 
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,

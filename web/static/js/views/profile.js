@@ -98,15 +98,15 @@ export function mount(root) {
 
     function updateCardContent() {
       if (u.has_recovery && !editing) {
-        const statusBox = h('div', { class: 'recovery-status-box configured' },
+        const statusBox = h('div', { class: 'recovery-status-box configured', style: { padding: '10px 12px' } },
           icon('shield'),
           h('div', { style: { flex: '1' } },
             h('div', { class: 'strong', style: { display: 'flex', alignItems: 'center', gap: '6px' } },
               'Recovery Question Configured',
-              h('span', { class: 'badge', style: { color: 'var(--ok)', background: 'color-mix(in srgb, var(--ok) 15%, transparent)', fontSize: '10.5px' } }, 'Active')
+              h('span', { class: 'badge ok', style: { fontSize: '10.5px' } }, 'Active')
             ),
             h('div', { class: 'recovery-question-label' }, `Question: "${u.recovery_question || 'Active'}"`),
-            h('p', { class: 'card-sub', style: { margin: '4px 0 0' } }, 'You can use this security question on the login screen to recover your password if you ever lose access.')
+            h('p', { class: 'card-sub', style: { margin: '4px 0 0', fontSize: '11.5px' } }, 'You can use this security question on the login screen to recover your password if you ever lose access.')
           ),
           h('button', {
             type: 'button',
@@ -124,16 +124,16 @@ export function mount(root) {
       }
 
       const notice = !u.has_recovery
-        ? h('div', { class: 'recovery-status-box not-configured' },
+        ? h('div', { class: 'recovery-status-box not-configured', style: { padding: '9px 12px', marginBottom: '10px' } },
             icon('alert'),
             h('div', null,
-              h('div', { class: 'strong' }, 'No Recovery Question Set'),
-              h('div', { class: 'card-sub', style: { margin: '2px 0 0' } }, 'Set a recovery question and answer now so a lost password or device can be recovered safely.')
+              h('div', { class: 'strong', style: { fontSize: '13px' } }, 'No Recovery Question Set'),
+              h('div', { class: 'card-sub', style: { margin: '2px 0 0', fontSize: '11.5px' } }, 'Set a recovery question and answer now so a lost password or device can be recovered safely.')
             )
           )
         : null;
 
-      const qSelect = h('select', { class: 'input select' },
+      const qSelect = h('select', { class: 'input select wide' },
         ...PRESET_QUESTIONS.map(q => h('option', { value: q }, q))
       );
 
@@ -164,7 +164,7 @@ export function mount(root) {
 
       const curPass = input({
         type: 'password',
-        placeholder: 'Enter your current dashboard password',
+        placeholder: 'Enter current password',
         required: true,
         autocomplete: 'current-password',
       });
@@ -187,8 +187,8 @@ export function mount(root) {
         h('div', { class: 'form-grid' },
           labeled('Security Question', qSelect, 'full'),
           customQField,
-          labeled('Your Secret Answer', ans, 'full'),
-          labeled('Current password (required for verification)', curPass, 'full')
+          labeled('Your Secret Answer', ans),
+          labeled('Current Password', curPass)
         ),
         actions(...[cancelBtn, submitBtn].filter(Boolean))
       );
@@ -211,7 +211,7 @@ export function mount(root) {
           setUser(u);
           toast('Recovery question configured successfully');
           editing = false;
-          updateCardContent();
+          render(u);
         });
       });
 
@@ -222,10 +222,49 @@ export function mount(root) {
     return card('Account Recovery Question', 'Set a recovery question so a lost password or device can be recovered', wrap);
   }
 
+  function securityOverviewCard(u) {
+    const isAdm = u.role === 'admin';
+    const recBadge = u.has_recovery
+      ? h('span', { class: 'badge ok' }, icon('shield'), 'Configured')
+      : h('span', { class: 'badge', style: { color: 'var(--muted)', background: 'var(--hover)' } }, icon('alert'), 'Not set');
+
+    const content = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px', fontSize: '12.5px' } },
+      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: '10px', borderBottom: '1px solid var(--border)' } },
+        h('div', null,
+          h('div', { class: 'strong' }, 'Recovery Status'),
+          h('div', { class: 'muted', style: { fontSize: '11.5px', marginTop: '2px' } },
+            u.has_recovery
+              ? 'Configured for password recovery on sign-in'
+              : 'Set a security question to recover your password'
+          )
+        ),
+        recBadge
+      ),
+      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: '10px', borderBottom: '1px solid var(--border)' } },
+        h('div', null,
+          h('div', { class: 'strong' }, 'Account Role'),
+          h('div', { class: 'muted', style: { fontSize: '11.5px', marginTop: '2px' } },
+            isAdm ? 'Administrator (full access & user management)' : 'Operator (dashboard and gateway access)'
+          )
+        ),
+        h('span', { class: `badge${isAdm ? ' role-admin' : ''}` }, isAdm ? 'Admin' : 'Operator')
+      ),
+      h('div', { class: 'card-sub', style: { margin: '2px 0 0', lineHeight: '1.45', fontSize: '12px' } },
+        isAdm
+          ? 'As an Administrator, you can manage user accounts and reset credentials for Operator accounts in the Users menu.'
+          : 'As an Operator, if you ever lose your login credentials or recovery access, an Administrator can reset your account in the Users menu.'
+      )
+    );
+
+    return card('Security Overview', 'Account credentials and access policy', content);
+  }
+
   function render(u) {
     el.replaceChildren(head,
-      h('div', { class: 'grid grid-2e' }, accountCard(u), passwordCard()),
-      h('div', { class: 'mt' }, recoveryCard(u))
+      h('div', { class: 'grid grid-2e' },
+        h('div', { class: 'grid stack' }, accountCard(u), recoveryCard(u)),
+        h('div', { class: 'grid stack' }, passwordCard(), securityOverviewCard(u))
+      )
     );
   }
 

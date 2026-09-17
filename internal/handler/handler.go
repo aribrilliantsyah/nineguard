@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -56,6 +57,38 @@ func jsonError(w http.ResponseWriter, status int, msg string) {
 	jsonResponse(w, status, map[string]string{"error": msg})
 }
 
+func getClientIP(r *http.Request) string {
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		return strings.TrimSpace(strings.Split(forwarded, ",")[0])
+	}
+	return r.RemoteAddr
+}
+
+func (h *Handler) logAudit(r *http.Request, actorID int64, username, action, target, status, details string) {
+	clientIP := getClientIP(r)
+	if h.syslog != nil {
+		h.syslog.RecordAudit(syslog.AuditEntry{
+			Timestamp:      time.Now().UTC(),
+			ActorID:        actorID,
+			ActorUsername:  username,
+			Action:         action,
+			TargetResource: target,
+			ClientIP:       clientIP,
+			Status:         status,
+			Details:        details,
+		})
+	}
+	slog.Info("security audit",
+		"source", "audit",
+		"actor_id", actorID,
+		"actor_username", username,
+		"action", action,
+		"target_resource", target,
+		"client_ip", clientIP,
+		"status", status,
+	)
+}
+
 // ── Auth Handlers ──
 
 func (h *Handler) AuthStatus(w http.ResponseWriter, r *http.Request) {
@@ -94,14 +127,19 @@ func (h *Handler) AuthSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	isSecure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   isSecure,
 		SameSite: http.SameSiteLaxMode,
 		Expires:  time.Now().Add(30 * 24 * time.Hour),
 	})
+
+	h.logAudit(r, user.ID, user.Username, "auth.setup", "system", "success", "")
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"user":  user,
@@ -121,18 +159,24 @@ func (h *Handler) AuthLogin(w http.ResponseWriter, r *http.Request) {
 
 	user, token, err := h.auth.Login(body.Username, body.Password)
 	if err != nil {
+		h.logAudit(r, 0, body.Username, "auth.login", "user:"+body.Username, "failure", "invalid credentials")
 		jsonError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
+
+	isSecure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   isSecure,
 		SameSite: http.SameSiteLaxMode,
 		Expires:  time.Now().Add(30 * 24 * time.Hour),
 	})
+
+	h.logAudit(r, user.ID, user.Username, "auth.login", "user:"+user.Username, "success", "")
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"user":  user,
@@ -141,16 +185,29 @@ func (h *Handler) AuthLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) AuthLogout(w http.ResponseWriter, r *http.Request) {
+	var actorID int64
+	var username string
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		actorID = u.ID
+		username = u.Username
+	}
 	if cookie, err := r.Cookie(auth.SessionCookieName); err == nil {
 		_ = h.auth.Logout(cookie.Value)
 	}
+
+	isSecure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookieName,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   isSecure,
 		MaxAge:   -1,
 	})
+
+	h.logAudit(r, actorID, username, "auth.logout", "user", "success", "")
+
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -278,9 +335,11 @@ func (h *Handler) RecoverPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.auth.RecoverPassword(body.Username, body.Answer, body.NewPassword); err != nil {
+		h.logAudit(r, 0, body.Username, "auth.password.recover", "user:"+body.Username, "failure", err.Error())
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	h.logAudit(r, 0, body.Username, "auth.password.recover", "user:"+body.Username, "success", "")
 	jsonResponse(w, http.StatusOK, map[string]string{
 		"status":  "ok",
 		"message": "Password updated successfully. You can now log in.",
@@ -310,6 +369,7 @@ func (h *Handler) UpdatePassword(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	h.logAudit(r, user.ID, user.Username, "auth.password.update", fmt.Sprintf("user:%d", user.ID), "success", "")
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -323,7 +383,8 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	users, err := h.auth.ListUsers()
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to list users", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to retrieve users")
 		return
 	}
 	jsonResponse(w, http.StatusOK, users)
@@ -350,6 +411,7 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	h.logAudit(r, user.ID, user.Username, "user.create", "user:"+body.Username, "success", "")
 	jsonResponse(w, http.StatusOK, created)
 }
 
@@ -365,11 +427,120 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "Invalid user id")
 		return
 	}
+	if user.ID == id {
+		jsonError(w, http.StatusBadRequest, "Cannot delete your own account")
+		return
+	}
 	if err := h.auth.DeleteUser(id); err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	h.logAudit(r, user.ID, user.Username, "user.delete", "user:"+idStr, "success", "")
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) ResetUserPassword(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil || user.Role != "admin" {
+		jsonError(w, http.StatusForbidden, "Only administrators can manage users")
+		return
+	}
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid user id")
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+	if err := h.auth.ResetUserPassword(id, body.Password); err != nil {
+		if strings.Contains(err.Error(), "cannot reset") {
+			jsonError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.logAudit(r, user.ID, user.Username, "user.reset_password", "user:"+idStr, "success", "")
+	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok", "message": "Password reset successfully"})
+}
+
+func (h *Handler) ResetUserRecovery(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil || user.Role != "admin" {
+		jsonError(w, http.StatusForbidden, "Only administrators can manage users")
+		return
+	}
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid user id")
+		return
+	}
+	if err := h.auth.ResetUserRecovery(id); err != nil {
+		if strings.Contains(err.Error(), "cannot reset") {
+			jsonError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.logAudit(r, user.ID, user.Username, "user.reset_recovery", "user:"+idStr, "success", "")
+	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok", "message": "Recovery question reset successfully"})
+}
+
+func (h *Handler) ResetUser(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil || user.Role != "admin" {
+		jsonError(w, http.StatusForbidden, "Only administrators can manage users")
+		return
+	}
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid user id")
+		return
+	}
+	var body struct {
+		Password      string `json:"password"`
+		ResetRecovery bool   `json:"reset_recovery"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+	if body.Password == "" && !body.ResetRecovery {
+		jsonError(w, http.StatusBadRequest, "No reset action specified")
+		return
+	}
+	if body.Password != "" {
+		if err := h.auth.ResetUserPassword(id, body.Password); err != nil {
+			if strings.Contains(err.Error(), "cannot reset") {
+				jsonError(w, http.StatusForbidden, err.Error())
+				return
+			}
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		h.logAudit(r, user.ID, user.Username, "user.reset_password", "user:"+idStr, "success", "")
+	}
+	if body.ResetRecovery {
+		if err := h.auth.ResetUserRecovery(id); err != nil {
+			if strings.Contains(err.Error(), "cannot reset") {
+				jsonError(w, http.StatusForbidden, err.Error())
+				return
+			}
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		h.logAudit(r, user.ID, user.Username, "user.reset_recovery", "user:"+idStr, "success", "")
+	}
+	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok", "message": "User reset successfully"})
 }
 
 // ── Models Handlers ──
@@ -378,7 +549,8 @@ func (h *Handler) ListModels(w http.ResponseWriter, r *http.Request) {
 	providerFilter := r.URL.Query().Get("provider")
 	list, err := h.models.ListModels(providerFilter)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to list models", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to retrieve models")
 		return
 	}
 	jsonResponse(w, http.StatusOK, list)
@@ -397,6 +569,13 @@ func (h *Handler) ToggleModel(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	var actorID int64
+	var username string
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		actorID = u.ID
+		username = u.Username
+	}
+	h.logAudit(r, actorID, username, "model.toggle", body.ModelID, "success", fmt.Sprintf("enabled=%v", body.Enabled))
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -420,9 +599,17 @@ func (h *Handler) DeleteModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.models.DeleteModel(id); err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to delete model", "id", id, "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to delete model")
 		return
 	}
+	var actorID int64
+	var username string
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		actorID = u.ID
+		username = u.Username
+	}
+	h.logAudit(r, actorID, username, "model.delete", id, "success", "")
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -435,7 +622,8 @@ func (h *Handler) ListModelGroups(w http.ResponseWriter, r *http.Request) {
 	}
 	groups, err := h.models.ListGroups()
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to list model groups", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to retrieve model groups")
 		return
 	}
 	if groups == nil {
@@ -578,7 +766,8 @@ func (h *Handler) GetSystemLogs(w http.ResponseWriter, r *http.Request) {
 	params := parseSyslogFilterParams(q)
 	logs, total, err := h.syslog.QueryLogs(params)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to query system logs", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to query system logs")
 		return
 	}
 
@@ -604,7 +793,8 @@ func (h *Handler) GetSystemLogVolume(w http.ResponseWriter, r *http.Request) {
 	params := parseSyslogFilterParams(q)
 	vol, err := h.syslog.GetVolume(params, buckets)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to get system log volume", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to retrieve system log volume")
 		return
 	}
 	jsonResponse(w, http.StatusOK, vol)
@@ -613,7 +803,8 @@ func (h *Handler) GetSystemLogVolume(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) GetSystemLogSources(w http.ResponseWriter, r *http.Request) {
 	sources, err := h.syslog.GetSources()
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to get system log sources", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to retrieve system log sources")
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -637,7 +828,8 @@ func (h *Handler) ExportSystemLogs(w http.ResponseWriter, r *http.Request) {
 
 	logs, _, err := h.syslog.QueryLogs(params)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to export system logs", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to export system logs")
 		return
 	}
 
@@ -725,7 +917,8 @@ func (h *Handler) GetTrafficLogs(w http.ResponseWriter, r *http.Request) {
 	params := parseFilterParams(q)
 	logs, total, err := h.traffic.QueryLogs(params)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to query traffic logs", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to query traffic logs")
 		return
 	}
 
@@ -751,7 +944,8 @@ func (h *Handler) GetTrafficVolume(w http.ResponseWriter, r *http.Request) {
 	params := parseFilterParams(q)
 	vol, err := h.traffic.GetVolume(params, buckets)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to get traffic volume", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to retrieve traffic volume")
 		return
 	}
 	jsonResponse(w, http.StatusOK, vol)
@@ -773,7 +967,8 @@ func (h *Handler) ExportTrafficLogs(w http.ResponseWriter, r *http.Request) {
 
 	logs, _, err := h.traffic.QueryLogs(params)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to export traffic logs", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to export traffic logs")
 		return
 	}
 
@@ -836,7 +1031,8 @@ func (h *Handler) GetTrafficStats(w http.ResponseWriter, r *http.Request) {
 	}
 	stats, err := h.traffic.GetDashboardStats(period, startDate, endDate)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to get traffic stats", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to retrieve traffic statistics")
 		return
 	}
 	jsonResponse(w, http.StatusOK, stats)
@@ -855,7 +1051,8 @@ func (h *Handler) GetUsageReport(w http.ResponseWriter, r *http.Request) {
 	}
 	report, err := h.traffic.GetUsageReports(period, startDate, endDate)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to get usage report", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to retrieve usage report")
 		return
 	}
 	jsonResponse(w, http.StatusOK, report)
@@ -872,7 +1069,8 @@ func (h *Handler) ListKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	list, err := h.keys.ListKeys()
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to list keys", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to retrieve API keys")
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"keys": list})
@@ -893,9 +1091,17 @@ func (h *Handler) CreateKey(w http.ResponseWriter, r *http.Request) {
 
 	keyInfo, err := h.keys.CreateKey(body.Name, body.ModelAccessMode, body.ModelGroupIDs, body.AllowedModels)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to create key", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to create API key")
 		return
 	}
+	var actorID int64
+	var username string
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		actorID = u.ID
+		username = u.Username
+	}
+	h.logAudit(r, actorID, username, "key.create", keyInfo.ID, "success", "name="+keyInfo.Name)
 	jsonResponse(w, http.StatusOK, keyInfo)
 }
 
@@ -921,6 +1127,13 @@ func (h *Handler) UpdateKey(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	var actorID int64
+	var username string
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		actorID = u.ID
+		username = u.Username
+	}
+	h.logAudit(r, actorID, username, "key.update", id, "success", "")
 	jsonResponse(w, http.StatusOK, keyInfo)
 }
 
@@ -939,9 +1152,17 @@ func (h *Handler) ToggleKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.keys.ToggleKey(id, body.Active); err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to toggle key", "id", id, "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to toggle API key")
 		return
 	}
+	var actorID int64
+	var username string
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		actorID = u.ID
+		username = u.Username
+	}
+	h.logAudit(r, actorID, username, "key.toggle", id, "success", fmt.Sprintf("active=%v", body.Active))
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -952,9 +1173,17 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	if err := h.keys.DeleteKey(id); err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to delete key", "id", id, "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to delete API key")
 		return
 	}
+	var actorID int64
+	var username string
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		actorID = u.ID
+		username = u.Username
+	}
+	h.logAudit(r, actorID, username, "key.delete", id, "success", "")
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -967,7 +1196,8 @@ func (h *Handler) ListProviders(w http.ResponseWriter, r *http.Request) {
 	}
 	list, err := h.providers.ListProviders()
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to list providers", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to retrieve providers")
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"providers": list})
@@ -996,6 +1226,13 @@ func (h *Handler) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	var actorID int64
+	var username string
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		actorID = u.ID
+		username = u.Username
+	}
+	h.logAudit(r, actorID, username, "provider.create", p.ID, "success", "name="+p.Name)
 	jsonResponse(w, http.StatusOK, p)
 }
 
@@ -1006,23 +1243,37 @@ func (h *Handler) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	var body struct {
-		Name      string `json:"name"`
-		Route     string `json:"route"`
-		APIKey    string `json:"api_key"`
-		Prefix    string `json:"prefix"`
-		IsDefault bool   `json:"is_default"`
-		IsActive  bool   `json:"is_active"`
+		Name      string  `json:"name"`
+		Route     string  `json:"route"`
+		APIKey    *string `json:"api_key"`
+		Prefix    string  `json:"prefix"`
+		IsDefault bool    `json:"is_default"`
+		IsActive  bool    `json:"is_active"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
 
-	p, err := h.providers.UpdateProvider(id, body.Name, body.Route, body.APIKey, body.Prefix, body.IsDefault, body.IsActive)
+	apiKey := ""
+	if body.APIKey != nil {
+		apiKey = *body.APIKey
+	} else if existing, err := h.providers.GetProvider(id); err == nil && existing != nil {
+		apiKey = existing.APIKey
+	}
+
+	p, err := h.providers.UpdateProvider(id, body.Name, body.Route, apiKey, body.Prefix, body.IsDefault, body.IsActive)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	var actorID int64
+	var username string
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		actorID = u.ID
+		username = u.Username
+	}
+	h.logAudit(r, actorID, username, "provider.update", id, "success", "")
 	jsonResponse(w, http.StatusOK, p)
 }
 
@@ -1041,9 +1292,17 @@ func (h *Handler) ToggleProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.providers.ToggleProvider(id, body.Active); err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to toggle provider", "id", id, "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to toggle provider")
 		return
 	}
+	var actorID int64
+	var username string
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		actorID = u.ID
+		username = u.Username
+	}
+	h.logAudit(r, actorID, username, "provider.toggle", id, "success", fmt.Sprintf("active=%v", body.Active))
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -1054,9 +1313,17 @@ func (h *Handler) SetDefaultProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	if err := h.providers.SetDefaultProvider(id); err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to set default provider", "id", id, "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to set default provider")
 		return
 	}
+	var actorID int64
+	var username string
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		actorID = u.ID
+		username = u.Username
+	}
+	h.logAudit(r, actorID, username, "provider.set_default", id, "success", "")
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -1067,9 +1334,17 @@ func (h *Handler) DeleteProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	if err := h.providers.DeleteProvider(id); err != nil {
-		jsonError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("failed to delete provider", "id", id, "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to delete provider")
 		return
 	}
+	var actorID int64
+	var username string
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		actorID = u.ID
+		username = u.Username
+	}
+	h.logAudit(r, actorID, username, "provider.delete", id, "success", "")
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -1079,10 +1354,17 @@ func (h *Handler) TestProviderConnection(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var body struct {
+		ID     string `json:"id"`
 		Route  string `json:"route"`
 		APIKey string `json:"api_key"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	if body.APIKey == "" && body.ID != "" {
+		if p, err := h.providers.GetProvider(body.ID); err == nil && p != nil {
+			body.APIKey = p.APIKey
+		}
+	}
 
 	res, err := h.providers.TestProvider(r.Context(), body.Route, body.APIKey)
 	if err != nil {
@@ -1125,7 +1407,8 @@ func (h *Handler) SetUpstreamSettings(w http.ResponseWriter, r *http.Request) {
 
 	if key := strings.TrimSpace(body.RouterAPIKey); key != "" {
 		if err := h.keys.SetUpstreamKey(key); err != nil {
-			jsonError(w, http.StatusInternalServerError, err.Error())
+			slog.Error("failed to set upstream key", "error", err)
+			jsonError(w, http.StatusInternalServerError, "Failed to configure upstream key")
 			return
 		}
 	}

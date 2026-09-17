@@ -51,10 +51,11 @@ type VolumeResult struct {
 }
 
 type Manager struct {
-	db     *db.DB
-	ch     chan SystemLogEntry
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	db        *db.DB
+	ch        chan SystemLogEntry
+	stopCh    chan struct{}
+	wg        sync.WaitGroup
+	closeOnce sync.Once
 }
 
 func NewManager(database *db.DB) *Manager {
@@ -69,8 +70,10 @@ func NewManager(database *db.DB) *Manager {
 }
 
 func (m *Manager) Close() {
-	close(m.stopCh)
-	m.wg.Wait()
+	m.closeOnce.Do(func() {
+		close(m.stopCh)
+		m.wg.Wait()
+	})
 }
 
 func (m *Manager) worker() {
@@ -151,6 +154,53 @@ func (m *Manager) Record(e SystemLogEntry) {
 	default:
 		// Queue full, drop rather than stall system
 	}
+}
+
+type AuditEntry struct {
+	Timestamp      time.Time `json:"timestamp"`
+	ActorID        int64     `json:"actor_id"`
+	ActorUsername  string    `json:"actor_username,omitempty"`
+	Action         string    `json:"action"`
+	TargetResource string    `json:"target_resource"`
+	ClientIP       string    `json:"client_ip"`
+	Status         string    `json:"status,omitempty"`
+	Details        string    `json:"details,omitempty"`
+}
+
+func (m *Manager) RecordAudit(entry AuditEntry) {
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now().UTC()
+	}
+	attrsMap := map[string]interface{}{
+		"actor_id":        entry.ActorID,
+		"action":          entry.Action,
+		"target_resource": entry.TargetResource,
+		"client_ip":       entry.ClientIP,
+	}
+	if entry.ActorUsername != "" {
+		attrsMap["actor_username"] = entry.ActorUsername
+	}
+	if entry.Status != "" {
+		attrsMap["status"] = entry.Status
+	}
+	if entry.Details != "" {
+		attrsMap["details"] = entry.Details
+	}
+	attrsJSON, _ := json.Marshal(attrsMap)
+
+	level := "INFO"
+	if entry.Status == "failure" || entry.Status == "error" {
+		level = "WARN"
+	}
+
+	msg := fmt.Sprintf("[%s] actor=%d action=%s target=%s ip=%s", entry.Action, entry.ActorID, entry.Action, entry.TargetResource, entry.ClientIP)
+	m.Record(SystemLogEntry{
+		Timestamp: entry.Timestamp,
+		Level:     level,
+		Source:    "audit",
+		Message:   msg,
+		Attrs:     string(attrsJSON),
+	})
 }
 
 func NormalizeLevel(l string) string {
