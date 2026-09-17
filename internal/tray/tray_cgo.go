@@ -1,4 +1,4 @@
-//go:build (linux || darwin || windows) && (cgo || windows)
+//go:build (linux || darwin || windows) && (cgo || windows) && !server && !headless && !notray
 
 package tray
 
@@ -13,11 +13,14 @@ import (
 
 // IsSupported returns true if the current environment can display a system tray.
 func IsSupported() bool {
+	if os.Getenv("NINEGUARD_NO_TRAY") == "1" || os.Getenv("NINEGUARD_HEADLESS") == "1" {
+		return false
+	}
 	switch runtime.GOOS {
 	case "windows", "darwin":
 		return true
 	case "linux":
-		// On Linux, a GUI session (X11 or Wayland) is required
+		// On Linux, a GUI session (X11 or Wayland) with desktop environment or window manager is required
 		return os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
 	default:
 		return false

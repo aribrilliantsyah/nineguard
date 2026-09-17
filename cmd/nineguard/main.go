@@ -38,7 +38,7 @@ Usage:
 
 Options:
   -p, --port <port>       Set HTTP server listening port (default: 8080)
-  -t, --tray              Run directly in system tray mode (background)
+  -t, --tray              Run in system tray mode (desktop) or daemon mode (server)
   -l, --logs              Start server and stream live running logs
   -d, --daemon            Run in headless/daemon mode (no interactive TUI)
   -h, --help              Show this help message
@@ -329,6 +329,18 @@ func main() {
 
 	// Mode A: Direct Tray
 	if flagTray {
+		if !tray.IsSupported() {
+			slog.Warn("system tray is not supported in this environment; running in background daemon mode", "port", cfg.Port)
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+			<-sigCh
+			slog.Info("shutting down NineGuard server...")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = server.Shutdown(ctx)
+			return
+		}
+
 		slog.Info("NineGuard running in system tray mode", "port", cfg.Port)
 		tray.Run(tray.Options{
 			Port:      cfg.Port,

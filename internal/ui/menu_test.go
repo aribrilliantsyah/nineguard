@@ -5,7 +5,14 @@ import (
 	"testing"
 )
 
+func TestMenuBackgroundAction(t *testing.T) {
+	if ActionBackground != ActionTray {
+		t.Errorf("expected ActionBackground to match ActionTray, got %v != %v", ActionBackground, ActionTray)
+	}
+}
+
 func TestMenuCleanRendering(t *testing.T) {
+
 	reset := "\033[0m"
 	bold := "\033[1m"
 	dim := "\033[2m"

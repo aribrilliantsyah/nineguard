@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+
+	"nineguard/internal/tray"
 )
 
 // Action represents an action selected from the menu.
@@ -14,6 +16,10 @@ const (
 	ActionTray
 	ActionExit
 )
+
+// ActionBackground is an alias for ActionTray to represent background execution
+// across both desktop (tray) and server (daemon) environments.
+const ActionBackground = ActionTray
 
 type MenuItem struct {
 	ID    Action
@@ -29,6 +35,11 @@ type MenuConfig struct {
 
 // ShowMenu displays the interactive selection menu and returns the user's choice.
 func ShowMenu(kr *KeyReader, cfg MenuConfig) (Action, error) {
+	trayTitle := "Hide to Tray (Background)"
+	if !tray.IsSupported() {
+		trayTitle = "Run in Background (Daemon)"
+	}
+
 	items := []MenuItem{
 		{
 			ID:    ActionWeb,
@@ -40,7 +51,7 @@ func ShowMenu(kr *KeyReader, cfg MenuConfig) (Action, error) {
 		},
 		{
 			ID:    ActionTray,
-			Title: "Hide to Tray (Background)",
+			Title: trayTitle,
 		},
 		{
 			ID:    ActionExit,

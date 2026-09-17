@@ -1,4 +1,4 @@
-//go:build (!cgo && !windows) || (!linux && !darwin && !windows)
+//go:build (!cgo && !windows) || (!linux && !darwin && !windows) || server || headless || notray
 
 package tray
 
@@ -6,7 +6,7 @@ import (
 	"log/slog"
 )
 
-// IsSupported returns false in headless or non-cgo builds.
+// IsSupported returns false in headless, server, or non-cgo builds.
 func IsSupported() bool {
 	return false
 }
@@ -18,3 +18,4 @@ func Run(opts Options) {
 
 // Quit is a no-op fallback.
 func Quit() {}
+

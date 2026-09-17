@@ -20,8 +20,8 @@ Buka antarmuka NineGuard pada browser di menu **Gateway $\rightarrow$ Providers*
      * OpenRouter: `https://openrouter.ai/api/v1`
    * **Upstream API Key:** Master API key yang dibutuhkan provider tersebut.
    * **Set as Default Provider:** Centang opsi ini jika provider ini ingin dijadikan tujuan cadangan (*fallback*) untuk request tanpa prefix.
-3. Klik **Save Changes**.
-4. Klik tombol **Test Probe** untuk memvalidasi bahwa route dan API key berfungsi (status 200 OK).
+3. Klik **Add Provider** (atau **Save Changes** jika mengedit provider yang sudah ada).
+4. Setelah provider tersimpan dan kartunya muncul di daftar, klik tombol **Test Probe** pada kartu tersebut untuk memvalidasi bahwa route dan API key berfungsi (status 200 OK).
 
 ---
 

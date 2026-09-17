@@ -1,5 +1,6 @@
 # Binaries and executables
 /nineguard
+/nineguard-server
 *.exe
 *.exe~
 *.dll
