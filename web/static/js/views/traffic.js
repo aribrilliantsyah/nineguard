@@ -1,6 +1,6 @@
 // Traffic Explorer: Kibana/Discover-style HTTP request, latency and token telemetry.
 import { api } from '../api.js';
-import { h, icon, fmtTime, fmtNum, fmtCompact, localDate, tzLabel, msOf, podColor, copy, toast, menu, emptyState, skeletonRows, debounce, searchableSelect } from '../ui.js';
+import { h, icon, fmtTime, fmtNum, fmtCompact, localDate, tzLabel, msOf, podColor, copy, toast, menu, emptyState, skeletonRows, debounce, searchableSelect, formDialog } from '../ui.js';
 import { patchRoute } from '../state.js';
 import { queryParams, rangeControls, searchTerms, highlight, toLocalInput, iso } from '../filters.js';
 import { volumeChart } from '../chart.js';
@@ -22,7 +22,7 @@ const TRAFFIC_SERIES = [
   { label: '2xx', levels: ['2xx'], color: 'var(--ok)' },
 ];
 
-const keyOf = (x) => JSON.stringify([x.key, x.model, x.provider, x.ip, x.status, x.q, x.range, x.date, x.from, x.to]);
+const keyOf = (x) => JSON.stringify([x.key, x.model, x.provider, x.ip, x.status, x.q, x.range, x.date, x.from, x.to, x.has_images]);
 
 export function mount(root) {
   let p = {};
@@ -35,6 +35,69 @@ export function mount(root) {
   let liveState = '';
   let chart = null;
   let terms = [];
+
+  let heavyThreshold = 8000;
+  let recordPayloads = 'disabled';
+  api.get('/settings/traffic').then(s => {
+    if (s && s.heavy_token_threshold > 0) heavyThreshold = s.heavy_token_threshold;
+    if (s && s.record_payloads) recordPayloads = s.record_payloads;
+  }).catch(() => {});
+
+  function openTrafficSettingsModal() {
+    const input = h('input', {
+      class: 'input',
+      type: 'number',
+      min: '1000',
+      step: '1000',
+      value: String(heavyThreshold)
+    });
+    const payloadSel = h('select', { class: 'input' },
+      h('option', { value: 'disabled', selected: recordPayloads === 'disabled' }, 'Disabled (Do not record)'),
+      h('option', { value: 'errors_only', selected: recordPayloads === 'errors_only' }, 'Errors Only (4xx, 5xx)'),
+      h('option', { value: 'all', selected: recordPayloads === 'all' }, 'All Requests')
+    );
+
+    formDialog({
+      title: 'Traffic Explorer Settings',
+      submitText: 'Save Settings',
+      fields: [
+        {
+          label: 'Heavy Request Threshold (Tokens)',
+          node: h('div', null,
+            input,
+            h('p', { class: 'muted', style: { fontSize: '11.5px', margin: '4px 0 0' } },
+              'Requests consuming at or above this token count are flagged with ⚠️ Heavy badge in Traffic Explorer and trigger WARN logs.'
+            )
+          )
+        },
+        {
+          label: 'Payload Recording (Inspector & Replay)',
+          node: h('div', null,
+            payloadSel,
+            h('p', { class: 'muted', style: { fontSize: '11.5px', margin: '4px 0 0' } },
+              'Stores request and response bodies for debugging. Capped at 512KB per body; auto-purged after 7 days.'
+            )
+          )
+        }
+      ],
+      onSubmit: async () => {
+        const val = parseInt(input.value, 10);
+        if (isNaN(val) || val <= 0) throw new Error('Threshold must be a positive number');
+        const pMode = payloadSel.value;
+        await api.post('/settings/traffic', { heavy_token_threshold: val, record_payloads: pMode });
+        heavyThreshold = val;
+        recordPayloads = pMode;
+        toast('Traffic settings updated', 'ok');
+        renderRows();
+      }
+    });
+  }
+
+  const alertBtn = h('button', {
+    class: 'btn btn-sm', type: 'button',
+    title: 'Configure Traffic Spike Alert Threshold',
+    onclick: openTrafficSettingsModal,
+  }, icon('alert'), 'Alerts');
 
   let availableKeys = [];
   let availableModels = [];
@@ -60,7 +123,7 @@ export function mount(root) {
 
   const clearBtn = h('button', {
     class: 'btn btn-sm', type: 'button',
-    onclick: () => patch({ key: '', model: '', provider: '', ip: '', status: '', q: '' }),
+    onclick: () => patch({ key: '', key_id: '', model: '', provider: '', ip: '', status: '', q: '', has_images: '' }),
   }, icon('x'), 'Clear');
 
   const searchIn = h('input', {
@@ -84,6 +147,14 @@ export function mount(root) {
     onclick: () => toggleStatus(s.id)
   }, h('i', { class: 'dot' }), s.label));
 
+  const imgChip = h('button', {
+    class: `chip ${p.has_images ? 'active' : ''}`,
+    type: 'button',
+    title: 'Filter requests containing attached images',
+    onclick: () => patch({ has_images: p.has_images ? '' : '1' }),
+    style: p.has_images ? { background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8', borderColor: '#38bdf8' } : {}
+  }, '🖼️ Images');
+
   const liveBtn = h('button', { class: 'chip live', type: 'button', onclick: toggleLive });
 
   const exportBtn = h('button', {
@@ -102,7 +173,7 @@ export function mount(root) {
   root.append(h('div', { class: 'page-fill' },
     h('div', { class: 'toolbar' },
       searchBox, range.el, h('span', { class: 'sep' }), keySel, modelSel, providerSel, clearBtn,
-      h('span', { class: 'spacer' }), h('span', { class: 'chips' }, chips), liveBtn, exportBtn),
+      h('span', { class: 'spacer' }), h('span', { class: 'chips' }, ...chips, imgChip), liveBtn, alertBtn, exportBtn),
     chartBox,
     h('div', { class: 'log-table traffic-table' },
       h('div', { class: 'log-head' },
@@ -214,7 +285,8 @@ export function mount(root) {
 
     const set = statusSet();
     chips.forEach((c, i) => c.classList.toggle('active', set.has(TRAFFIC_STATUSES[i].id)));
-    clearBtn.hidden = !(p.key || p.model || p.provider || p.ip || p.status || p.q);
+    imgChip.classList.toggle('active', !!p.has_images);
+    clearBtn.hidden = !(p.key || p.key_id || p.model || p.provider || p.ip || p.status || p.q || p.has_images);
 
     liveBtn.classList.toggle('active', !!p.live);
     liveBtn.title = p.live ? 'Stop following new requests' : 'Follow new requests in real time';
@@ -393,7 +465,7 @@ export function mount(root) {
     return emptyState('inbox', 'No traffic recorded yet', 'Nothing in this time range matches the current filters.',
       h('span', { class: 'input-group' },
         h('button', { class: 'btn btn-sm', onclick: () => patch({ range: '24h', date: '', from: '', to: '' }) }, 'Last 24 hours'),
-        h('button', { class: 'btn btn-sm', onclick: () => patch({ range: '', date: '', from: '', to: '', key: '', model: '', provider: '', ip: '', status: '', q: '' }) }, 'Reset filters')));
+        h('button', { class: 'btn btn-sm', onclick: () => patch({ range: '', date: '', from: '', to: '', key: '', key_id: '', model: '', provider: '', ip: '', status: '', q: '' }) }, 'Reset filters')));
   }
 
   function renderStatusBadge(code) {
@@ -442,6 +514,52 @@ export function mount(root) {
       h('span', { class: 'c-model', title: `${e.model || '-'}${e.error_message ? `\nError: ${e.error_message}` : ''}` },
         modPrefix ? h('span', { class: 'source-ns' }, modPrefix) : null,
         h('span', { class: 'strong' }, highlight(modShort, terms)),
+        (heavyThreshold > 0 && (e.total_tokens || 0) >= heavyThreshold) ? h('span', {
+          class: 'badge',
+          style: {
+            fontSize: '9.5px',
+            padding: '1px 5px',
+            marginLeft: '6px',
+            background: 'rgba(234, 179, 8, 0.15)',
+            color: 'var(--lv-warn)',
+            border: '1px solid rgba(234, 179, 8, 0.35)',
+            fontWeight: '600',
+            whiteSpace: 'nowrap'
+          },
+          title: `Heavy request: ${fmtNum(e.total_tokens)} tokens (>= ${fmtNum(heavyThreshold)} threshold)`
+        }, '⚠️ Heavy') : null,
+        e.has_images ? h('span', {
+          class: 'badge',
+          style: {
+            fontSize: '9.5px',
+            padding: '1px 5px',
+            marginLeft: '4px',
+            background: 'rgba(56, 189, 248, 0.15)',
+            color: '#38bdf8',
+            border: '1px solid rgba(56, 189, 248, 0.35)',
+            fontWeight: '600',
+            whiteSpace: 'nowrap'
+          },
+          title: `Multimodal: prompt history contains ${e.image_count || 1} image(s) in conversation context`
+        }, `🖼️ ${e.image_count > 1 ? e.image_count + ' imgs' : '1 img'}`) : null,
+        e.plugins_applied ? h('span', {
+          class: 'badge',
+          style: {
+            fontSize: '9.5px',
+            padding: '1px 5px',
+            marginLeft: '6px',
+            background: 'rgba(249, 115, 22, 0.15)',
+            color: 'var(--accent)',
+            border: '1px solid rgba(249, 115, 22, 0.35)',
+            fontWeight: '600'
+          },
+          title: `Plugins applied: ${e.plugins_applied}`
+        }, '🧩 ' + e.plugins_applied) : null,
+        e.tokens_saved > 0 ? h('span', {
+          class: 'badge ok',
+          style: { fontSize: '9.5px', padding: '1px 5px', marginLeft: '4px' },
+          title: `Tokens saved: ${e.tokens_saved}`
+        }, `-${fmtCompact(e.tokens_saved)} tok`) : null,
         e.error_message ? h('span', { class: 'traffic-err-msg' }, '(', highlight(e.error_message, terms), ')') : null
       ),
       // 5. Tokens
@@ -502,8 +620,15 @@ export function mount(root) {
       ['Guard Status', statusText],
       ['Client Key', e.api_key_name ? `${e.api_key_name} (${e.api_key})` : (e.api_key || '-')],
       ['Target Model', e.model || '-'],
+      ['Images in Prompt Context', e.has_images ? `${e.image_count || 1} image(s) in conversation history` : 'None (text only)'],
       ['Provider', e.provider_id || '(default upstream)'],
       ['Tokens', `${fmtNum(e.total_tokens)} (prompt: ${fmtNum(e.prompt_tokens)}, completion: ${fmtNum(e.completion_tokens)})`],
+      ['Tokens Saved', e.tokens_saved ? `${fmtNum(e.tokens_saved)} tokens` : '0'],
+      ['Plugin Overhead (est.)', e.tokens_overhead ? `+${fmtNum(e.tokens_overhead)} tokens` : '0'],
+      ['Plugins Applied', e.plugins_applied || '(none)'],
+      ['Plugins Skipped', e.plugins_skipped || '(none)'],
+      ['Plugin Errors', e.plugin_errors || '(none)'],
+      ['Plugin Latency', e.plugin_ms ? `${e.plugin_ms}ms` : '0ms'],
       ['Latency', formatDuration(e.duration_ms)],
       ['Mode', e.stream ? 'Server-Sent Events (SSE)' : 'Synchronous JSON'],
       ['Client IP', e.client_ip || '-'],
@@ -511,20 +636,85 @@ export function mount(root) {
 
     const action = (ic, text, fn) => h('button', { class: 'btn btn-sm', type: 'button', onclick: fn }, icon(ic), text);
 
+    const payloadContainer = h('div', { class: 'payload-container', style: { marginTop: '12px', borderTop: '1px solid var(--border)', paddingTop: '10px' } });
+
+    api.get(`/traffic/${e.id}/payload`).then((pay) => {
+      if (!pay || (!pay.request_body && !pay.response_body)) return;
+
+      const reqPre = h('pre', { class: 'detail-msg', style: { maxHeight: '250px', overflowY: 'auto' } });
+      const respPre = h('pre', { class: 'detail-msg', style: { maxHeight: '250px', overflowY: 'auto' } });
+
+      try {
+        reqPre.textContent = JSON.stringify(JSON.parse(pay.request_body), null, 2);
+      } catch {
+        reqPre.textContent = pay.request_body || '(empty)';
+      }
+
+      try {
+        respPre.textContent = JSON.stringify(JSON.parse(pay.response_body), null, 2);
+      } catch {
+        respPre.textContent = pay.response_body || '(empty)';
+      }
+
+      const btnReq = h('button', {
+        class: 'tab active',
+        type: 'button',
+        onclick: () => {
+          btnReq.classList.add('active');
+          btnResp.classList.remove('active');
+          reqPre.style.display = 'block';
+          respPre.style.display = 'none';
+        }
+      }, 'Prompt / Request Body');
+
+      const btnResp = h('button', {
+        class: 'tab',
+        type: 'button',
+        onclick: () => {
+          btnResp.classList.add('active');
+          btnReq.classList.remove('active');
+          reqPre.style.display = 'none';
+          respPre.style.display = 'block';
+        }
+      }, 'Response Body');
+
+      respPre.style.display = 'none';
+
+      const copyCurlBtn = h('button', {
+        class: 'btn btn-sm',
+        type: 'button',
+        onclick: () => {
+          const origin = location.origin || 'http://localhost:8080';
+          const curl = `curl -X POST ${origin}/v1/chat/completions \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer <NINEGUARD_API_KEY>" \\\n  -d '${(pay.request_body || '').replace(/'/g, "'\\''")}'`;
+          copy(curl);
+        }
+      }, icon('copy'), 'Copy as cURL');
+
+      payloadContainer.replaceChildren(
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' } },
+          h('div', { class: 'tabs', style: { padding: '2px', display: 'inline-flex', gap: '4px' } }, btnReq, btnResp),
+          h('div', { style: { display: 'flex', gap: '6px' } }, copyCurlBtn)
+        ),
+        reqPre,
+        respPre
+      );
+    }).catch(() => {});
+
     return h('div', { class: 'detail' },
       h('div', { class: 'detail-meta' }, meta.map(([k, v]) => h('div', null, h('span', { class: 'k' }, k), h('span', { class: 'v', title: v }, v || '-')))),
       e.error_message ? h('div', { class: 'note warn', style: { marginBottom: '10px' } }, icon('alert'), h('b', null, 'Error: '), e.error_message) : null,
       h('pre', { class: 'detail-msg' }, highlight(e.message || JSON.stringify(e, null, 2), terms)),
+      payloadContainer,
       h('div', { class: 'detail-actions' },
         action('copy', 'Copy message', () => copy(e.message || '')),
         action('copy', 'Copy JSON', () => copy(JSON.stringify(e, null, 2))),
-        e.api_key_name || e.api_key ? action('key', 'Filter key', () => patch({ key: e.api_key_name || e.api_key })) : null,
+        e.api_key_name || e.api_key ? action('key', 'Filter key', () => patch(e.api_key_id ? { key_id: e.api_key_id, key: '' } : { key: e.api_key_name || e.api_key, key_id: '' })) : null,
         e.model ? action('box', 'Filter model', () => patch({ model: e.model })) : null,
         e.provider_id ? action('server', 'Filter provider', () => patch({ provider: e.provider_id })) : null,
         e.status_code ? action('shield', `Filter status ${e.status_code}`, () => patch({ status: `${e.status_code}` })) : null,
         e.client_ip ? action('search', 'Filter IP', () => patch({ q: `ip:${e.client_ip}` })) : null,
         action('crosshair', 'Surrounding requests', () => patch({
-          key: '', model: '', provider: '', ip: '', status: '', q: '', live: '', date: '',
+          key: '', key_id: '', model: '', provider: '', ip: '', status: '', q: '', live: '', date: '',
           range: 'custom', from: toLocalInput(ms - 60e3), to: toLocalInput(ms + 60e3),
         }))));
   }

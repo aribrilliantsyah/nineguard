@@ -9,6 +9,7 @@ import (
 
 	"nineguard/internal/db"
 	"nineguard/internal/providers"
+	"nineguard/internal/timeutil"
 )
 
 type ModelInfo struct {
@@ -134,9 +135,7 @@ func (m *Manager) ListModels(providerFilter string) ([]ModelInfo, error) {
 				mi.ProviderID = mi.ID[:idx]
 			}
 		}
-		if lastUsed.Valid {
-			mi.LastUsedAt = &lastUsed.String
-		}
+		mi.LastUsedAt = timeutil.NullTimeString(lastUsed)
 		list = append(list, mi)
 	}
 	return list, nil

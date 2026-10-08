@@ -14,6 +14,7 @@ import (
 	"nineguard/internal/handler"
 	"nineguard/internal/keys"
 	"nineguard/internal/models"
+	"nineguard/internal/plugins"
 	"nineguard/internal/providers"
 	"nineguard/internal/proxy"
 	"nineguard/internal/syslog"
@@ -35,13 +36,15 @@ func setupTestServer(t *testing.T) (http.Handler, *auth.Manager, *traffic.Manage
 	providersMgr := providers.NewManager(database)
 	modelsMgr := models.NewManager(database)
 	trafficMgr := traffic.NewManager(database)
+	pluginsMgr := plugins.NewManager(database, nil)
 
-	revProxy, err := proxy.NewProxy(modelsMgr, trafficMgr, keysMgr, providersMgr)
+	revProxy, err := proxy.NewProxy(modelsMgr, trafficMgr, keysMgr, providersMgr, pluginsMgr)
 	if err != nil {
 		t.Fatalf("failed to init proxy: %v", err)
 	}
 
 	h := handler.New(authMgr, modelsMgr, trafficMgr, syslogMgr, keysMgr, providersMgr, revProxy, "")
+	h.SetPlugins(pluginsMgr)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +61,7 @@ func setupTestServer(t *testing.T) (http.Handler, *auth.Manager, *traffic.Manage
 	mux.HandleFunc("GET /api/v1/providers", h.ListProviders)
 	mux.HandleFunc("GET /api/v1/traffic", h.GetTrafficLogs)
 	mux.HandleFunc("GET /api/v1/models", h.ListModels)
+	mux.HandleFunc("GET /api/v1/plugins", h.ListPlugins)
 
 	fileServer := web.StaticHandler()
 
@@ -123,6 +127,15 @@ func TestUnauthenticatedDashboardAPIAccessBlocked(t *testing.T) {
 
 	if recTraffic.Code != http.StatusUnauthorized {
 		t.Fatalf("CRITICAL: Unauthenticated caller was able to reach /api/v1/traffic! Got status %d, expected 401", recTraffic.Code)
+	}
+
+	// 3b. Unauthenticated attempt to read plugins via GET /api/v1/plugins -> MUST FAIL WITH 401
+	reqPlugins := httptest.NewRequest("GET", "/api/v1/plugins", nil)
+	recPlugins := httptest.NewRecorder()
+	finalHandler.ServeHTTP(recPlugins, reqPlugins)
+
+	if recPlugins.Code != http.StatusUnauthorized {
+		t.Fatalf("CRITICAL: Unauthenticated caller was able to reach /api/v1/plugins! Got status %d, expected 401", recPlugins.Code)
 	}
 
 	// 4. Proxy request without API key -> MUST FAIL WITH 401 and log to traffic

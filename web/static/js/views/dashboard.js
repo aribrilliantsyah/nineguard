@@ -593,7 +593,7 @@ export function mount(root) {
       return h('div', {
         class: 'source-item wide-count',
         style: { cursor: 'pointer' },
-        onclick: () => setRoute('traffic', { api_key: k.key }),
+        onclick: () => setRoute('traffic', k.key_id ? { key_id: k.key_id } : { key: k.name || k.key }),
         title: `Click to filter traffic for key: ${k.name || k.key}`
       },
         h('div', { class: 'source-details' },
@@ -1041,6 +1041,8 @@ export function mount(root) {
       renderKPICard('activity', currentPeriod === 'today' ? 'Lines today' : 'Requests', fmtNum(totalReqs), `${fmtNum(successReqs)} passed (${successRate.toFixed(1)}%)`, reqSpark, reqDeltaClass, 'var(--lv-info)', 'var(--lv-info)'),
       // Token Consumption Guard
       renderKPICard('sparkles', 'Total Tokens', fmtCompact(stats.total_tokens), `In: ${fmtCompact(stats.prompt_tokens)} • Out: ${fmtCompact(stats.completion_tokens)}`, tokenSpark, 'delta-good', 'var(--ok)', 'var(--ok)'),
+      // Tokens Saved by Plugins
+      renderKPICard('puzzle', 'Tokens Saved', fmtCompact(stats.tokens_saved || 0), stats.tokens_saved ? 'Reduced by plugins' : 'Token savers active', null, 'delta-good', 'var(--accent)', 'var(--accent)'),
       // Firewall Policy Blocks
       renderKPICard('shield', 'Firewall Blocks', fmtNum(stats.blocked_requests), totalBlockedAndErrs === 0 ? '100% clean traffic' : `${fmtNum(stats.blocked_requests)} blocked (403) · ${fmtNum(stats.error_requests - stats.blocked_requests)} err`, errSpark, errDeltaClass, '#c42b1c', '#c42b1c'),
       // Active Workloads & Speed

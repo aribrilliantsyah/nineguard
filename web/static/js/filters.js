@@ -44,10 +44,12 @@ export function queryParams(p) {
   return {
     provider: p.provider || '',
     key: p.key || '',
+    key_id: p.key_id || '',
     model: p.model || '',
     ip: p.ip || '',
     status: p.status || '',
     level: p.lv || '',
+    has_images: p.has_images || '',
     search: p.q || '',
     from: iso(w.from),
     to: w.to ? iso(w.to) : '',

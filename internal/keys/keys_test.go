@@ -82,6 +82,20 @@ func TestModelAllowedLogic(t *testing.T) {
 	if kRestricted.IsModelAllowed("openrouter/deepseek-r1") {
 		t.Errorf("expected openrouter/deepseek-r1 to be rejected")
 	}
+
+	// Provider namespace isolation:
+	// Key allows "direct-prov/upstream/team/model-a", request is "gateway-prov/direct-prov/upstream/team/model-a".
+	// Stripping "gateway-prov/" must NOT leak access to "direct-prov/..." when both have provider namespaces.
+	kProviderScoped := &keys.KeyInfo{
+		ModelAccessMode: "custom",
+		AllowedModels:   []string{"direct-prov/upstream/team/model-a"},
+	}
+	if !kProviderScoped.IsModelAllowed("direct-prov/upstream/team/model-a") {
+		t.Errorf("expected direct provider model to be allowed")
+	}
+	if kProviderScoped.IsModelAllowed("gateway-prov/direct-prov/upstream/team/model-a") {
+		t.Errorf("expected different provider prefix gateway-prov/ to be rejected despite sharing subpath")
+	}
 }
 
 func TestSerializationAndParsing(t *testing.T) {

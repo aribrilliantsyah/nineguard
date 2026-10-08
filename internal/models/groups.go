@@ -17,6 +17,7 @@ type ModelGroup struct {
 	Models      []string  `json:"models"`
 	ModelsCount int       `json:"models_count"`
 	KeysCount   int       `json:"keys_count"`
+	Priority    int       `json:"priority"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -94,7 +95,7 @@ func (m *Manager) ListGroups() ([]ModelGroup, error) {
 		}
 	}
 
-	rows, err := m.db.Query("SELECT id, name, description, models, created_at, updated_at FROM model_groups ORDER BY name ASC")
+	rows, err := m.db.Query("SELECT id, name, description, models, COALESCE(priority, 0), created_at, updated_at FROM model_groups ORDER BY name ASC")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query model groups: %w", err)
 	}
@@ -104,7 +105,7 @@ func (m *Manager) ListGroups() ([]ModelGroup, error) {
 	for rows.Next() {
 		var g ModelGroup
 		var rawModels string
-		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &rawModels, &g.CreatedAt, &g.UpdatedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &rawModels, &g.Priority, &g.CreatedAt, &g.UpdatedAt); err != nil {
 			return nil, err
 		}
 		g.Models = ParseJSONStringArray(rawModels)
@@ -120,8 +121,8 @@ func (m *Manager) ListGroups() ([]ModelGroup, error) {
 func (m *Manager) GetGroup(id string) (*ModelGroup, error) {
 	var g ModelGroup
 	var rawModels string
-	err := m.db.QueryRow("SELECT id, name, description, models, created_at, updated_at FROM model_groups WHERE id = ?", id).
-		Scan(&g.ID, &g.Name, &g.Description, &rawModels, &g.CreatedAt, &g.UpdatedAt)
+	err := m.db.QueryRow("SELECT id, name, description, models, COALESCE(priority, 0), created_at, updated_at FROM model_groups WHERE id = ?", id).
+		Scan(&g.ID, &g.Name, &g.Description, &rawModels, &g.Priority, &g.CreatedAt, &g.UpdatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("model group not found")
@@ -153,8 +154,13 @@ func (m *Manager) GetGroup(id string) (*ModelGroup, error) {
 	return &g, nil
 }
 
-// CreateGroup creates a new model group
+// CreateGroup creates a new model group with default priority 0
 func (m *Manager) CreateGroup(name, description string, modelsList []string) (*ModelGroup, error) {
+	return m.CreateGroupWithPriority(name, description, modelsList, 0)
+}
+
+// CreateGroupWithPriority creates a new model group with specified priority
+func (m *Manager) CreateGroupWithPriority(name, description string, modelsList []string, priority int) (*ModelGroup, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, fmt.Errorf("group name cannot be empty")
@@ -165,9 +171,9 @@ func (m *Manager) CreateGroup(name, description string, modelsList []string) (*M
 
 	now := time.Now()
 	_, err := m.db.Exec(`
-		INSERT INTO model_groups (id, name, description, models, created_at, updated_at)
-		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-	`, id, name, strings.TrimSpace(description), serialized)
+		INSERT INTO model_groups (id, name, description, models, priority, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`, id, name, strings.TrimSpace(description), serialized, priority)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create model group: %w", err)
 	}
@@ -179,6 +185,7 @@ func (m *Manager) CreateGroup(name, description string, modelsList []string) (*M
 		Models:      ParseJSONStringArray(serialized),
 		ModelsCount: len(modelsList),
 		KeysCount:   0,
+		Priority:    priority,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}, nil
@@ -186,6 +193,16 @@ func (m *Manager) CreateGroup(name, description string, modelsList []string) (*M
 
 // UpdateGroup updates an existing model group's name, description, and model list
 func (m *Manager) UpdateGroup(id, name, description string, modelsList []string) (*ModelGroup, error) {
+	curr, err := m.GetGroup(id)
+	priority := 0
+	if err == nil && curr != nil {
+		priority = curr.Priority
+	}
+	return m.UpdateGroupWithPriority(id, name, description, modelsList, priority)
+}
+
+// UpdateGroupWithPriority updates an existing model group's name, description, model list, and priority
+func (m *Manager) UpdateGroupWithPriority(id, name, description string, modelsList []string, priority int) (*ModelGroup, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, fmt.Errorf("group name cannot be empty")
@@ -195,9 +212,9 @@ func (m *Manager) UpdateGroup(id, name, description string, modelsList []string)
 
 	res, err := m.db.Exec(`
 		UPDATE model_groups
-		SET name = ?, description = ?, models = ?, updated_at = CURRENT_TIMESTAMP
+		SET name = ?, description = ?, models = ?, priority = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, name, strings.TrimSpace(description), serialized, id)
+	`, name, strings.TrimSpace(description), serialized, priority, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update model group: %w", err)
 	}
@@ -244,6 +261,8 @@ func (m *Manager) DeleteGroup(id string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("model group not found")
 	}
+
+	_, _ = m.db.Exec("DELETE FROM plugin_bindings WHERE scope_type = 'group' AND scope_id = ?", id)
 
 	return nil
 }

@@ -1,13 +1,21 @@
 // Endpoints & Agent Setup: Upstream provider configuration, NineGuard API key generation, and IDE guides.
 import { api } from '../api.js';
-import { h, icon, toast, fmtNum, fmtCompact, emptyState, formDialog, confirmDialog, searchableSelect } from '../ui.js';
-import { setRoute } from '../state.js';
+import { h, icon, toast, copy, fmtNum, fmtCompact, fmtAgo, fmtDateTime, tzLabel, debounce, emptyState, formDialog, confirmDialog, searchableSelect } from '../ui.js';
+import { setRoute, getRoute } from '../state.js';
+import {
+  stateFromParams, paramsFromState, apiQuery, nextSort, withFilter,
+  totalPages, rangeLabel, pageItems, pageAfterReload, PAGE_SIZES,
+} from '../keylist.js';
+import { quotaPercent, formatQuotaUsage, isQuotaExhausted, quotaPeriodLabel, formatTokensCompact } from '../quotahelpers.js';
 
 export function mount(root) {
   let alive = true;
   let activeTab = 'cursor';
   let modelsList = [];
-  let keysList = [];
+  let keysList = []; // all keys (legacy list) for guides and the endpoint tester
+  let keyState = stateFromParams(getRoute().params); // paged key table state (mirrors URL)
+  let keyPage = { keys: [], total: 0, page: 1, limit: keyState.limit };
+  let keyLoadSeq = 0;
   let modelGroupsList = [];
   let upstreamInfo = { configured: false, masked_key: '', key: '', router_target: '' };
 
@@ -28,11 +36,7 @@ export function mount(root) {
 
   // ── Copy Helper ──
   function copyText(text, label = 'Copied to clipboard!') {
-    navigator.clipboard.writeText(text).then(() => {
-      toast(label, 'ok');
-    }).catch(() => {
-      toast('Failed to copy', 'error');
-    });
+    return copy(text, label);
   }
 
   function copyField(label, val) {
@@ -139,141 +143,323 @@ export function mount(root) {
   }
 
   // ── NineGuard Client API Keys Card ──
-  function renderKeysCard() {
-    const head = h('div', { class: 'card-head', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+  // ── Paged Key Table (state mirrors the URL hash) ──
+  // Writes the table state to the URL; the router calls update(), which loads it.
+  function setKeyState(next) {
+    setRoute('endpoints', paramsFromState(next));
+  }
+
+  // Fetches the page for keyState. If the page became empty (e.g. after a
+  // delete) and is not the first, steps back one page via the URL.
+  async function reloadKeyPage() {
+    const seq = ++keyLoadSeq;
+    try {
+      const res = await api.get('/keys', apiQuery(keyState));
+      if (!alive || seq !== keyLoadSeq) return;
+      keyPage = res || { keys: [], total: 0, page: keyState.page, limit: keyState.limit };
+      const back = pageAfterReload(keyState.page, (keyPage.keys || []).length);
+      if (back !== keyState.page) {
+        setKeyState({ ...keyState, page: back });
+        return;
+      }
+    } catch (e) {
+      if (!alive || seq !== keyLoadSeq) return;
+      keyPage = { keys: [], total: 0, page: keyState.page, limit: keyState.limit, error: e.message };
+    }
+    renderKeysCard();
+  }
+
+  const keySearch = h('input', {
+    class: 'input',
+    type: 'search',
+    placeholder: 'Search key name...',
+    value: keyState.q,
+    style: { width: '220px' },
+    oninput: debounce((e) => setKeyState(withFilter(keyState, { q: e.target.value.trim() })), 300),
+  });
+
+  function selectEl(options, value, onChange, title) {
+    const el = h('select', { class: 'select', title, onchange: (e) => onChange(e.target.value) },
+      options.map(([v, l]) => h('option', { value: v }, l)));
+    el.value = String(value);
+    return el;
+  }
+
+  function sortHeader(label, field, extra = {}) {
+    const active = keyState.sort === field;
+    const arrow = active ? (keyState.order === 'desc' ? ' \u2193' : ' \u2191') : '';
+    return h('th', {
+      ...extra,
+      class: `sortable${active ? ' sorted' : ''}${extra.class ? ' ' + extra.class : ''}`,
+      title: `Sort by ${label}`,
+      'aria-sort': active ? (keyState.order === 'desc' ? 'descending' : 'ascending') : 'none',
+      onclick: () => setKeyState(nextSort(keyState, field)),
+    }, label + arrow);
+  }
+
+  function lastActiveCell(ts) {
+    const ms = ts ? Date.parse(ts) : NaN;
+    if (isNaN(ms)) return h('td', { class: 'muted' }, 'Never');
+    return h('td', { title: `${fmtDateTime(ms)} (${tzLabel()})` }, fmtAgo(ms));
+  }
+
+  function allowedModelsCell(k) {
+    const keyMode = k.model_access_mode || (
+      (!k.allowed_models || k.allowed_models.length === 0 || k.allowed_models.includes('*') || k.allowed_models.includes('all'))
+        ? 'all'
+        : 'custom'
+    );
+    if (keyMode === 'all') {
+      return h('td', null,
+        h('span', { class: 'badge ok', style: { fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' } },
+          icon('check'), 'All Models (*)'
+        )
+      );
+    }
+    if (keyMode === 'group') {
+      const gids = Array.isArray(k.model_group_ids) ? k.model_group_ids : [];
+      const groupBadges = gids.map(gid => {
+        const grp = modelGroupsList.find(g => g.id === gid);
+        const label = grp ? grp.name : gid;
+        const modelPreview = grp && grp.models ? grp.models.join(', ') : '';
+        return h('span', {
+          class: 'badge',
+          style: { background: 'var(--accent)', color: '#fff', fontSize: '11px', marginRight: '4px', cursor: 'help', display: 'inline-flex', alignItems: 'center', gap: '4px' },
+          title: modelPreview ? `Models in ${label}:\n${grp.models.join('\n')}` : label
+        }, icon('sparkles'), label);
+      });
+      if (groupBadges.length === 0) {
+        groupBadges.push(h('span', { class: 'badge err', style: { fontSize: '11px' } }, 'No groups linked'));
+      }
+      return h('td', null, h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '2px', alignItems: 'center' } }, ...groupBadges));
+    }
+    const allowedList = Array.isArray(k.allowed_models) ? k.allowed_models : [];
+    const count = allowedList.length;
+    const badges = allowedList.slice(0, 2).map(m =>
+      h('span', { class: 'badge', style: { background: 'var(--hover)', fontSize: '11px', fontFamily: 'monospace', marginRight: '4px' } }, m)
+    );
+    if (count > 2) {
+      badges.push(h('span', { class: 'badge muted', style: { fontSize: '11px', cursor: 'help' }, title: allowedList.join('\n') }, `+${count - 2} more`));
+    }
+    return h('td', null, h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '2px', alignItems: 'center' } }, ...badges));
+  }
+
+  function quotaCell(k) {
+    if (!k.quota_limit || k.quota_limit <= 0 || !k.quota_period || k.quota_period === 'none') {
+      return h('td', { class: 'muted', style: { fontSize: '12px' } }, 'Unlimited');
+    }
+    const currentUsage = (typeof k.quota_usage === 'number') ? k.quota_usage : (k.total_tokens || 0);
+    const pct = quotaPercent(currentUsage, k.quota_limit);
+    const exhausted = isQuotaExhausted(currentUsage, k.quota_limit, k.quota_period);
+    const label = `${formatTokensCompact(currentUsage)} / ${formatTokensCompact(k.quota_limit)} ${k.quota_period}`;
+
+    const bar = h('div', {
+      style: {
+        width: '90px',
+        height: '5px',
+        background: 'var(--border)',
+        borderRadius: '3px',
+        overflow: 'hidden',
+        marginTop: '3px'
+      }
+    },
+      h('div', {
+        style: {
+          width: `${pct}%`,
+          height: '100%',
+          background: exhausted ? 'var(--err, #ef4444)' : 'var(--accent, #6366f1)',
+          borderRadius: '3px'
+        }
+      })
+    );
+
+    const tooltip = `${fmtNum(currentUsage)} / ${fmtNum(k.quota_limit)} tokens used in active ${k.quota_period} window (Daily resets at 07:00 WIB / 00:00 UTC) • All-time: ${fmtNum(k.total_tokens || 0)}`;
+
+    return h('td', { style: { verticalAlign: 'middle' }, title: tooltip },
+      h('div', null,
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px' } },
+          h('span', { class: exhausted ? 'badge err' : '' }, label),
+          h('span', { class: 'muted' }, `(${pct}%)`)
+        ),
+        bar
+      )
+    );
+  }
+
+  function keyRow(k) {
+    const raw = k.raw_key || k.key;
+    const statusBtn = h('button', {
+      class: `badge ${k.is_active ? 'ok' : 'muted'} badge-btn`,
+      type: 'button',
+      onclick: async () => {
+        try {
+          await api.post(`/keys/${k.id}/toggle`, { active: !k.is_active });
+          toast(`Key ${k.is_active ? 'deactivated' : 'activated'}`, 'ok');
+          await load();
+        } catch (e) {
+          toast(`Failed: ${e.message}`, 'error');
+        }
+      }
+    }, k.is_active ? 'Active' : 'Disabled');
+
+    const created = k.created_at ? Date.parse(k.created_at) : NaN;
+    return h('tr', null,
+      h('td', { class: 'strong' },
+        h('span', { class: 'badge', style: { background: 'var(--hover)', marginRight: '8px' } }, icon('key')),
+        k.name
+      ),
+      h('td', null, h('code', { class: 'muted', style: { fontSize: '12px' } }, k.key)),
+      allowedModelsCell(k),
+      h('td', { class: 'num' }, fmtNum(k.total_requests || 0)),
+      h('td', { class: 'num' }, fmtCompact(k.total_tokens || 0)),
+      quotaCell(k),
+      lastActiveCell(k.last_used_at),
+      h('td', null, statusBtn),
+      h('td', { class: 'muted', title: isNaN(created) ? '' : `${fmtDateTime(created)} (${tzLabel()})` }, isNaN(created) ? '-' : fmtDateTime(created).slice(0, 10)),
+      h('td', { style: { textAlign: 'right' } },
+        h('div', { style: { display: 'inline-flex', gap: '6px' } },
+          h('a', { class: 'btn btn-sm', href: '#/plugins', title: 'Manage plugins and token savers' }, icon('puzzle'), 'Plugins'),
+          h('button', { class: 'btn btn-sm', type: 'button', title: 'Edit Key & Model Access', onclick: () => openKeyModal(k) }, icon('pencil'), 'Edit'),
+          h('button', { class: 'btn btn-sm', type: 'button', title: 'Copy NineGuard API Key', onclick: () => copyText(raw, `Key "${k.name}" copied!`) }, icon('copy'), 'Copy Key'),
+          h('button', { class: 'btn btn-sm btn-danger', type: 'button', title: 'Delete Key', onclick: () => confirmDeleteKey(k) }, icon('trash'))
+        )
+      )
+    );
+  }
+
+  function renderPager() {
+    const pages = totalPages(keyPage.total, keyState.limit);
+    const go = (n) => setKeyState({ ...keyState, page: n });
+    const btn = (label, n, disabled, current = false) => h('button', {
+      class: `btn btn-sm${current ? ' btn-primary' : ''}`,
+      type: 'button',
+      disabled,
+      'aria-current': current ? 'page' : null,
+      onclick: () => go(n),
+    }, label);
+    return h('div', { class: 'table-foot', style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
+      h('span', null, rangeLabel(keyState.page, keyState.limit, keyPage.total, (keyPage.keys || []).length)),
+      h('span', { class: 'spacer' }),
+      btn('\u2039 Prev', keyState.page - 1, keyState.page <= 1),
+      ...pageItems(keyState.page, pages).map((it) => it === '\u2026'
+        ? h('span', { class: 'muted' }, '\u2026')
+        : btn(String(it), it, false, it === keyState.page)),
+      btn('Next \u203a', keyState.page + 1, keyState.page >= pages)
+    );
+  }
+
+  // Card chrome is built once so the search box keeps focus while typing;
+  // renderKeysCard() only refreshes control values and the body.
+  const keyStatusSel = selectEl([['all', 'All statuses'], ['active', 'Active'], ['disabled', 'Disabled']], keyState.status,
+    (v) => setKeyState(withFilter(keyState, { status: v })), 'Status');
+  const keyModeSel = selectEl([['any', 'Any access mode'], ['all', 'All models'], ['group', 'Model groups'], ['custom', 'Custom list']], keyState.mode,
+    (v) => setKeyState(withFilter(keyState, { mode: v })), 'Access mode');
+  const keyLimitSel = selectEl(PAGE_SIZES.map((n) => [String(n), `${n} / page`]), keyState.limit,
+    (v) => setKeyState(withFilter(keyState, { limit: Number(v) })), 'Page size');
+  const keysBody = h('div');
+  keysCard.append(
+    h('div', { class: 'card-head', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
       h('div', null,
         h('h2', null, 'NineGuard Client API Keys'),
         h('p', { class: 'card-sub' }, 'Generate dedicated keys for Cursor, Cline, Pi, and developers. Every token and request is tracked per key.')
       ),
       h('button', { class: 'btn btn-sm btn-primary', type: 'button', onclick: () => openKeyModal() }, icon('plus'), 'Generate New Key')
-    );
+    ),
+    h('div', { class: 'toolbar' }, keySearch, keyStatusSel, keyModeSel, h('span', { class: 'spacer' }), keyLimitSel),
+    keysBody
+  );
 
-    if (!keysList.length) {
-      keysCard.replaceChildren(head, emptyState('key', 'No NineGuard API keys generated yet', 'Click "Generate New Key" to issue your first API key for an agent.'));
+  function renderKeysCard() {
+    if (document.activeElement !== keySearch) keySearch.value = keyState.q;
+    keyStatusSel.value = keyState.status;
+    keyModeSel.value = keyState.mode;
+    keyLimitSel.value = String(keyState.limit);
+
+    const filtered = keyState.q || keyState.status !== 'all' || keyState.mode !== 'any';
+    if (keyPage.error) {
+      keysBody.replaceChildren(emptyState('alert', 'Could not load API keys', keyPage.error));
+      return;
+    }
+    if (!keyPage.total) {
+      keysBody.replaceChildren(filtered
+        ? emptyState('search', 'No keys match these filters', 'Clear the search or filters to see all keys.')
+        : emptyState('key', 'No NineGuard API keys generated yet', 'Click "Generate New Key" to issue your first API key for an agent.'));
       return;
     }
 
     const table = h('table', { class: 'table' },
       h('thead', null,
         h('tr', null,
-          h('th', null, 'Agent / Key Name'),
+          sortHeader('Agent / Key Name', 'name'),
           h('th', null, 'Key Token'),
           h('th', null, 'Allowed Models'),
-          h('th', { class: 'num' }, 'Requests'),
-          h('th', { class: 'num' }, 'Tokens'),
-          h('th', null, 'Status'),
+          sortHeader('Requests', 'requests', { class: 'num' }),
+          sortHeader('Tokens', 'tokens', { class: 'num' }),
+          h('th', null, 'Quota'),
+          sortHeader('Last Active', 'last_active'),
+          sortHeader('Status', 'status'),
+          sortHeader('Created', 'created'),
           h('th', { style: { textAlign: 'right' } }, 'Actions')
         )
       ),
-      h('tbody', null,
-        ...keysList.map(k => {
-          const raw = k.raw_key || k.key;
-          const statusBtn = h('button', {
-            class: `badge ${k.is_active ? 'ok' : 'muted'} badge-btn`,
-            type: 'button',
-            onclick: async () => {
-              try {
-                await api.post(`/keys/${k.id}/toggle`, { active: !k.is_active });
-                toast(`Key ${k.is_active ? 'deactivated' : 'activated'}`, 'ok');
-                await load();
-              } catch (e) {
-                toast(`Failed: ${e.message}`, 'error');
-              }
-            }
-          }, k.is_active ? 'Active' : 'Disabled');
-
-          // Allowed Models / Groups Display
-          const keyMode = k.model_access_mode || (
-            (!k.allowed_models || k.allowed_models.length === 0 || k.allowed_models.includes('*') || k.allowed_models.includes('all'))
-              ? 'all'
-              : 'custom'
-          );
-
-          let allowedCell;
-          if (keyMode === 'all') {
-            allowedCell = h('td', null,
-              h('span', { class: 'badge ok', style: { fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' } },
-                icon('check'), 'All Models (*)'
-              )
-            );
-          } else if (keyMode === 'group') {
-            const gids = Array.isArray(k.model_group_ids) ? k.model_group_ids : [];
-            const groupBadges = gids.map(gid => {
-              const grp = modelGroupsList.find(g => g.id === gid);
-              const label = grp ? grp.name : gid;
-              const modelPreview = grp && grp.models ? grp.models.join(', ') : '';
-              return h('span', {
-                class: 'badge',
-                style: { background: 'var(--accent)', color: '#fff', fontSize: '11px', marginRight: '4px', cursor: 'help', display: 'inline-flex', alignItems: 'center', gap: '4px' },
-                title: modelPreview ? `Models in ${label}:\n${grp.models.join('\n')}` : label
-              }, icon('sparkles'), label);
-            });
-            if (groupBadges.length === 0) {
-              groupBadges.push(h('span', { class: 'badge err', style: { fontSize: '11px' } }, 'No groups linked'));
-            }
-            allowedCell = h('td', null, h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '2px', alignItems: 'center' } }, ...groupBadges));
-          } else {
-            const allowedList = Array.isArray(k.allowed_models) ? k.allowed_models : [];
-            const count = allowedList.length;
-            const badges = allowedList.slice(0, 2).map(m =>
-              h('span', { class: 'badge', style: { background: 'var(--hover)', fontSize: '11px', fontFamily: 'monospace', marginRight: '4px' } }, m)
-            );
-            if (count > 2) {
-              badges.push(
-                h('span', {
-                  class: 'badge muted',
-                  style: { fontSize: '11px', cursor: 'help' },
-                  title: allowedList.join('\n')
-                }, `+${count - 2} more`)
-              );
-            }
-            allowedCell = h('td', null, h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '2px', alignItems: 'center' } }, ...badges));
-          }
-
-          return h('tr', null,
-            h('td', { class: 'strong' },
-              h('span', { class: 'badge', style: { background: 'var(--hover)', marginRight: '8px' } }, icon('key')),
-              k.name
-            ),
-            h('td', null, h('code', { class: 'muted', style: { fontSize: '12px' } }, k.key)),
-            allowedCell,
-            h('td', { class: 'num' }, fmtNum(k.total_requests || 0)),
-            h('td', { class: 'num' }, fmtCompact(k.total_tokens || 0)),
-            h('td', null, statusBtn),
-            h('td', { style: { textAlign: 'right' } },
-              h('div', { style: { display: 'inline-flex', gap: '6px' } },
-                h('button', {
-                  class: 'btn btn-sm',
-                  type: 'button',
-                  title: 'Edit Key & Model Access',
-                  onclick: () => openKeyModal(k)
-                }, icon('pencil'), 'Edit'),
-                h('button', {
-                  class: 'btn btn-sm',
-                  type: 'button',
-                  title: 'Copy NineGuard API Key',
-                  onclick: () => copyText(raw, `Key "${k.name}" copied!`)
-                }, icon('copy'), 'Copy Key'),
-                h('button', {
-                  class: 'btn btn-sm btn-danger',
-                  type: 'button',
-                  title: 'Delete Key',
-                  onclick: () => confirmDeleteKey(k)
-                }, icon('trash'))
-              )
-            )
-          );
-        })
-      )
+      h('tbody', null, ...(keyPage.keys || []).map(keyRow))
     );
 
-    keysCard.replaceChildren(head, h('div', { class: 'table-wrap' }, table));
+    keysBody.replaceChildren(h('div', { class: 'table-wrap' }, table), renderPager());
   }
 
-  function openKeyModal(existingKey = null) {
+  async function openKeyModal(existingKey = null) {
     const isEdit = Boolean(existingKey);
     const existingModels = (existingKey && Array.isArray(existingKey.allowed_models)) ? existingKey.allowed_models : [];
     const existingGroupIDs = new Set((existingKey && Array.isArray(existingKey.model_group_ids)) ? existingKey.model_group_ids : []);
+
+    let pluginsList = [];
+    let keyBindings = new Map();
+    try {
+      const [pRes, bRes] = await Promise.all([
+        api.get('/plugins').catch(() => ({ plugins: [] })),
+        existingKey ? api.get('/plugins/bindings', { scope_type: 'key', scope_id: existingKey.id }).catch(() => ({ bindings: [] })) : Promise.resolve({ bindings: [] })
+      ]);
+      pluginsList = pRes.plugins || [];
+      (bRes.bindings || []).forEach(b => keyBindings.set(b.plugin_id, b.state));
+    } catch { /* ignore */ }
+
+    const pluginSelectMap = new Map();
+    const pluginRows = pluginsList.map(p => {
+      const curState = keyBindings.get(p.id) || 'inherit';
+      const sel = h('select', { class: 'input', style: { width: '140px', fontSize: '12px' } },
+        h('option', { value: 'inherit', selected: curState === 'inherit' }, 'Inherit (Default)'),
+        h('option', { value: 'on', selected: curState === 'on' }, 'On (Enabled)'),
+        h('option', { value: 'off', selected: curState === 'off' }, 'Off (Disabled)')
+      );
+      pluginSelectMap.set(p.id, sel);
+
+      const catBadge = h('span', { class: 'badge', style: { fontSize: '10px' } },
+        p.category === 'input_compression' ? 'Compress' : (p.category === 'output_style' ? 'Style' : 'Plugin')
+      );
+
+      return h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 10px', background: 'var(--panel)', borderRadius: '6px' } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+          h('b', { style: { fontSize: '12px' } }, p.name),
+          catBadge
+        ),
+        sel
+      );
+    });
+
+    const pluginsWrap = h('div', {
+      style: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '6px',
+        padding: '10px',
+        borderRadius: '8px',
+        border: '1px solid var(--border)',
+        background: 'var(--hover)'
+      }
+    },
+      pluginRows.length ? pluginRows : h('span', { class: 'muted', style: { fontSize: '12px' } }, 'No plugins registered')
+    );
 
     let initialMode = 'all';
     if (existingKey) {
@@ -290,6 +476,79 @@ export function mount(root) {
       placeholder: 'e.g. Cursor IDE, Cline Mac, Pi Agent',
       value: existingKey ? existingKey.name : 'Cursor IDE'
     });
+
+    const quotaLimitInput = h('input', {
+      class: 'input',
+      type: 'number',
+      min: '0',
+      step: '1000',
+      placeholder: '0 (unlimited)',
+      value: (existingKey && existingKey.quota_limit) ? String(existingKey.quota_limit) : '0'
+    });
+
+    const quotaPeriodSelect = h('select', { class: 'input' },
+      h('option', { value: 'none', selected: !existingKey || !existingKey.quota_period || existingKey.quota_period === 'none' }, 'None (Unlimited)'),
+      h('option', { value: 'daily', selected: existingKey && existingKey.quota_period === 'daily' }, 'Daily (UTC midnight)'),
+      h('option', { value: 'weekly', selected: existingKey && existingKey.quota_period === 'weekly' }, 'Weekly (UTC Monday)'),
+      h('option', { value: 'monthly', selected: existingKey && existingKey.quota_period === 'monthly' }, 'Monthly (UTC 1st)'),
+      h('option', { value: 'total', selected: existingKey && existingKey.quota_period === 'total' }, 'Lifetime (All-time)')
+    );
+
+    const velocityBox = h('div', {
+      style: {
+        display: isEdit ? 'flex' : 'none',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        gap: '6px',
+        padding: '6px 8px',
+        background: 'var(--panel)',
+        borderRadius: '6px',
+        fontSize: '11px'
+      }
+    }, h('span', { class: 'muted' }, 'Loading usage velocity...'));
+
+    if (isEdit) {
+      api.get(`/keys/${existingKey.id}/velocity`).then(vel => {
+        if (!vel) return;
+        const p24 = formatTokensCompact(vel.tokens_24h || 0);
+        const p7d = formatTokensCompact(vel.tokens_7d_avg || 0);
+        const p30 = formatTokensCompact(vel.tokens_30d || 0);
+
+        const pill24 = h('span', { class: 'badge', title: `${vel.tokens_24h || 0} tokens in past 24h` }, `24h: ${p24}`);
+        const pill7d = h('span', { class: 'badge', title: `${vel.tokens_7d_avg || 0} tokens/day average over past 7d` }, `7d avg: ${p7d}/day`);
+        const pill30 = h('span', { class: 'badge', title: `${vel.tokens_30d || 0} tokens in past 30d` }, `30d: ${p30}`);
+
+        const preset15 = (vel.tokens_7d_avg > 0) ? h('button', {
+          class: 'btn btn-sm',
+          type: 'button',
+          style: { fontSize: '10.5px', padding: '1px 6px', height: '22px' },
+          title: `Set limit to 1.5x daily average (${Math.round(vel.tokens_7d_avg * 1.5)} tokens)`,
+          onclick: () => {
+            quotaLimitInput.value = String(Math.round(vel.tokens_7d_avg * 1.5));
+            quotaPeriodSelect.value = 'daily';
+          }
+        }, 'Set 1.5x Daily') : null;
+
+        const preset20 = (vel.tokens_7d_avg > 0) ? h('button', {
+          class: 'btn btn-sm',
+          type: 'button',
+          style: { fontSize: '10.5px', padding: '1px 6px', height: '22px' },
+          title: `Set limit to 2x daily average (${vel.tokens_7d_avg * 2} tokens)`,
+          onclick: () => {
+            quotaLimitInput.value = String(vel.tokens_7d_avg * 2);
+            quotaPeriodSelect.value = 'daily';
+          }
+        }, 'Set 2x Daily') : null;
+
+        velocityBox.replaceChildren(
+          h('b', { style: { color: 'var(--text-2)' } }, 'Historical Velocity:'),
+          pill24, pill7d, pill30,
+          preset15, preset20
+        );
+      }).catch(() => {
+        velocityBox.style.display = 'none';
+      });
+    }
 
     let mode = initialMode;
 
@@ -692,6 +951,46 @@ export function mount(root) {
               'Configure which models this API key can call. Unauthorized model calls are blocked with HTTP 403 Forbidden.'
             )
           )
+        },
+        {
+          label: 'Token Quota (Rate Limiting)',
+          node: h('div', {
+            style: {
+              padding: '12px 14px',
+              background: 'var(--hover)',
+              borderRadius: '8px',
+              border: '1px solid var(--border)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '10px'
+            }
+          },
+            h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' } },
+              h('div', { class: 'field', style: { marginBottom: 0 } },
+                h('span', { style: { fontSize: '11.5px', fontWeight: '600' } }, 'Token Limit'),
+                quotaLimitInput,
+                h('small', { class: 'muted', style: { fontSize: '11px' } }, 'Max tokens. Set 0 for unlimited.')
+              ),
+              h('div', { class: 'field', style: { marginBottom: 0 } },
+                h('span', { style: { fontSize: '11.5px', fontWeight: '600' } }, 'Reset Period'),
+                quotaPeriodSelect,
+                h('small', { class: 'muted', style: { fontSize: '11px' } }, 'Anchors to UTC calendar boundaries.')
+              )
+            ),
+            velocityBox,
+            h('p', { class: 'muted', style: { fontSize: '11px', margin: 0, lineHeight: 1.4 } },
+              '🛡️ Soft Post-Facto Gating: Requests are blocked with HTTP 429 once consumed tokens reach quota. Admitted requests run to completion.'
+            )
+          )
+        },
+        {
+          label: 'Plugin Overrides (Optional)',
+          node: h('div', null,
+            pluginsWrap,
+            h('p', { class: 'muted', style: { fontSize: '11px', margin: '4px 0 0' } },
+              'Override plugins specifically for this API key. Keys override Model Groups and All keys, all models.'
+            )
+          )
         }
       ],
       onSubmit: async () => {
@@ -724,23 +1023,45 @@ export function mount(root) {
           allowed_models = selected;
         }
 
+        const quota_limit = parseInt(quotaLimitInput.value, 10) || 0;
+        const quota_period = quotaPeriodSelect.value;
         const payload = {
           name,
           model_access_mode,
           model_group_ids,
-          allowed_models
+          allowed_models,
+          quota_limit,
+          quota_period
         };
 
         try {
+          let targetKeyID = '';
           if (isEdit) {
             await api.put(`/keys/${existingKey.id}`, payload);
+            targetKeyID = existingKey.id;
             toast(`Key "${name}" updated!`, 'ok');
             await load();
           } else {
             const newKey = await api.post('/keys', payload);
+            targetKeyID = newKey.id;
             toast(`Key "${name}" created!`, 'ok');
             await load();
             showGeneratedKeyModal(newKey);
+          }
+
+          if (targetKeyID) {
+            for (const [pluginID, sel] of pluginSelectMap.entries()) {
+              const nextState = sel.value;
+              const prevState = keyBindings.get(pluginID) || 'inherit';
+              if (nextState !== prevState) {
+                await api.put(`/plugins/${encodeURIComponent(pluginID)}/bindings`, {
+                  scope_type: 'key',
+                  scope_id: targetKeyID,
+                  state: nextState,
+                  settings: '{}'
+                }).catch(() => {});
+              }
+            }
           }
         } catch (e) {
           throw new Error(e.message || 'Operation failed');
@@ -1120,7 +1441,7 @@ console.log(response.choices[0].message.content);`
     if (!alive) return;
 
     renderUpstreamCard();
-    renderKeysCard();
+    await reloadKeyPage();
     renderGuides();
     renderTester();
   }
@@ -1148,7 +1469,13 @@ console.log(response.choices[0].message.content);`
   load();
 
   return {
-    update() {},
+    // Router calls update() on hash changes (sort, page, filters, back/forward).
+    update(params) {
+      const next = stateFromParams(params);
+      if (JSON.stringify(next) === JSON.stringify(keyState)) return;
+      keyState = next;
+      reloadKeyPage();
+    },
     refresh: load,
     destroy() { alive = false; }
   };

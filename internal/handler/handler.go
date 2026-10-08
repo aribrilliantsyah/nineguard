@@ -14,9 +14,11 @@ import (
 	"nineguard/internal/auth"
 	"nineguard/internal/keys"
 	"nineguard/internal/models"
+	"nineguard/internal/plugins"
 	"nineguard/internal/providers"
 	"nineguard/internal/proxy"
 	"nineguard/internal/syslog"
+	"nineguard/internal/timeutil"
 	"nineguard/internal/traffic"
 	"nineguard/internal/version"
 )
@@ -28,8 +30,13 @@ type Handler struct {
 	syslog       *syslog.Manager
 	keys         *keys.Manager
 	providers    *providers.Manager
+	plugins      *plugins.Manager
 	proxy        *proxy.Proxy
 	routerTarget string
+}
+
+func (h *Handler) SetPlugins(plm *plugins.Manager) {
+	h.plugins = plm
 }
 
 func New(am *auth.Manager, mm *models.Manager, tm *traffic.Manager, sm *syslog.Manager, km *keys.Manager, pm *providers.Manager, pr *proxy.Proxy, target string) *Handler {
@@ -655,13 +662,14 @@ func (h *Handler) CreateModelGroup(w http.ResponseWriter, r *http.Request) {
 		Name        string   `json:"name"`
 		Description string   `json:"description"`
 		Models      []string `json:"models"`
+		Priority    int      `json:"priority"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
 
-	group, err := h.models.CreateGroup(body.Name, body.Description, body.Models)
+	group, err := h.models.CreateGroupWithPriority(body.Name, body.Description, body.Models, body.Priority)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -684,13 +692,14 @@ func (h *Handler) UpdateModelGroup(w http.ResponseWriter, r *http.Request) {
 		Name        string   `json:"name"`
 		Description string   `json:"description"`
 		Models      []string `json:"models"`
+		Priority    int      `json:"priority"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
 
-	group, err := h.models.UpdateGroup(id, body.Name, body.Description, body.Models)
+	group, err := h.models.UpdateGroupWithPriority(id, body.Name, body.Description, body.Models, body.Priority)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -723,6 +732,12 @@ func (h *Handler) DeleteModelGroup(w http.ResponseWriter, r *http.Request) {
 
 // ── System Logs Handlers (Log Explorer) ──
 
+// requestLocation returns the viewer's timezone from the "tz" query parameter
+// (IANA name, e.g. "Asia/Jakarta"). Missing or invalid values yield UTC.
+func requestLocation(r *http.Request) *time.Location {
+	return timeutil.LoadLocation(r.URL.Query().Get("tz"))
+}
+
 func parseSyslogFilterParams(q url.Values) syslog.FilterParams {
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
@@ -753,6 +768,7 @@ func parseSyslogFilterParams(q url.Values) syslog.FilterParams {
 		Cursor:    q.Get("cursor"),
 		Limit:     limit,
 		Offset:    offset,
+		Loc:       timeutil.LoadLocation(q.Get("tz")),
 	}
 }
 
@@ -888,6 +904,12 @@ func parseFilterParams(q url.Values) traffic.FilterParams {
 		clientIP = q.Get("ip")
 	}
 
+	var hasImages *bool
+	if imgParam := q.Get("has_images"); imgParam != "" {
+		val := (imgParam == "1" || strings.EqualFold(imgParam, "true"))
+		hasImages = &val
+	}
+
 	return traffic.FilterParams{
 		Period:    q.Get("period"),
 		StartDate: startDate,
@@ -896,6 +918,7 @@ func parseFilterParams(q url.Values) traffic.FilterParams {
 		To:        q.Get("to"),
 		Model:     q.Get("model"),
 		APIKey:    apiKey,
+		APIKeyID:  q.Get("key_id"),
 		Provider:  q.Get("provider"),
 		ClientIP:  clientIP,
 		Status:    q.Get("status"),
@@ -904,6 +927,8 @@ func parseFilterParams(q url.Values) traffic.FilterParams {
 		Cursor:    q.Get("cursor"),
 		Limit:     limit,
 		Offset:    offset,
+		Loc:       timeutil.LoadLocation(q.Get("tz")),
+		HasImages: hasImages,
 	}
 }
 
@@ -1029,7 +1054,7 @@ func (h *Handler) GetTrafficStats(w http.ResponseWriter, r *http.Request) {
 	if endDate == "" {
 		endDate = q.Get("end_date")
 	}
-	stats, err := h.traffic.GetDashboardStats(period, startDate, endDate)
+	stats, err := h.traffic.GetDashboardStats(period, startDate, endDate, requestLocation(r))
 	if err != nil {
 		slog.Error("failed to get traffic stats", "error", err)
 		jsonError(w, http.StatusInternalServerError, "Failed to retrieve traffic statistics")
@@ -1049,7 +1074,7 @@ func (h *Handler) GetUsageReport(w http.ResponseWriter, r *http.Request) {
 	if endDate == "" {
 		endDate = q.Get("end_date")
 	}
-	report, err := h.traffic.GetUsageReports(period, startDate, endDate)
+	report, err := h.traffic.GetUsageReports(period, startDate, endDate, requestLocation(r))
 	if err != nil {
 		slog.Error("failed to get usage report", "error", err)
 		jsonError(w, http.StatusInternalServerError, "Failed to retrieve usage report")
@@ -1062,18 +1087,67 @@ func (h *Handler) GetUsageReport(w http.ResponseWriter, r *http.Request) {
 
 // ── API Keys & Upstream Settings Handlers ──
 
+// ListKeys serves GET /api/v1/keys. Without "page" it returns every key
+// ({"keys": [...]}, legacy shape used by dropdowns and scripts). With "page"
+// it returns one page: {"keys", "total", "page", "limit"}.
 func (h *Handler) ListKeys(w http.ResponseWriter, r *http.Request) {
 	if h.keys == nil {
 		jsonResponse(w, http.StatusOK, map[string]interface{}{"keys": []keys.KeyInfo{}})
 		return
 	}
-	list, err := h.keys.ListKeys()
+	q := r.URL.Query()
+	if !q.Has("page") {
+		list, err := h.keys.ListKeys()
+		if err != nil {
+			slog.Error("failed to list keys", "error", err)
+			jsonError(w, http.StatusInternalServerError, "Failed to retrieve API keys")
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]interface{}{"keys": list})
+		return
+	}
+
+	pageNum, err := strconv.Atoi(q.Get("page"))
+	if err != nil || pageNum < 1 {
+		jsonError(w, http.StatusBadRequest, "invalid page: must be an integer >= 1")
+		return
+	}
+	limit := 0
+	if v := q.Get("limit"); v != "" {
+		if limit, err = strconv.Atoi(v); err != nil {
+			jsonError(w, http.StatusBadRequest, "invalid limit: must be an integer")
+			return
+		}
+	}
+	opts := keys.ListOptions{
+		Page:   pageNum,
+		Limit:  limit,
+		Sort:   q.Get("sort"),
+		Order:  q.Get("order"),
+		Query:  q.Get("q"),
+		Status: q.Get("status"),
+		Mode:   q.Get("mode"),
+	}
+	if err := opts.Normalize(); err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	pageRes, err := h.keys.ListKeysPage(opts)
 	if err != nil {
-		slog.Error("failed to list keys", "error", err)
+		slog.Error("failed to list keys page", "error", err)
 		jsonError(w, http.StatusInternalServerError, "Failed to retrieve API keys")
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]interface{}{"keys": list})
+	jsonResponse(w, http.StatusOK, pageRes)
+}
+
+func isValidQuotaPeriod(p string) bool {
+	switch p {
+	case "none", "daily", "weekly", "monthly", "total":
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *Handler) CreateKey(w http.ResponseWriter, r *http.Request) {
@@ -1086,10 +1160,31 @@ func (h *Handler) CreateKey(w http.ResponseWriter, r *http.Request) {
 		ModelAccessMode string   `json:"model_access_mode"`
 		ModelGroupIDs   []string `json:"model_group_ids"`
 		AllowedModels   []string `json:"allowed_models"`
+		QuotaLimit      int64    `json:"quota_limit"`
+		QuotaPeriod     string   `json:"quota_period"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	keyInfo, err := h.keys.CreateKey(body.Name, body.ModelAccessMode, body.ModelGroupIDs, body.AllowedModels)
+	if body.QuotaLimit < 0 {
+		jsonError(w, http.StatusBadRequest, "Quota limit cannot be negative")
+		return
+	}
+	body.QuotaPeriod = strings.ToLower(strings.TrimSpace(body.QuotaPeriod))
+	if body.QuotaPeriod == "" {
+		body.QuotaPeriod = "none"
+	}
+	if !isValidQuotaPeriod(body.QuotaPeriod) {
+		jsonError(w, http.StatusBadRequest, "Invalid quota period: must be none, daily, weekly, monthly, or total")
+		return
+	}
+
+	keyInfo, err := h.keys.CreateKeyWithOptions(body.Name, keys.CreateKeyOptions{
+		ModelAccessMode: body.ModelAccessMode,
+		ModelGroupIDs:   body.ModelGroupIDs,
+		AllowedModels:   body.AllowedModels,
+		QuotaLimit:      body.QuotaLimit,
+		QuotaPeriod:     body.QuotaPeriod,
+	})
 	if err != nil {
 		slog.Error("failed to create key", "error", err)
 		jsonError(w, http.StatusInternalServerError, "Failed to create API key")
@@ -1116,16 +1211,49 @@ func (h *Handler) UpdateKey(w http.ResponseWriter, r *http.Request) {
 		ModelAccessMode string   `json:"model_access_mode"`
 		ModelGroupIDs   []string `json:"model_group_ids"`
 		AllowedModels   []string `json:"allowed_models"`
+		QuotaLimit      *int64   `json:"quota_limit"`
+		QuotaPeriod     *string  `json:"quota_period"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
 
+	if body.QuotaLimit != nil && *body.QuotaLimit < 0 {
+		jsonError(w, http.StatusBadRequest, "Quota limit cannot be negative")
+		return
+	}
+	if body.QuotaPeriod != nil {
+		p := strings.ToLower(strings.TrimSpace(*body.QuotaPeriod))
+		if p == "" {
+			p = "none"
+		}
+		if !isValidQuotaPeriod(p) {
+			jsonError(w, http.StatusBadRequest, "Invalid quota period: must be none, daily, weekly, monthly, or total")
+			return
+		}
+		*body.QuotaPeriod = p
+	}
+
 	keyInfo, err := h.keys.UpdateKey(id, body.Name, body.ModelAccessMode, body.ModelGroupIDs, body.AllowedModels)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if body.QuotaLimit != nil || body.QuotaPeriod != nil {
+		qLimit := keyInfo.QuotaLimit
+		if body.QuotaLimit != nil {
+			qLimit = *body.QuotaLimit
+		}
+		qPeriod := keyInfo.QuotaPeriod
+		if body.QuotaPeriod != nil {
+			qPeriod = *body.QuotaPeriod
+		}
+		keyInfo, err = h.keys.UpdateKeyQuota(id, qLimit, qPeriod)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	var actorID int64
 	var username string
@@ -1187,6 +1315,26 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (h *Handler) GetKeyVelocity(w http.ResponseWriter, r *http.Request) {
+	if h.traffic == nil {
+		jsonError(w, http.StatusBadRequest, "Traffic manager not available")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, http.StatusBadRequest, "Key ID required")
+		return
+	}
+
+	stats, err := h.traffic.GetVelocityStats(id, time.Now())
+	if err != nil {
+		slog.Error("failed to get key velocity stats", "id", id, "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to retrieve velocity stats")
+		return
+	}
+	jsonResponse(w, http.StatusOK, stats)
+}
+
 // ── Providers Handlers ──
 
 func (h *Handler) ListProviders(w http.ResponseWriter, r *http.Request) {
@@ -1209,19 +1357,21 @@ func (h *Handler) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name      string `json:"name"`
-		Route     string `json:"route"`
-		APIKey    string `json:"api_key"`
-		Prefix    string `json:"prefix"`
-		IsDefault bool   `json:"is_default"`
-		IsActive  bool   `json:"is_active"`
+		Name                    string `json:"name"`
+		Route                   string `json:"route"`
+		APIKey                  string `json:"api_key"`
+		Prefix                  string `json:"prefix"`
+		IsDefault               bool   `json:"is_default"`
+		IsActive                bool   `json:"is_active"`
+		UpstreamTokenSaving     bool   `json:"upstream_token_saving"`
+		UpstreamTokenSavingNote string `json:"upstream_token_saving_note"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
 
-	p, err := h.providers.CreateProvider(body.Name, body.Route, body.APIKey, body.Prefix, body.IsDefault, body.IsActive)
+	p, err := h.providers.CreateProviderWithTokenSaving(body.Name, body.Route, body.APIKey, body.Prefix, body.IsDefault, body.IsActive, body.UpstreamTokenSaving, body.UpstreamTokenSavingNote)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1243,12 +1393,14 @@ func (h *Handler) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	var body struct {
-		Name      string  `json:"name"`
-		Route     string  `json:"route"`
-		APIKey    *string `json:"api_key"`
-		Prefix    string  `json:"prefix"`
-		IsDefault bool    `json:"is_default"`
-		IsActive  bool    `json:"is_active"`
+		Name                    string  `json:"name"`
+		Route                   string  `json:"route"`
+		APIKey                  *string `json:"api_key"`
+		Prefix                  string  `json:"prefix"`
+		IsDefault               bool    `json:"is_default"`
+		IsActive                bool    `json:"is_active"`
+		UpstreamTokenSaving     bool    `json:"upstream_token_saving"`
+		UpstreamTokenSavingNote string  `json:"upstream_token_saving_note"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "Invalid payload")
@@ -1262,7 +1414,7 @@ func (h *Handler) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		apiKey = existing.APIKey
 	}
 
-	p, err := h.providers.UpdateProvider(id, body.Name, body.Route, apiKey, body.Prefix, body.IsDefault, body.IsActive)
+	p, err := h.providers.UpdateProviderWithTokenSaving(id, body.Name, body.Route, apiKey, body.Prefix, body.IsDefault, body.IsActive, body.UpstreamTokenSaving, body.UpstreamTokenSavingNote)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1506,3 +1658,73 @@ func (h *Handler) TestUpstreamConnection(w http.ResponseWriter, r *http.Request)
 		"target":       target,
 	})
 }
+
+// ── Traffic & Spike Settings (ADR 0005) ──
+
+func (h *Handler) GetTrafficSettings(w http.ResponseWriter, r *http.Request) {
+	threshold := 8000
+	recMode := "disabled"
+	if h.traffic != nil {
+		threshold = h.traffic.GetHeavyTokenThreshold()
+		recMode = h.traffic.GetRecordPayloadsSetting()
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"heavy_token_threshold": threshold,
+		"record_payloads":       recMode,
+	})
+}
+
+func (h *Handler) SetTrafficSettings(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		HeavyTokenThreshold int    `json:"heavy_token_threshold"`
+		RecordPayloads      string `json:"record_payloads"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+	if body.HeavyTokenThreshold > 0 && h.traffic != nil {
+		if err := h.traffic.SetHeavyTokenThreshold(body.HeavyTokenThreshold); err != nil {
+			slog.Error("failed to set heavy token threshold", "error", err)
+			jsonError(w, http.StatusInternalServerError, "Failed to save traffic settings")
+			return
+		}
+	}
+	if body.RecordPayloads != "" && h.traffic != nil {
+		mode := strings.ToLower(strings.TrimSpace(body.RecordPayloads))
+		if mode != "disabled" && mode != "errors_only" && mode != "all" {
+			jsonError(w, http.StatusBadRequest, "Invalid record_payloads: must be disabled, errors_only, or all")
+			return
+		}
+		if err := h.traffic.SetRecordPayloadsSetting(mode); err != nil {
+			slog.Error("failed to set record payloads setting", "error", err)
+			jsonError(w, http.StatusInternalServerError, "Failed to save traffic settings")
+			return
+		}
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":                "ok",
+		"heavy_token_threshold": h.traffic.GetHeavyTokenThreshold(),
+		"record_payloads":       h.traffic.GetRecordPayloadsSetting(),
+	})
+}
+
+func (h *Handler) GetTrafficPayload(w http.ResponseWriter, r *http.Request) {
+	if h.traffic == nil {
+		jsonError(w, http.StatusBadRequest, "Traffic manager not available")
+		return
+	}
+	idStr := r.PathValue("id")
+	trafficID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid traffic ID")
+		return
+	}
+	payload, err := h.traffic.GetPayload(trafficID)
+	if err != nil {
+		jsonError(w, http.StatusNotFound, "Payload not found or not recorded")
+		return
+	}
+	jsonResponse(w, http.StatusOK, payload)
+}
+

@@ -31,3 +31,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+/node_modules
+
+# Graphify output
+graphify-out/

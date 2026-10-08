@@ -81,3 +81,34 @@ func TestModelGroupsCRUD(t *testing.T) {
 		t.Errorf("unexpected updated group: %+v", updated)
 	}
 }
+
+func TestGroupPriority(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test_models_priority.db")
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+	defer database.Close()
+
+	mgr := models.NewManager(database)
+
+	grp, err := mgr.CreateGroupWithPriority("HighPri", "desc", []string{"gpt-4"}, 10)
+	if err != nil {
+		t.Fatalf("failed to create group: %v", err)
+	}
+	if grp.Priority != 10 {
+		t.Fatalf("expected priority 10, got %d", grp.Priority)
+	}
+
+	got, err := mgr.GetGroup(grp.ID)
+	if err != nil || got.Priority != 10 {
+		t.Fatalf("expected retrieved priority 10, got %d (err: %v)", got.Priority, err)
+	}
+
+	updated, err := mgr.UpdateGroupWithPriority(grp.ID, "HighPri Updated", "desc2", []string{"gpt-4"}, 20)
+	if err != nil || updated.Priority != 20 {
+		t.Fatalf("expected updated priority 20, got %d (err: %v)", updated.Priority, err)
+	}
+}
+

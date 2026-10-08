@@ -6,6 +6,7 @@ import { openPalette } from './palette.js';
 import * as dashboard from './views/dashboard.js';
 import * as providers from './views/providers.js';
 import * as endpoints from './views/endpoints.js';
+import * as plugins from './views/plugins.js';
 import * as reports from './views/reports.js';
 import * as models from './views/models.js';
 import * as traffic from './views/traffic.js';
@@ -15,7 +16,7 @@ import * as users from './views/users.js';
 import * as about from './views/about.js';
 
 const APP = 'NineGuard';
-const VIEWS = { dashboard, providers, endpoints, reports, models, traffic, logs, profile, users, about };
+const VIEWS = { dashboard, providers, endpoints, plugins, reports, models, traffic, logs, profile, users, about };
 
 // Sidebar menu, top to bottom. Groups without a title render as plain links.
 // auth: only with authentication enabled; admin: only for administrators.
@@ -24,6 +25,7 @@ const NAV = [
   { id: 'gateway', title: 'Gateway', links: [
     { view: 'providers', label: 'Providers', icon: 'server', keywords: 'providers upstream openai compatible route apikey target prefix' },
     { view: 'endpoints', label: 'Endpoints & Keys', icon: 'key', keywords: 'endpoints agent setup url integration cursor cline continue python node curl' },
+    { view: 'plugins', label: 'Plugins', icon: 'puzzle', keywords: 'plugins caveman ponytail headroom compress tokens transform token savers' },
     { view: 'models', label: 'Models', icon: 'box', keywords: 'models enable disable firewall' },
     { view: 'traffic', label: 'Traffic Explorer', icon: 'clock', keywords: 'traffic requests telemetry tokens latency usage' },
     { view: 'logs', label: 'Log Explorer', icon: 'logs', keywords: 'logs server system gateway stdout error debug kibana elk' },

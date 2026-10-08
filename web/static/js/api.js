@@ -1,5 +1,10 @@
 // REST client for the server API. Authentication is the HttpOnly session
 // cookie set by /login, so requests carry no token of their own.
+import { timeZone } from './ui.js';
+
+// Every read carries the viewer's IANA timezone so the server resolves
+// report periods ("today", "this month") on the viewer's calendar.
+const withTZ = (params) => ({ tz: timeZone(), ...(params || {}) });
 
 export class ApiError extends Error {
   constructor(status, message) {
@@ -17,6 +22,12 @@ export function qs(params = {}) {
   return s ? '?' + s : '';
 }
 
+// Builds an API URL; paths that already carry a query string get "&" params.
+function url(path, params) {
+  const q = qs(params);
+  return '/api/v1' + path + (q && path.includes('?') ? '&' + q.slice(1) : q);
+}
+
 // Session gone: go to the sign-in page and come back to the same view after.
 export function redirectToLogin() {
   location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search) + location.hash;
@@ -27,7 +38,7 @@ async function request(method, path, { params, body, timeout = 12000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    resp = await fetch('/api/v1' + path + qs(params), {
+    resp = await fetch(url(path, params), {
       method,
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -53,7 +64,7 @@ async function request(method, path, { params, body, timeout = 12000 } = {}) {
 }
 
 export const api = {
-  get: (path, params) => request('GET', path, { params }),
+  get: (path, params) => request('GET', path, { params: withTZ(params) }),
   post: (path, body = {}) => request('POST', path, { body }),
   put: (path, body = {}) => request('PUT', path, { body }),
   patch: (path, body = {}) => request('PATCH', path, { body }),
@@ -61,7 +72,7 @@ export const api = {
 
   // Downloads a server-generated file (export).
   async download(path, params) {
-    const resp = await fetch('/api/v1' + path + qs(params));
+    const resp = await fetch(url(path, withTZ(params)));
     if (resp.status === 401) return redirectToLogin();
     if (!resp.ok) {
       let msg = `Export failed (HTTP ${resp.status})`;

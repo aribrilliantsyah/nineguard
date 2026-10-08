@@ -183,3 +183,33 @@ func TestProviderJSONMasking(t *testing.T) {
 		t.Fatalf("JSON response should contain masked key value %q: %s", p.MaskedKey, jsonStr)
 	}
 }
+
+func TestProvidersUpstreamTokenSaving(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test_uts.db")
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+	defer database.Close()
+
+	mgr := providers.NewManager(database)
+	p, err := mgr.CreateProviderWithTokenSaving("9router", "https://api.9router.com", "key", "9r", true, true, true, "RTK enabled")
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	if !p.UpstreamTokenSaving || p.UpstreamTokenSavingNote != "RTK enabled" {
+		t.Fatalf("unexpected token saving fields: %+v", p)
+	}
+
+	got, err := mgr.GetProvider(p.ID)
+	if err != nil || !got.UpstreamTokenSaving || got.UpstreamTokenSavingNote != "RTK enabled" {
+		t.Fatalf("unexpected fetched token saving fields: %+v (err: %v)", got, err)
+	}
+
+	updated, err := mgr.UpdateProviderWithTokenSaving(p.ID, "9router", "https://api.9router.com", "key", "9r", true, true, false, "")
+	if err != nil || updated.UpstreamTokenSaving {
+		t.Fatalf("expected updated token saving to be false: %+v (err: %v)", updated, err)
+	}
+}
+

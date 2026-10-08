@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"nineguard/internal/db"
+	"nineguard/internal/timeutil"
 )
 
 type LogEntry struct {
@@ -15,6 +16,7 @@ type LogEntry struct {
 	Timestamp        time.Time `json:"timestamp"`
 	APIKey           string    `json:"api_key"`
 	APIKeyName       string    `json:"api_key_name"`
+	APIKeyID         string    `json:"api_key_id,omitempty"`
 	ProviderID       string    `json:"provider_id,omitempty"`
 	Model            string    `json:"model"`
 	PromptTokens     int       `json:"prompt_tokens"`
@@ -27,6 +29,14 @@ type LogEntry struct {
 	ErrorMessage     *string   `json:"error_message,omitempty"`
 	Level            string    `json:"level"`
 	Message          string    `json:"message"`
+	PluginsSkipped   string    `json:"plugins_skipped"`
+	PluginsApplied   string    `json:"plugins_applied"`
+	TokensSaved      int       `json:"tokens_saved"`
+	TokensOverhead   int       `json:"tokens_overhead"`
+	PluginErrors     string    `json:"plugin_errors"`
+	PluginMs         int       `json:"plugin_ms"`
+	HasImages        bool      `json:"has_images"`
+	ImageCount       int       `json:"image_count"`
 }
 
 type FilterParams struct {
@@ -44,7 +54,10 @@ type FilterParams struct {
 	Search    string // search term / query string
 	Limit     int
 	Offset    int
-	Cursor    string // id cursor for pagination
+	Cursor    string         // id cursor for pagination
+	APIKeyID  string         // exact traffic_logs.api_key_id match
+	Loc       *time.Location // viewer timezone for Period/StartDate/EndDate; nil = UTC
+	HasImages *bool          // filter multimodal requests
 }
 
 type VolumeBucket struct {
@@ -54,7 +67,7 @@ type VolumeBucket struct {
 
 type VolumeResult struct {
 	From        int64            `json:"from"` // unix nano
-	To          int64            `json:"to"` // unix nano
+	To          int64            `json:"to"`   // unix nano
 	BucketNanos int64            `json:"bucket_nanos"`
 	Buckets     []VolumeBucket   `json:"buckets"`
 	Totals      map[string]int64 `json:"totals"`
@@ -69,6 +82,8 @@ type ModelStat struct {
 }
 
 type KeyStat struct {
+	KeyID    string  `json:"key_id,omitempty"` // empty for unlinked / deleted keys
+	Unlinked bool    `json:"unlinked"`
 	Name     string  `json:"name"`
 	Key      string  `json:"key"`
 	Requests int     `json:"requests"`
@@ -79,6 +94,7 @@ type KeyStat struct {
 
 type KeyUsageTrendPoint struct {
 	Time     string `json:"time"`
+	KeyID    string `json:"key_id,omitempty"`
 	KeyName  string `json:"key_name"`
 	Key      string `json:"key"`
 	Requests int    `json:"requests"`
@@ -133,6 +149,7 @@ type DashboardStats struct {
 	TotalTokens      int                  `json:"total_tokens"`
 	PromptTokens     int                  `json:"prompt_tokens"`
 	CompletionTokens int                  `json:"completion_tokens"`
+	TokensSaved      int                  `json:"tokens_saved"`
 	BlockedRequests  int                  `json:"blocked_requests"`
 	SuccessRequests  int                  `json:"success_requests"`
 	ErrorRequests    int                  `json:"error_requests"`
@@ -166,6 +183,8 @@ type ModelUsageSummary struct {
 }
 
 type KeyUsageSummary struct {
+	KeyID        string  `json:"key_id,omitempty"`
+	Unlinked     bool    `json:"unlinked"`
 	KeyName      string  `json:"key_name"`
 	Key          string  `json:"key"`
 	TotalTokens  int     `json:"total_tokens"`
@@ -176,6 +195,8 @@ type KeyUsageSummary struct {
 }
 
 type KeyUsageBreakdown struct {
+	KeyID            string              `json:"key_id,omitempty"` // empty for unlinked / deleted keys
+	Unlinked         bool                `json:"unlinked"`         // true: grouped by historical key name
 	KeyName          string              `json:"key_name"`
 	Key              string              `json:"key"`
 	TotalTokens      int                 `json:"total_tokens"`
@@ -188,6 +209,7 @@ type KeyUsageBreakdown struct {
 	AvgDurationMs    int                 `json:"avg_duration_ms"`
 	TokenShare       float64             `json:"token_share"`
 	LastActiveAt     *string             `json:"last_active_at,omitempty"`
+	TokensSaved      int                 `json:"tokens_saved"`
 	ModelUsage       []ModelUsageSummary `json:"model_usage"`
 }
 
@@ -207,18 +229,26 @@ type ModelUsageBreakdown struct {
 	KeyConsumers     []KeyUsageSummary `json:"key_consumers"`
 }
 
+type PluginUsageBreakdown struct {
+	PluginID    string `json:"plugin_id"`
+	Requests    int    `json:"requests"`
+	TokensSaved int    `json:"tokens_saved"`
+}
+
 type UsageReport struct {
-	Period           string                `json:"period"`
-	StartDate        string                `json:"start_date,omitempty"`
-	EndDate          string                `json:"end_date,omitempty"`
-	TotalTokens      int                   `json:"total_tokens"`
-	PromptTokens     int                   `json:"prompt_tokens"`
-	CompletionTokens int                   `json:"completion_tokens"`
-	TotalRequests    int                   `json:"total_requests"`
-	TopConsumerKey   string                `json:"top_consumer_key"`
-	TopModel         string                `json:"top_model"`
-	KeysBreakdown    []KeyUsageBreakdown   `json:"keys_breakdown"`
-	ModelsBreakdown  []ModelUsageBreakdown `json:"models_breakdown"`
+	Period           string                 `json:"period"`
+	StartDate        string                 `json:"start_date,omitempty"`
+	EndDate          string                 `json:"end_date,omitempty"`
+	TotalTokens      int                    `json:"total_tokens"`
+	PromptTokens     int                    `json:"prompt_tokens"`
+	CompletionTokens int                    `json:"completion_tokens"`
+	TokensSaved      int                    `json:"tokens_saved"`
+	TotalRequests    int                    `json:"total_requests"`
+	TopConsumerKey   string                 `json:"top_consumer_key"`
+	TopModel         string                 `json:"top_model"`
+	KeysBreakdown    []KeyUsageBreakdown    `json:"keys_breakdown"`
+	ModelsBreakdown  []ModelUsageBreakdown  `json:"models_breakdown"`
+	PluginsBreakdown []PluginUsageBreakdown `json:"plugins_breakdown"`
 }
 
 func sanitizeDate(d string) string {
@@ -231,76 +261,39 @@ func sanitizeDate(d string) string {
 	return ""
 }
 
-func buildDateFilter(period, startDate, endDate string) (string, []interface{}) {
-	sDate := sanitizeDate(startDate)
-	eDate := sanitizeDate(endDate)
+// nowFunc is the clock used for period resolution; tests may replace it.
+var nowFunc = time.Now
 
-	if sDate != "" && eDate != "" {
-		return "timestamp >= datetime(?) AND timestamp <= datetime(?)", []interface{}{sDate + " 00:00:00", eDate + " 23:59:59"}
-	}
-	if sDate != "" {
-		return "timestamp >= datetime(?)", []interface{}{sDate + " 00:00:00"}
-	}
-	if eDate != "" {
-		return "timestamp <= datetime(?)", []interface{}{eDate + " 23:59:59"}
-	}
-
-	switch period {
-	case "yesterday":
-		return "timestamp >= datetime('now', '-1 day', 'start of day') AND timestamp < date('now', 'start of day')", nil
-	case "7d":
-		return "timestamp >= datetime('now', '-7 days')", nil
-	case "14d":
-		return "timestamp >= datetime('now', '-14 days')", nil
-	case "30d":
-		return "timestamp >= datetime('now', '-30 days')", nil
-	case "month", "this_month":
-		return "timestamp >= date('now', 'start of month')", nil
-	case "last_month":
-		return "timestamp >= date('now', 'start of month', '-1 month') AND timestamp < date('now', 'start of month')", nil
-	case "all":
-		return "1=1", nil
-	case "today":
-		fallthrough
-	default:
-		return "timestamp >= date('now', 'start of day')", nil
-	}
+// buildDateFilter returns the WHERE fragment for the current report window,
+// with calendar boundaries in loc (nil = UTC).
+func buildDateFilter(period, startDate, endDate string, loc *time.Location) (string, []interface{}) {
+	cur, _ := timeutil.ResolvePeriod(period, sanitizeDate(startDate), sanitizeDate(endDate), loc, nowFunc())
+	return cur.SQL("timestamp")
 }
 
-func buildPrevDateFilter(period, startDate, endDate string) (string, []interface{}) {
-	sDate := sanitizeDate(startDate)
-	eDate := sanitizeDate(endDate)
+// buildPrevDateFilter returns the WHERE fragment for the window preceding the
+// current one, used for period-over-period comparison.
+func buildPrevDateFilter(period, startDate, endDate string, loc *time.Location) (string, []interface{}) {
+	_, prev := timeutil.ResolvePeriod(period, sanitizeDate(startDate), sanitizeDate(endDate), loc, nowFunc())
+	return prev.SQL("timestamp")
+}
 
-	if sDate != "" && eDate != "" {
-		t1, err1 := time.Parse("2006-01-02", sDate)
-		t2, err2 := time.Parse("2006-01-02", eDate)
-		if err1 == nil && err2 == nil {
-			diffDays := int(t2.Sub(t1).Hours()/24) + 1
-			if diffDays < 1 {
-				diffDays = 1
-			}
-			prevStart := t1.AddDate(0, 0, -diffDays).Format("2006-01-02")
-			prevEnd := t1.AddDate(0, 0, -1).Format("2006-01-02")
-			return "timestamp >= datetime(?) AND timestamp <= datetime(?)", []interface{}{prevStart + " 00:00:00", prevEnd + " 23:59:59"}
-		}
-	}
+// Key grouping (ADR 0003). Traffic rows are grouped by API key ID when the
+// key still exists; otherwise (NULL api_key_id, or the key was deleted) they
+// fall into "unlinked" groups by historical key name. The expressions require
+// traffic_logs aliased as t with keyJoin applied.
+const (
+	keyJoin      = " LEFT JOIN api_keys k ON k.id = t.api_key_id"
+	keyGroupExpr = "CASE WHEN k.id IS NOT NULL THEN 'id:' || k.id ELSE 'name:' || COALESCE(NULLIF(t.api_key_name, ''), t.api_key, '') END"
+	keyNameExpr  = "CASE WHEN k.id IS NOT NULL THEN k.name ELSE COALESCE(NULLIF(t.api_key_name, ''), t.api_key, '') END"
+)
 
-	switch period {
-	case "7d":
-		return "timestamp >= datetime('now', '-14 days') AND timestamp < datetime('now', '-7 days')", nil
-	case "14d":
-		return "timestamp >= datetime('now', '-28 days') AND timestamp < datetime('now', '-14 days')", nil
-	case "30d":
-		return "timestamp >= datetime('now', '-60 days') AND timestamp < datetime('now', '-30 days')", nil
-	case "yesterday":
-		return "timestamp >= datetime('now', '-2 days', 'start of day') AND timestamp < datetime('now', '-1 day', 'start of day')", nil
-	case "month", "this_month":
-		return "timestamp >= date('now', 'start of month', '-1 month') AND timestamp < date('now', 'start of month')", nil
-	case "today":
-		fallthrough
-	default:
-		return "timestamp >= datetime('now', '-1 day', 'start of day') AND timestamp < date('now', 'start of day')", nil
+// splitKeyGroup turns a keyGroupExpr value into (key ID, unlinked).
+func splitKeyGroup(g string) (string, bool) {
+	if strings.HasPrefix(g, "id:") {
+		return strings.TrimPrefix(g, "id:"), false
 	}
+	return "", true
 }
 
 type Manager struct {
@@ -369,16 +362,24 @@ func (e *LogEntry) ComputeLevelAndMessage() {
 		if e.Stream {
 			modeStr = "sse"
 		}
+		pluginTxt := ""
+		if e.PluginsApplied != "" {
+			if e.TokensSaved > 0 {
+				pluginTxt = fmt.Sprintf(" [plugins: %s, saved: %s tok]", e.PluginsApplied, fmtNumStr(e.TokensSaved))
+			} else {
+				pluginTxt = fmt.Sprintf(" [plugins: %s]", e.PluginsApplied)
+			}
+		}
 		if e.StatusCode >= 400 {
 			errTxt := ""
 			if e.ErrorMessage != nil && *e.ErrorMessage != "" {
 				errTxt = " - " + *e.ErrorMessage
 			}
-			e.Message = fmt.Sprintf("POST /v1/chat/completions model=%s %d%s (%dms, ip=%s)",
-				e.Model, e.StatusCode, errTxt, e.DurationMs, e.ClientIP)
+			e.Message = fmt.Sprintf("POST /v1/chat/completions model=%s %d%s%s (%dms, ip=%s)",
+				e.Model, e.StatusCode, errTxt, pluginTxt, e.DurationMs, e.ClientIP)
 		} else {
-			e.Message = fmt.Sprintf("POST /v1/chat/completions model=%s 200 OK (%dms, %s tok [p:%s, c:%s], %s, ip=%s)",
-				e.Model, e.DurationMs, fmtNumStr(e.TotalTokens), fmtNumStr(e.PromptTokens), fmtNumStr(e.CompletionTokens), modeStr, e.ClientIP)
+			e.Message = fmt.Sprintf("POST /v1/chat/completions model=%s 200 OK%s (%dms, %s tok [p:%s, c:%s], %s, ip=%s)",
+				e.Model, pluginTxt, e.DurationMs, fmtNumStr(e.TotalTokens), fmtNumStr(e.PromptTokens), fmtNumStr(e.CompletionTokens), modeStr, e.ClientIP)
 		}
 	}
 }
@@ -431,13 +432,29 @@ func (m *Manager) Record(entry *LogEntry) error {
 	maskedKey := maskAPIKey(entry.APIKey)
 	entry.ComputeLevelAndMessage()
 
-	_, err := m.db.Exec(`
+	keyID := sql.NullString{String: entry.APIKeyID, Valid: entry.APIKeyID != ""}
+	hasImagesInt := 0
+	if entry.HasImages {
+		hasImagesInt = 1
+	}
+
+	res, err := m.db.Exec(`
 		INSERT INTO traffic_logs (
-			timestamp, api_key, api_key_name, provider_id, model, prompt_tokens, completion_tokens, total_tokens,
-			duration_ms, status_code, client_ip, stream, error_message, level
-		) VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, maskedKey, entry.APIKeyName, entry.ProviderID, entry.Model, entry.PromptTokens, entry.CompletionTokens, entry.TotalTokens,
-		entry.DurationMs, entry.StatusCode, entry.ClientIP, streamInt, errMsg, entry.Level)
+			timestamp, api_key, api_key_name, api_key_id, provider_id, model, prompt_tokens, completion_tokens, total_tokens,
+			duration_ms, status_code, client_ip, stream, error_message, level,
+			plugins_skipped, plugins_applied, tokens_saved, tokens_overhead, plugin_errors, plugin_ms,
+			has_images, image_count
+		) VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, maskedKey, entry.APIKeyName, keyID, entry.ProviderID, entry.Model, entry.PromptTokens, entry.CompletionTokens, entry.TotalTokens,
+		entry.DurationMs, entry.StatusCode, entry.ClientIP, streamInt, errMsg, entry.Level,
+		entry.PluginsSkipped, entry.PluginsApplied, entry.TokensSaved, entry.TokensOverhead, entry.PluginErrors, entry.PluginMs,
+		hasImagesInt, entry.ImageCount)
+
+	if err == nil {
+		if id, idErr := res.LastInsertId(); idErr == nil {
+			entry.ID = id
+		}
+	}
 
 	// Ensure model is recorded in models table
 	_, _ = m.db.Exec("INSERT OR IGNORE INTO models (id, name, enabled) VALUES (?, ?, 1)", entry.Model, entry.Model)
@@ -472,7 +489,7 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 		args = append(args, tTo.Format("2006-01-02 15:04:05"))
 	}
 	if p.From == "" && p.To == "" {
-		dateCond, dateArgs := buildDateFilter(p.Period, p.StartDate, p.EndDate)
+		dateCond, dateArgs := buildDateFilter(p.Period, p.StartDate, p.EndDate, p.Loc)
 		if dateCond != "" && dateCond != "1=1" {
 			conditions = append(conditions, dateCond)
 			args = append(args, dateArgs...)
@@ -492,6 +509,18 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 	if p.APIKey != "" {
 		conditions = append(conditions, "(api_key = ? OR api_key_name = ? OR api_key LIKE ? OR api_key_name LIKE ?)")
 		args = append(args, p.APIKey, p.APIKey, "%"+p.APIKey+"%", "%"+p.APIKey+"%")
+	}
+	if p.APIKeyID != "" {
+		conditions = append(conditions, "api_key_id = ?")
+		args = append(args, p.APIKeyID)
+	}
+
+	if p.HasImages != nil {
+		if *p.HasImages {
+			conditions = append(conditions, "has_images = 1")
+		} else {
+			conditions = append(conditions, "has_images = 0")
+		}
 	}
 
 	if p.ClientIP != "" {
@@ -653,8 +682,11 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, timestamp, api_key, COALESCE(api_key_name, ''), COALESCE(provider_id, ''), model, prompt_tokens, completion_tokens, total_tokens,
-		       duration_ms, status_code, client_ip, stream, error_message, COALESCE(level, '')
+		SELECT id, timestamp, api_key, COALESCE(api_key_name, ''), COALESCE(api_key_id, ''), COALESCE(provider_id, ''), model, prompt_tokens, completion_tokens, total_tokens,
+		       duration_ms, status_code, client_ip, stream, error_message, COALESCE(level, ''),
+		       COALESCE(plugins_skipped, ''), COALESCE(plugins_applied, ''), COALESCE(tokens_saved, 0), COALESCE(tokens_overhead, 0),
+		       COALESCE(plugin_errors, ''), COALESCE(plugin_ms, 0),
+		       COALESCE(has_images, 0), COALESCE(image_count, 0)
 		FROM traffic_logs
 		%s
 		ORDER BY id DESC
@@ -674,10 +706,14 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 		var streamInt int
 		var errMsg sql.NullString
 		var lvlStr string
+		var hasImgInt, imgCount int
 		if err := rows.Scan(
-			&e.ID, &e.Timestamp, &e.APIKey, &e.APIKeyName, &e.ProviderID, &e.Model,
+			&e.ID, &e.Timestamp, &e.APIKey, &e.APIKeyName, &e.APIKeyID, &e.ProviderID, &e.Model,
 			&e.PromptTokens, &e.CompletionTokens, &e.TotalTokens,
 			&e.DurationMs, &e.StatusCode, &e.ClientIP, &streamInt, &errMsg, &lvlStr,
+			&e.PluginsSkipped, &e.PluginsApplied, &e.TokensSaved, &e.TokensOverhead,
+			&e.PluginErrors, &e.PluginMs,
+			&hasImgInt, &imgCount,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -686,6 +722,8 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 			e.ErrorMessage = &errMsg.String
 		}
 		e.Level = lvlStr
+		e.HasImages = (hasImgInt == 1)
+		e.ImageCount = imgCount
 		e.ComputeLevelAndMessage()
 		list = append(list, e)
 	}
@@ -700,28 +738,7 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 		to = time.Now().UTC()
 	}
 	if from, ok = parseTimeParam(p.From); !ok {
-		if p.StartDate != "" && p.EndDate != "" {
-			t1, _ := time.Parse("2006-01-02", p.StartDate)
-			t2, _ := time.Parse("2006-01-02", p.EndDate)
-			from = t1.UTC()
-			to = t2.Add(24*time.Hour - time.Second).UTC()
-		} else {
-			switch p.Period {
-			case "7d":
-				from = to.Add(-7 * 24 * time.Hour)
-			case "14d":
-				from = to.Add(-14 * 24 * time.Hour)
-			case "30d":
-				from = to.Add(-30 * 24 * time.Hour)
-			case "yesterday":
-				yest := to.AddDate(0, 0, -1)
-				from = time.Date(yest.Year(), yest.Month(), yest.Day(), 0, 0, 0, 0, time.UTC)
-				to = time.Date(yest.Year(), yest.Month(), yest.Day(), 23, 59, 59, 0, time.UTC)
-			default:
-				from = time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC)
-				to = from.Add(24*time.Hour - time.Second)
-			}
-		}
+		from, to = periodVolumeWindow(p.Period, p.StartDate, p.EndDate, p.Loc, to)
 	}
 	if !from.Before(to) {
 		from = to.Add(-24 * time.Hour)
@@ -784,6 +801,17 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 	if p.APIKey != "" {
 		conditions = append(conditions, "(api_key = ? OR api_key_name = ? OR api_key LIKE ? OR api_key_name LIKE ?)")
 		args = append(args, p.APIKey, p.APIKey, "%"+p.APIKey+"%", "%"+p.APIKey+"%")
+	}
+	if p.APIKeyID != "" {
+		conditions = append(conditions, "api_key_id = ?")
+		args = append(args, p.APIKeyID)
+	}
+	if p.HasImages != nil {
+		if *p.HasImages {
+			conditions = append(conditions, "has_images = 1")
+		} else {
+			conditions = append(conditions, "has_images = 0")
+		}
 	}
 	if p.ClientIP != "" {
 		conditions = append(conditions, "(client_ip = ? OR client_ip LIKE ?)")
@@ -972,9 +1000,12 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 	return res, nil
 }
 
-func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*DashboardStats, error) {
-	dateFilter, dateFilterArgs := buildDateFilter(period, startDate, endDate)
-	prevFilter, prevFilterArgs := buildPrevDateFilter(period, startDate, endDate)
+func (m *Manager) GetDashboardStats(period, startDate, endDate string, loc *time.Location) (*DashboardStats, error) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	dateFilter, dateFilterArgs := buildDateFilter(period, startDate, endDate, loc)
+	prevFilter, prevFilterArgs := buildPrevDateFilter(period, startDate, endDate, loc)
 
 	stats := &DashboardStats{}
 
@@ -985,6 +1016,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 			COALESCE(SUM(total_tokens), 0),
 			COALESCE(SUM(prompt_tokens), 0),
 			COALESCE(SUM(completion_tokens), 0),
+			COALESCE(SUM(tokens_saved), 0),
 			COALESCE(SUM(CASE WHEN status_code = 403 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code != 403 THEN 1 ELSE 0 END), 0),
@@ -992,8 +1024,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 			COALESCE(MIN(CASE WHEN duration_ms > 0 THEN duration_ms ELSE NULL END), 0),
 			COALESCE(MAX(duration_ms), 0),
 			COALESCE(SUM(CASE WHEN stream = 1 THEN 1 ELSE 0 END), 0),
-			COUNT(DISTINCT model),
-			COUNT(DISTINCT api_key)
+			COUNT(DISTINCT model)
 		FROM traffic_logs
 		WHERE %s
 	`, dateFilter)
@@ -1003,6 +1034,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 		&stats.TotalTokens,
 		&stats.PromptTokens,
 		&stats.CompletionTokens,
+		&stats.TokensSaved,
 		&stats.BlockedRequests,
 		&stats.SuccessRequests,
 		&stats.ErrorRequests,
@@ -1011,11 +1043,14 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 		&stats.MaxDurationMs,
 		&stats.StreamRequests,
 		&stats.ActiveModels,
-		&stats.ActiveKeys,
 	)
 	if err != nil {
 		return nil, err
 	}
+
+	// Active keys: distinct key groups (key ID, or historical name when unlinked).
+	_ = m.db.QueryRow(fmt.Sprintf(`SELECT COUNT(DISTINCT %s) FROM traffic_logs t%s WHERE %s`,
+		keyGroupExpr, keyJoin, dateFilter), dateFilterArgs...).Scan(&stats.ActiveKeys)
 
 	stats.SyncRequests = stats.TotalRequests - stats.StreamRequests
 	if stats.SyncRequests < 0 {
@@ -1143,21 +1178,25 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 		},
 	}
 
-	// Time series setup
+	// Time series setup. Bucket labels are in the viewer's zone: SQLite
+	// timestamps (UTC) are shifted by loc's offset at the start of the window.
 	var timeFmt string
-	var groupFmt string
 	var timeSlots []string
-	now := time.Now()
+	now := nowFunc().In(loc)
+	curPeriod, _ := timeutil.ResolvePeriod(period, sanitizeDate(startDate), sanitizeDate(endDate), loc, nowFunc())
+	offsetAt := curPeriod.From
+	if offsetAt.IsZero() {
+		offsetAt = now
+	}
+	offsetMod := timeutil.SQLiteOffsetModifier(loc, offsetAt)
 
 	if period == "today" || period == "" {
 		timeFmt = "%H:00"
-		groupFmt = "strftime('%H:00', timestamp)"
 		for h := 0; h < 24; h++ {
 			timeSlots = append(timeSlots, fmt.Sprintf("%02d:00", h))
 		}
 	} else if startDate != "" && endDate != "" {
 		timeFmt = "%m-%d"
-		groupFmt = "strftime('%m-%d', timestamp)"
 		t1, err1 := time.Parse("2006-01-02", startDate)
 		t2, err2 := time.Parse("2006-01-02", endDate)
 		if err1 == nil && err2 == nil && !t2.Before(t1) {
@@ -1171,7 +1210,6 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 		}
 	} else {
 		timeFmt = "%m-%d"
-		groupFmt = "strftime('%m-%d', timestamp)"
 		days := 14
 		switch period {
 		case "7d":
@@ -1185,6 +1223,9 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 			timeSlots = append(timeSlots, now.AddDate(0, 0, -d).Format("01-02"))
 		}
 	}
+	// slotExpr is the SQL expression producing a bucket label for a row.
+	slotExpr := fmt.Sprintf("strftime('%s', timestamp, '%s')", timeFmt, offsetMod)
+	groupFmt := slotExpr
 
 	slotMap := make(map[string]*TimeSeriesPoint)
 	for _, slot := range timeSlots {
@@ -1193,7 +1234,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 
 	seriesQuery := fmt.Sprintf(`
 		SELECT 
-			strftime('%s', timestamp) as time_slot,
+			%s as time_slot,
 			COUNT(*) as reqs,
 			COALESCE(SUM(total_tokens), 0) as toks,
 			COALESCE(SUM(prompt_tokens), 0) as p_toks,
@@ -1206,7 +1247,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 		WHERE %s
 		GROUP BY %s
 		ORDER BY timestamp ASC
-	`, timeFmt, dateFilter, groupFmt)
+	`, slotExpr, dateFilter, groupFmt)
 
 	rowsSeries, err := m.db.Query(seriesQuery, dateFilterArgs...)
 	if err == nil {
@@ -1276,11 +1317,11 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 	}
 	if len(stats.TopModels) > 0 {
 		trendQ := fmt.Sprintf(`
-			SELECT model, strftime('%s', timestamp) as ts, COUNT(*) 
+			SELECT model, %s as ts, COUNT(*) 
 			FROM traffic_logs
 			WHERE %s
 			GROUP BY model, ts
-		`, timeFmt, dateFilter)
+		`, slotExpr, dateFilter)
 		if rTr, errTr := m.db.Query(trendQ, dateFilterArgs...); errTr == nil {
 			for rTr.Next() {
 				var mod, ts string
@@ -1300,51 +1341,50 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 	// Model Mix (for share bar)
 	stats.ModelMix = stats.TopModels
 
-	// Top API Keys
+	// Top API Keys, grouped by key ID (unlinked rows by historical name).
+	tSlotExpr := strings.ReplaceAll(slotExpr, "timestamp", "t.timestamp")
 	topKeysQuery := fmt.Sprintf(`
-		SELECT COALESCE(NULLIF(api_key_name, ''), api_key) as key_name, api_key, COUNT(*) as reqs, COALESCE(SUM(total_tokens), 0) as toks
-		FROM traffic_logs
+		SELECT %s AS g, %s AS key_name, MAX(t.api_key), COUNT(*) AS reqs, COALESCE(SUM(t.total_tokens), 0) AS toks
+		FROM traffic_logs t%s
 		WHERE %s
-		GROUP BY COALESCE(NULLIF(api_key_name, ''), api_key), api_key
+		GROUP BY g
 		ORDER BY toks DESC, reqs DESC
 		LIMIT 8
-	`, dateFilter)
+	`, keyGroupExpr, keyNameExpr, keyJoin, dateFilter)
+	keyIdx := make(map[string]int)
 	rowsKeys, err := m.db.Query(topKeysQuery, dateFilterArgs...)
 	if err == nil {
 		for rowsKeys.Next() {
 			var ks KeyStat
-			if err := rowsKeys.Scan(&ks.Name, &ks.Key, &ks.Requests, &ks.Tokens); err == nil {
+			var g string
+			var masked sql.NullString
+			if err := rowsKeys.Scan(&g, &ks.Name, &masked, &ks.Requests, &ks.Tokens); err == nil {
+				ks.KeyID, ks.Unlinked = splitKeyGroup(g)
+				ks.Key = masked.String
 				if stats.TotalTokens > 0 {
 					ks.Share = float64(ks.Tokens) / float64(stats.TotalTokens) * 100
 				}
 				ks.Trend = make([]int, len(timeSlots))
+				keyIdx[g] = len(stats.TopKeys)
 				stats.TopKeys = append(stats.TopKeys, ks)
 			}
 		}
 		rowsKeys.Close()
 	}
 
-	keyIdx := make(map[string]int)
-	for i, tk := range stats.TopKeys {
-		kId := tk.Name
-		if kId == "" {
-			kId = tk.Key
-		}
-		keyIdx[kId] = i
-	}
 	if len(stats.TopKeys) > 0 {
 		trendKeyQ := fmt.Sprintf(`
-			SELECT COALESCE(NULLIF(api_key_name, ''), api_key) as k_name, strftime('%s', timestamp) as ts, COUNT(*) 
-			FROM traffic_logs
+			SELECT %s AS g, %s AS ts, COUNT(*)
+			FROM traffic_logs t%s
 			WHERE %s
-			GROUP BY k_name, ts
-		`, timeFmt, dateFilter)
+			GROUP BY g, ts
+		`, keyGroupExpr, tSlotExpr, keyJoin, dateFilter)
 		if rTr, errTr := m.db.Query(trendKeyQ, dateFilterArgs...); errTr == nil {
 			for rTr.Next() {
-				var kn, ts string
+				var g, ts string
 				var cnt int
-				if err := rTr.Scan(&kn, &ts, &cnt); err == nil {
-					if kIdx, ok := keyIdx[kn]; ok {
+				if err := rTr.Scan(&g, &ts, &cnt); err == nil {
+					if kIdx, ok := keyIdx[g]; ok {
 						if tIdx, ok2 := slotIdx[ts]; ok2 {
 							stats.TopKeys[kIdx].Trend[tIdx] = cnt
 						}
@@ -1394,11 +1434,11 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 	}
 	if len(stats.TopErrorSources) > 0 {
 		trendErrQ := fmt.Sprintf(`
-			SELECT model, strftime('%s', timestamp) as ts, COUNT(*) 
+			SELECT model, %s as ts, COUNT(*) 
 			FROM traffic_logs
 			WHERE status_code >= 400 AND %s
 			GROUP BY model, ts
-		`, timeFmt, dateFilter)
+		`, slotExpr, dateFilter)
 		if rTrend, errTrend := m.db.Query(trendErrQ, dateFilterArgs...); errTrend == nil {
 			for rTrend.Next() {
 				var mod, ts string
@@ -1417,24 +1457,29 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 
 	// Query API Key usage breakdown over date/time slots
 	keySeriesQuery := fmt.Sprintf(`
-		SELECT 
-			strftime('%s', timestamp) as time_slot,
-			COALESCE(NULLIF(api_key_name, ''), api_key) as key_name,
-			api_key,
-			COUNT(*) as reqs,
-			COALESCE(SUM(total_tokens), 0) as toks
-		FROM traffic_logs
+		SELECT
+			%s AS time_slot,
+			%s AS g,
+			%s AS key_name,
+			MAX(t.api_key),
+			COUNT(*) AS reqs,
+			COALESCE(SUM(t.total_tokens), 0) AS toks
+		FROM traffic_logs t%s
 		WHERE %s
-		GROUP BY %s, COALESCE(NULLIF(api_key_name, ''), api_key), api_key
-		ORDER BY timestamp ASC
-	`, timeFmt, dateFilter, groupFmt)
+		GROUP BY time_slot, g
+		ORDER BY time_slot ASC
+	`, tSlotExpr, keyGroupExpr, keyNameExpr, keyJoin, dateFilter)
 
 	rowsKeySeries, err := m.db.Query(keySeriesQuery, dateFilterArgs...)
 	if err == nil {
 		defer rowsKeySeries.Close()
 		for rowsKeySeries.Next() {
 			var kp KeyUsageTrendPoint
-			if err := rowsKeySeries.Scan(&kp.Time, &kp.KeyName, &kp.Key, &kp.Requests, &kp.Tokens); err == nil {
+			var g string
+			var masked sql.NullString
+			if err := rowsKeySeries.Scan(&kp.Time, &g, &kp.KeyName, &masked, &kp.Requests, &kp.Tokens); err == nil {
+				kp.KeyID, _ = splitKeyGroup(g)
+				kp.Key = masked.String
 				stats.KeyUsageTrends = append(stats.KeyUsageTrends, kp)
 			}
 		}
@@ -1443,8 +1488,11 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string) (*Dashboa
 	return stats, nil
 }
 
-func (m *Manager) GetUsageReports(period, startDate, endDate string) (*UsageReport, error) {
-	dateFilter, dateFilterArgs := buildDateFilter(period, startDate, endDate)
+func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.Location) (*UsageReport, error) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	dateFilter, dateFilterArgs := buildDateFilter(period, startDate, endDate, loc)
 
 	report := &UsageReport{
 		Period:          period,
@@ -1460,7 +1508,8 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string) (*UsageRepo
 			COUNT(*),
 			COALESCE(SUM(total_tokens), 0),
 			COALESCE(SUM(prompt_tokens), 0),
-			COALESCE(SUM(completion_tokens), 0)
+			COALESCE(SUM(completion_tokens), 0),
+			COALESCE(SUM(tokens_saved), 0)
 		FROM traffic_logs
 		WHERE %s
 	`, dateFilter)
@@ -1470,46 +1519,50 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string) (*UsageRepo
 		&report.TotalTokens,
 		&report.PromptTokens,
 		&report.CompletionTokens,
+		&report.TokensSaved,
 	)
 
-	// 2. Query Key-Model Cross Breakdown
+	// 2. Query Key-Model Cross Breakdown, grouped by key ID (unlinked rows by historical name).
 	keyModelMap := make(map[string][]ModelUsageSummary)
 	modelKeyMap := make(map[string][]KeyUsageSummary)
 
 	crossQuery := fmt.Sprintf(`
-		SELECT 
-			COALESCE(NULLIF(api_key_name, ''), api_key) as key_name,
-			api_key,
-			model,
-			COALESCE(SUM(total_tokens), 0) as tot_toks,
-			COALESCE(SUM(prompt_tokens), 0) as p_toks,
-			COALESCE(SUM(completion_tokens), 0) as c_toks,
-			COUNT(*) as reqs
-		FROM traffic_logs
+		SELECT
+			%s AS g,
+			%s AS key_name,
+			MAX(t.api_key),
+			t.model,
+			COALESCE(SUM(t.total_tokens), 0) AS tot_toks,
+			COALESCE(SUM(t.prompt_tokens), 0) AS p_toks,
+			COALESCE(SUM(t.completion_tokens), 0) AS c_toks,
+			COUNT(*) AS reqs
+		FROM traffic_logs t%s
 		WHERE %s
-		GROUP BY COALESCE(NULLIF(api_key_name, ''), api_key), api_key, model
+		GROUP BY g, t.model
 		ORDER BY tot_toks DESC
-	`, dateFilter)
+	`, keyGroupExpr, keyNameExpr, keyJoin, dateFilter)
 
 	crossRows, err := m.db.Query(crossQuery, dateFilterArgs...)
 	if err == nil {
 		defer crossRows.Close()
 		for crossRows.Next() {
-			var kn, k, mod string
+			var g, kn, mod string
+			var masked sql.NullString
 			var tot, pt, ct, reqs int
-			if err := crossRows.Scan(&kn, &k, &mod, &tot, &pt, &ct, &reqs); err == nil {
-				kId := kn + "||" + k
-				keyModelMap[kId] = append(keyModelMap[kId], ModelUsageSummary{
+			if err := crossRows.Scan(&g, &kn, &masked, &mod, &tot, &pt, &ct, &reqs); err == nil {
+				keyID, unlinked := splitKeyGroup(g)
+				keyModelMap[g] = append(keyModelMap[g], ModelUsageSummary{
 					Model:        mod,
 					TotalTokens:  tot,
 					PromptTokens: pt,
 					CompTokens:   ct,
 					Requests:     reqs,
 				})
-
 				modelKeyMap[mod] = append(modelKeyMap[mod], KeyUsageSummary{
+					KeyID:        keyID,
+					Unlinked:     unlinked,
 					KeyName:      kn,
-					Key:          k,
+					Key:          masked.String,
 					TotalTokens:  tot,
 					PromptTokens: pt,
 					CompTokens:   ct,
@@ -1519,45 +1572,50 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string) (*UsageRepo
 		}
 	}
 
-	// 3. Query Grouping per API Key
+	// 3. Last Active per key and per model: all-time, any status (not period-bound).
+	keyLastActive := m.lastActiveBy(keyGroupExpr, keyJoin)
+	modelLastActive := m.lastActiveBy("t.model", "")
+
+	// 4. Query Grouping per API Key
 	keysQuery := fmt.Sprintf(`
-		SELECT 
-			COALESCE(NULLIF(api_key_name, ''), api_key) as key_name,
-			api_key,
-			COALESCE(SUM(total_tokens), 0) as tot_toks,
-			COALESCE(SUM(prompt_tokens), 0) as p_toks,
-			COALESCE(SUM(completion_tokens), 0) as c_toks,
-			COUNT(*) as tot_reqs,
-			COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END), 0) as ok_reqs,
-			COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code != 403 THEN 1 ELSE 0 END), 0) as err_reqs,
-			COALESCE(SUM(CASE WHEN status_code = 403 THEN 1 ELSE 0 END), 0) as blk_reqs,
-			COALESCE(ROUND(AVG(duration_ms)), 0) as avg_dur,
-			MAX(timestamp) as last_seen
-		FROM traffic_logs
+		SELECT
+			%s AS g,
+			%s AS key_name,
+			MAX(t.api_key),
+			COALESCE(SUM(t.total_tokens), 0) AS tot_toks,
+			COALESCE(SUM(t.prompt_tokens), 0) AS p_toks,
+			COALESCE(SUM(t.completion_tokens), 0) AS c_toks,
+			COUNT(*) AS tot_reqs,
+			COALESCE(SUM(CASE WHEN t.status_code >= 200 AND t.status_code < 400 THEN 1 ELSE 0 END), 0) AS ok_reqs,
+			COALESCE(SUM(CASE WHEN t.status_code >= 400 AND t.status_code != 403 THEN 1 ELSE 0 END), 0) AS err_reqs,
+			COALESCE(SUM(CASE WHEN t.status_code = 403 THEN 1 ELSE 0 END), 0) AS blk_reqs,
+			COALESCE(ROUND(AVG(t.duration_ms)), 0) AS avg_dur,
+			COALESCE(SUM(t.tokens_saved), 0) AS tok_saved
+		FROM traffic_logs t%s
 		WHERE %s
-		GROUP BY COALESCE(NULLIF(api_key_name, ''), api_key), api_key
+		GROUP BY g
 		ORDER BY tot_toks DESC, tot_reqs DESC
-	`, dateFilter)
+	`, keyGroupExpr, keyNameExpr, keyJoin, dateFilter)
 
 	kRows, err := m.db.Query(keysQuery, dateFilterArgs...)
 	if err == nil {
 		defer kRows.Close()
 		for kRows.Next() {
 			var kb KeyUsageBreakdown
-			var lastSeen sql.NullString
+			var g string
+			var masked sql.NullString
 			if err := kRows.Scan(
-				&kb.KeyName, &kb.Key, &kb.TotalTokens, &kb.PromptTokens, &kb.CompletionTokens,
+				&g, &kb.KeyName, &masked, &kb.TotalTokens, &kb.PromptTokens, &kb.CompletionTokens,
 				&kb.TotalRequests, &kb.SuccessRequests, &kb.ErrorRequests, &kb.BlockedRequests,
-				&kb.AvgDurationMs, &lastSeen,
+				&kb.AvgDurationMs, &kb.TokensSaved,
 			); err == nil {
+				kb.KeyID, kb.Unlinked = splitKeyGroup(g)
+				kb.Key = masked.String
 				if report.TotalTokens > 0 {
 					kb.TokenShare = float64(kb.TotalTokens) / float64(report.TotalTokens) * 100
 				}
-				if lastSeen.Valid {
-					kb.LastActiveAt = &lastSeen.String
-				}
-				kId := kb.KeyName + "||" + kb.Key
-				modelsUsed := keyModelMap[kId]
+				kb.LastActiveAt = keyLastActive[g]
+				modelsUsed := keyModelMap[g]
 				for i := range modelsUsed {
 					if kb.TotalTokens > 0 {
 						modelsUsed[i].Share = float64(modelsUsed[i].TotalTokens) / float64(kb.TotalTokens) * 100
@@ -1569,7 +1627,7 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string) (*UsageRepo
 		}
 	}
 
-	// 4. Query Grouping per Model
+	// 5. Query Grouping per Model
 	modelsQuery := fmt.Sprintf(`
 		SELECT 
 			t.model,
@@ -1581,8 +1639,7 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string) (*UsageRepo
 			COALESCE(SUM(CASE WHEN t.status_code >= 200 AND t.status_code < 400 THEN 1 ELSE 0 END), 0) as ok_reqs,
 			COALESCE(SUM(CASE WHEN t.status_code >= 400 AND t.status_code != 403 THEN 1 ELSE 0 END), 0) as err_reqs,
 			COALESCE(SUM(CASE WHEN t.status_code = 403 THEN 1 ELSE 0 END), 0) as blk_reqs,
-			COALESCE(ROUND(AVG(t.duration_ms)), 0) as avg_dur,
-			MAX(t.timestamp) as last_seen
+			COALESCE(ROUND(AVG(t.duration_ms)), 0) as avg_dur
 		FROM traffic_logs t
 		LEFT JOIN models m ON t.model = m.id
 		WHERE %s
@@ -1596,19 +1653,16 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string) (*UsageRepo
 		for mRows.Next() {
 			var mb ModelUsageBreakdown
 			var enInt int
-			var lastSeen sql.NullString
 			if err := mRows.Scan(
 				&mb.Model, &enInt, &mb.TotalTokens, &mb.PromptTokens, &mb.CompletionTokens,
 				&mb.TotalRequests, &mb.SuccessRequests, &mb.ErrorRequests, &mb.BlockedRequests,
-				&mb.AvgDurationMs, &lastSeen,
+				&mb.AvgDurationMs,
 			); err == nil {
 				mb.Enabled = (enInt == 1)
 				if report.TotalTokens > 0 {
 					mb.TokenShare = float64(mb.TotalTokens) / float64(report.TotalTokens) * 100
 				}
-				if lastSeen.Valid {
-					mb.LastActiveAt = &lastSeen.String
-				}
+				mb.LastActiveAt = modelLastActive[mb.Model]
 				consumers := modelKeyMap[mb.Model]
 				for i := range consumers {
 					if mb.TotalTokens > 0 {
@@ -1628,5 +1682,80 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string) (*UsageRepo
 		report.TopModel = report.ModelsBreakdown[0].Model
 	}
 
+	// 6. Query Breakdown per Plugin
+	pluginQuery := fmt.Sprintf(`
+		SELECT COALESCE(plugins_applied, ''), COALESCE(SUM(tokens_saved), 0), COUNT(*)
+		FROM traffic_logs
+		WHERE %s AND plugins_applied != ''
+		GROUP BY plugins_applied
+	`, dateFilter)
+	pRows, err := m.db.Query(pluginQuery, dateFilterArgs...)
+	if err == nil {
+		defer pRows.Close()
+		pMap := make(map[string]*PluginUsageBreakdown)
+		for pRows.Next() {
+			var applied string
+			var saved, reqs int
+			if err := pRows.Scan(&applied, &saved, &reqs); err == nil {
+				for _, pID := range strings.Split(applied, ",") {
+					pID = strings.TrimSpace(pID)
+					if pID == "" {
+						continue
+					}
+					if _, exists := pMap[pID]; !exists {
+						pMap[pID] = &PluginUsageBreakdown{PluginID: pID}
+					}
+					pMap[pID].Requests += reqs
+					pMap[pID].TokensSaved += saved
+				}
+			}
+		}
+		for _, v := range pMap {
+			report.PluginsBreakdown = append(report.PluginsBreakdown, *v)
+		}
+	}
+
 	return report, nil
+}
+
+// lastActiveBy returns MAX(timestamp) over all traffic (no period filter, all
+// status codes) grouped by groupExpr, normalized to RFC 3339 UTC. traffic_logs
+// is aliased t and join is appended after it. Both arguments must be trusted
+// constants, never user input.
+func (m *Manager) lastActiveBy(groupExpr, join string) map[string]*string {
+	out := make(map[string]*string)
+	rows, err := m.db.Query(fmt.Sprintf(
+		"SELECT %s AS g, MAX(t.timestamp) FROM traffic_logs t%s GROUP BY g", groupExpr, join))
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var g sql.NullString
+		var ts sql.NullString
+		if err := rows.Scan(&g, &ts); err == nil && g.Valid {
+			out[g.String] = timeutil.NullTimeString(ts)
+		}
+	}
+	return out
+}
+
+// periodVolumeWindow converts a period into the [from, to] span used by volume
+// histograms, with calendar boundaries in loc. "today" spans the whole local
+// day so the chart has a stable width; open-ended windows end at to.
+func periodVolumeWindow(period, startDate, endDate string, loc *time.Location, to time.Time) (time.Time, time.Time) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	cur, _ := timeutil.ResolvePeriod(period, startDate, endDate, loc, nowFunc())
+	from := cur.From
+	if !cur.To.IsZero() {
+		to = cur.To.Add(-time.Second)
+	} else if !from.IsZero() && (period == "" || period == "today") && startDate == "" && endDate == "" {
+		to = from.In(loc).AddDate(0, 0, 1).UTC().Add(-time.Second)
+	}
+	if from.IsZero() {
+		from = to.Add(-24 * time.Hour)
+	}
+	return from, to
 }

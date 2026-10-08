@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"nineguard/internal/db"
+	"nineguard/internal/timeutil"
 )
 
 type SystemLogEntry struct {
@@ -35,7 +36,11 @@ type FilterParams struct {
 	Limit     int
 	Offset    int
 	Cursor    string
+	Loc       *time.Location // viewer timezone for Period/StartDate/EndDate; nil = UTC
 }
+
+// nowFunc is the clock used for period resolution; tests may replace it.
+var nowFunc = time.Now
 
 type VolumeBucket struct {
 	Start  int64            `json:"start"` // unix nano
@@ -44,7 +49,7 @@ type VolumeBucket struct {
 
 type VolumeResult struct {
 	From        int64            `json:"from"` // unix nano
-	To          int64            `json:"to"` // unix nano
+	To          int64            `json:"to"`   // unix nano
 	BucketNanos int64            `json:"bucket_nanos"`
 	Buckets     []VolumeBucket   `json:"buckets"`
 	Totals      map[string]int64 `json:"totals"`
@@ -263,22 +268,10 @@ func (m *Manager) QueryLogs(p FilterParams) ([]SystemLogEntry, int, error) {
 		args = append(args, tTo.Format("2006-01-02 15:04:05"))
 	}
 	if p.From == "" && p.To == "" {
-		if p.StartDate != "" && p.EndDate != "" {
-			conditions = append(conditions, "timestamp >= datetime(?) AND timestamp <= datetime(?)")
-			args = append(args, p.StartDate+" 00:00:00", p.EndDate+" 23:59:59")
-		} else {
-			switch p.Period {
-			case "yesterday":
-				conditions = append(conditions, "timestamp >= datetime('now', '-1 day', 'start of day') AND timestamp < date('now', 'start of day')")
-			case "7d":
-				conditions = append(conditions, "timestamp >= datetime('now', '-7 days')")
-			case "30d":
-				conditions = append(conditions, "timestamp >= datetime('now', '-30 days')")
-			case "all":
-				// no date filter
-			default: // today
-				conditions = append(conditions, "timestamp >= date('now', 'start of day')")
-			}
+		cur, _ := timeutil.ResolvePeriod(p.Period, p.StartDate, p.EndDate, p.Loc, nowFunc())
+		if cond, condArgs := cur.SQL("timestamp"); cond != "1=1" {
+			conditions = append(conditions, cond)
+			args = append(args, condArgs...)
 		}
 	}
 
@@ -399,25 +392,19 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 		to = time.Now().UTC()
 	}
 	if from, ok = parseTimeParam(p.From); !ok {
-		if p.StartDate != "" && p.EndDate != "" {
-			t1, _ := time.Parse("2006-01-02", p.StartDate)
-			t2, _ := time.Parse("2006-01-02", p.EndDate)
-			from = t1.UTC()
-			to = t2.Add(24*time.Hour - time.Second).UTC()
-		} else {
-			switch p.Period {
-			case "7d":
-				from = to.Add(-7 * 24 * time.Hour)
-			case "30d":
-				from = to.Add(-30 * 24 * time.Hour)
-			case "yesterday":
-				yest := to.AddDate(0, 0, -1)
-				from = time.Date(yest.Year(), yest.Month(), yest.Day(), 0, 0, 0, 0, time.UTC)
-				to = time.Date(yest.Year(), yest.Month(), yest.Day(), 23, 59, 59, 0, time.UTC)
-			default:
-				from = time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC)
-				to = from.Add(24*time.Hour - time.Second)
-			}
+		loc := p.Loc
+		if loc == nil {
+			loc = time.UTC
+		}
+		cur, _ := timeutil.ResolvePeriod(p.Period, p.StartDate, p.EndDate, loc, nowFunc())
+		from = cur.From
+		if !cur.To.IsZero() {
+			to = cur.To.Add(-time.Second)
+		} else if !from.IsZero() && (p.Period == "" || p.Period == "today") && p.StartDate == "" && p.EndDate == "" {
+			to = from.In(loc).AddDate(0, 0, 1).UTC().Add(-time.Second)
+		}
+		if from.IsZero() {
+			from = to.Add(-24 * time.Hour)
 		}
 	}
 	if !from.Before(to) {

@@ -1,6 +1,6 @@
 // Usage Reports: In-depth breakdowns per API Key (consumers) and per Model with custom date range.
 import { api } from '../api.js';
-import { h, icon, emptyState, fmtNum, fmtCompact, toast } from '../ui.js';
+import { h, icon, emptyState, fmtNum, fmtCompact, fmtAgo, fmtDateTime, tzLabel, toast } from '../ui.js';
 import { setRoute } from '../state.js';
 
 export function mount(root) {
@@ -227,6 +227,17 @@ export function mount(root) {
     });
   }
 
+  // ── Last Active (all-time, not limited to the selected period) ──
+  function renderLastActive(ts) {
+    const ms = ts ? Date.parse(ts) : NaN;
+    if (isNaN(ms)) return h('span', { class: 'muted', style: { fontSize: '11px' } }, 'Last active: Never');
+    return h('span', {
+      class: 'muted',
+      style: { fontSize: '11px' },
+      title: `${fmtDateTime(ms)} (${tzLabel()}) · all-time, any status`,
+    }, `Last active: ${fmtAgo(ms)}`);
+  }
+
   // ── Visual Token Ratio Bar Helper ──
   function renderRatioBar(promptTokens, compTokens, title = '') {
     const prompt = promptTokens || 0;
@@ -293,7 +304,8 @@ export function mount(root) {
       h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', marginBottom: '5px' } },
         h('span', { class: 'tok-in', title: `Input Prompt: ${fmtNum(promptToks)}` }, `↓ ${fmtCompact(promptToks)} in (${promptPct.toFixed(0)}%)`),
         h('span', { class: 'muted' }, '·'),
-        h('span', { class: 'tok-out', title: `Output Response: ${fmtNum(compToks)}` }, `↑ ${fmtCompact(compToks)} out (${compPct.toFixed(0)}%)`)
+        h('span', { class: 'tok-out', title: `Output Response: ${fmtNum(compToks)}` }, `↑ ${fmtCompact(compToks)} out (${compPct.toFixed(0)}%)`),
+        reportData.tokens_saved ? h('span', { style: { color: 'var(--ok)', fontWeight: 'bold' } }, `· ${fmtCompact(reportData.tokens_saved)} saved`) : null
       ),
       totToks > 0 ? renderRatioBar(promptToks, compToks) : null
     );
@@ -412,7 +424,7 @@ export function mount(root) {
     const headerEl = renderListHeader('keys');
 
     const cards = sortedList.map((k) => {
-      const cardId = k.key_name + '||' + k.key;
+      const cardId = k.key_id ? `id:${k.key_id}` : `name:${k.key_name}`;
       const isExpanded = expandedKeys.has(cardId);
 
       const chevron = icon(isExpanded ? 'chevron-down' : 'chevron-right');
@@ -444,6 +456,7 @@ export function mount(root) {
             h('span', { class: 'badge', style: { background: 'var(--hover)', fontWeight: 'bold', fontSize: '12.5px', padding: '4px 8px' } },
               icon('key'), ' ', k.key_name
             ),
+            k.unlinked ? h('span', { class: 'badge muted', style: { fontSize: '10.5px' }, title: 'Traffic from a deleted key, or recorded before keys were linked by ID. Grouped by the key name at the time of the request.' }, 'unlinked') : null,
             h('code', { class: 'muted', style: { fontSize: '12px' } }, k.key)
           ),
 
@@ -532,7 +545,7 @@ export function mount(root) {
         const detailSection = h('div', { style: { padding: '16px 20px', background: 'var(--bg)' } },
           h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' } },
             h('b', { style: { fontSize: '13px' } }, `Models Used by "${k.key_name}"`),
-            h('span', { class: 'muted', style: { fontSize: '11px' } }, k.last_active_at ? `Last active: ${new Date(k.last_active_at).toLocaleString()}` : '')
+            renderLastActive(k.last_active_at)
           ),
           h('div', { class: 'table-wrap', style: { background: 'var(--panel)', borderRadius: '6px', border: '1px solid var(--border)' } },
             h('table', { class: 'table' },
@@ -564,7 +577,12 @@ export function mount(root) {
       return itemCard;
     });
 
-    return h('div', null, legendEl, headerEl, ...cards);
+    // Linked keys first; traffic from deleted / unlinked keys in its own section.
+    const linkedCards = cards.filter((_, i) => !sortedList[i].unlinked);
+    const unlinkedCards = cards.filter((_, i) => sortedList[i].unlinked);
+    return h('div', null, legendEl, headerEl, ...linkedCards,
+      unlinkedCards.length ? h('h3', { class: 'muted', style: { fontSize: '12px', margin: '18px 0 8px' } }, 'Unlinked / deleted keys') : null,
+      ...unlinkedCards);
   }
 
   // ── Render Group By Model ──
@@ -681,7 +699,8 @@ export function mount(root) {
           return h('tr', null,
             h('td', { class: 'strong' },
               h('span', { class: 'badge', style: { background: 'var(--hover)', marginRight: '6px' } }, icon('key')),
-              c.key_name
+              c.key_name,
+              c.unlinked ? h('span', { class: 'badge muted', style: { fontSize: '10.5px', marginLeft: '6px' } }, 'unlinked') : null
             ),
             h('td', null, h('code', { class: 'muted' }, c.key)),
             h('td', { class: 'num' }, fmtNum(c.requests)),
@@ -703,7 +722,7 @@ export function mount(root) {
         const detailSection = h('div', { style: { padding: '16px 20px', background: 'var(--bg)' } },
           h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' } },
             h('b', { style: { fontSize: '13px' } }, `Token Consumers for "${m.model}" ("Siapa saja pemakai model ini")`),
-            h('span', { class: 'muted', style: { fontSize: '11px' } }, m.last_active_at ? `Last active: ${new Date(m.last_active_at).toLocaleString()}` : '')
+            renderLastActive(m.last_active_at)
           ),
           h('div', { class: 'table-wrap', style: { background: 'var(--panel)', borderRadius: '6px', border: '1px solid var(--border)' } },
             h('table', { class: 'table' },
@@ -739,11 +758,40 @@ export function mount(root) {
     return h('div', null, legendEl, headerEl, ...cards);
   }
 
+  function renderPluginsBreakdown() {
+    const list = reportData.plugins_breakdown || [];
+    if (!list.length) return null;
+
+    const rows = list.map((pb) => h('tr', null,
+      h('td', null, h('b', null, pb.plugin_id)),
+      h('td', { class: 'num' }, fmtNum(pb.requests || 0)),
+      h('td', { class: 'num', style: { color: 'var(--ok)', fontWeight: 'bold' } }, fmtNum(pb.tokens_saved || 0))
+    ));
+
+    return h('div', { class: 'card table-card mt', style: { marginTop: '16px' } },
+      h('div', { class: 'card-head' },
+        h('h3', { style: { margin: 0, fontSize: '14px' } }, 'Token Savers & Plugins Attribution'),
+        h('p', { class: 'card-sub' }, 'Input tokens saved and requests processed per plugin during this period')
+      ),
+      h('table', { class: 'table' },
+        h('thead', null,
+          h('tr', null,
+            h('th', null, 'Plugin ID'),
+            h('th', { class: 'num' }, 'Requests Processed'),
+            h('th', { class: 'num' }, 'Tokens Saved')
+          )
+        ),
+        h('tbody', null, ...rows)
+      )
+    );
+  }
+
   // ── Render Content based on active group ──
   function renderContent() {
     if (!reportData) return;
     const listEl = currentGroup === 'keys' ? renderKeysBreakdown() : renderModelsBreakdown();
-    contentArea.replaceChildren(listEl);
+    const pluginsEl = renderPluginsBreakdown();
+    contentArea.replaceChildren(listEl, pluginsEl || '');
   }
 
   // ── Main Load ──

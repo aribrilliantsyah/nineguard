@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+data/
+node_modules/
+nineguard
+nineguard-server
+*.exe
+*.test
+*.out
+docs/
+deploy/

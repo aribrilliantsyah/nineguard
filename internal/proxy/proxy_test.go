@@ -11,6 +11,7 @@ import (
 	"nineguard/internal/db"
 	"nineguard/internal/keys"
 	"nineguard/internal/models"
+	"nineguard/internal/plugins"
 	"nineguard/internal/providers"
 	"nineguard/internal/proxy"
 	"nineguard/internal/traffic"
@@ -85,7 +86,7 @@ func TestProxyModelPermissions(t *testing.T) {
 	}
 
 	// Initialize proxy
-	p, err := proxy.NewProxy(modelsMgr, trafficMgr, keysMgr, providersMgr)
+	p, err := proxy.NewProxy(modelsMgr, trafficMgr, keysMgr, providersMgr, nil)
 	if err != nil {
 		t.Fatalf("failed to create proxy: %v", err)
 	}
@@ -185,7 +186,7 @@ func TestProxyUnauthorizedTelemetry(t *testing.T) {
 	providersMgr := providers.NewManager(database)
 	trafficMgr := traffic.NewManager(database)
 
-	p, err := proxy.NewProxy(modelsMgr, trafficMgr, keysMgr, providersMgr)
+	p, err := proxy.NewProxy(modelsMgr, trafficMgr, keysMgr, providersMgr, nil)
 	if err != nil {
 		t.Fatalf("failed to create proxy: %v", err)
 	}
@@ -215,3 +216,105 @@ func TestProxyUnauthorizedTelemetry(t *testing.T) {
 		t.Errorf("expected logged level WARN, got %s", logs[0].Level)
 	}
 }
+
+func TestProxy_PluginPipelineExecution(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "proxy_plugin_test.db")
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+	defer database.Close()
+
+	var lastHeaders http.Header
+	var lastReceivedBody map[string]any
+
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastHeaders = r.Header.Clone()
+		_ = json.NewDecoder(r.Body).Decode(&lastReceivedBody)
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "chatcmpl-test",
+			"usage": map[string]any{
+				"prompt_tokens":     10,
+				"completion_tokens": 5,
+				"total_tokens":      15,
+			},
+		})
+	}))
+	defer mockUpstream.Close()
+
+	keysMgr := keys.NewManager(database, "")
+	modelsMgr := models.NewManager(database)
+	providersMgr := providers.NewManager(database)
+	trafficMgr := traffic.NewManager(database)
+	pluginsMgr := plugins.NewManager(database, nil)
+
+	_, _ = providersMgr.CreateProvider("Mock", mockUpstream.URL, "key", "mock", true, true)
+	clientKey, _ := keysMgr.CreateKey("Test Agent", "all", nil, nil)
+
+	// Turn Caveman plugin global binding ON
+	_ = pluginsMgr.UpsertBinding(plugins.Binding{
+		PluginID:  "caveman",
+		ScopeType: plugins.ScopeGlobal,
+		State:     plugins.StateOn,
+	})
+
+	p, err := proxy.NewProxy(modelsMgr, trafficMgr, keysMgr, providersMgr, pluginsMgr)
+	if err != nil {
+		t.Fatalf("failed to init proxy: %v", err)
+	}
+
+	// 1. Send normal chat request -> Caveman should apply
+	chatReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"explain quantum computing"}]}`))
+	chatReq.Header.Set("Authorization", "Bearer "+clientKey.RawKey)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, chatReq)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify Caveman prompt injected
+	msgs, _ := lastReceivedBody["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages received by upstream, got %d", len(msgs))
+	}
+	sysMsg, _ := msgs[0].(map[string]any)
+	sysContent, _ := sysMsg["content"].(string)
+	if !strings.Contains(sysContent, "[nineguard:caveman]") {
+		t.Errorf("expected [nineguard:caveman] in upstream system message, got %s", sysContent)
+	}
+
+	// Verify applied header set upstream
+	appliedHdr := lastHeaders.Get("X-NineGuard-Plugins-Applied")
+	if appliedHdr != "caveman" {
+		t.Errorf("expected X-NineGuard-Plugins-Applied: caveman, got %s", appliedHdr)
+	}
+
+	// 2. Send request with bypass header -> Caveman should be skipped
+	bypassReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"uncompressed prompt"}]}`))
+	bypassReq.Header.Set("Authorization", "Bearer "+clientKey.RawKey)
+	bypassReq.Header.Set("X-NineGuard-Plugins", "off")
+	recBypass := httptest.NewRecorder()
+	p.ServeHTTP(recBypass, bypassReq)
+
+	if recBypass.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", recBypass.Code)
+	}
+
+	// Verify bypass header stripped from upstream request
+	if lastHeaders.Get("X-NineGuard-Plugins") != "" {
+		t.Errorf("X-NineGuard-Plugins should be stripped from upstream request")
+	}
+
+	// Verify Caveman was skipped
+	bypassMsgs, _ := lastReceivedBody["messages"].([]any)
+	if len(bypassMsgs) != 1 {
+		t.Fatalf("expected 1 message (unmodified) for bypassed request, got %d", len(bypassMsgs))
+	}
+}
+

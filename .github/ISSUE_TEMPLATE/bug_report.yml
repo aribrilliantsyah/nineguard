@@ -1,0 +1,77 @@
+name: "🐛 Bug Report"
+description: "File a bug report to help us improve NineGuard"
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report an issue! Please ensure you are running the latest version of NineGuard and search existing issues before creating a new one.
+  - type: input
+    id: version
+    attributes:
+      label: NineGuard Version
+      description: What version or commit of NineGuard are you running? (e.g. v1.0.0 or commit hash)
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment / Environment
+      description: How is NineGuard running?
+      options:
+        - Docker / Docker Compose
+        - Standalone Binary (Linux)
+        - Standalone Binary (macOS)
+        - Standalone Binary (Windows)
+        - From Source (go run / go build)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      description: What operating system is hosting NineGuard or client?
+      options:
+        - Linux (Ubuntu / Debian)
+        - Linux (Arch / Fedora / Alpine)
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows 11
+        - Windows 10
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Detailed steps explaining how to reproduce the issue.
+      placeholder: |
+        1. Start NineGuard with '...'
+        2. Send request to '/v1/chat/completions' or open '/admin'
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs Actual Behavior
+      description: What did you expect to happen versus what actually happened?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Error Output
+      description: Paste any server logs, console logs, or curl output (DO NOT paste API keys, passwords, or secrets!).
+      render: shell

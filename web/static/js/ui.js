@@ -186,19 +186,27 @@ export function toast(msg, kind = 'ok', action = null) {
   }, action ? 9000 : (kind === 'error' ? 6000 : 3500));
 }
 
-export async function copy(text) {
+export async function copy(text, message = 'Copied to clipboard') {
+  let ok = false;
   try {
     await navigator.clipboard.writeText(text);
+    ok = true;
   } catch {
-    // Clipboard API needs a secure context; fall back for plain-HTTP reverse proxies.
-    const ta = h('textarea', { style: { position: 'fixed', opacity: '0' } });
+    // Clipboard API needs a secure context (HTTPS or localhost); fall back for plain-HTTP access.
+    const prev = document.activeElement;
+    const ta = h('textarea', { readonly: '', 'aria-hidden': 'true', style: { position: 'fixed', top: '0', left: '0', opacity: '0' } });
     ta.value = text;
     document.body.append(ta);
+    ta.focus();
     ta.select();
-    document.execCommand('copy');
+    ta.setSelectionRange(0, text.length);
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
     ta.remove();
+    if (prev && prev.focus) prev.focus();
   }
-  toast('Copied to clipboard');
+  if (ok) toast(message, 'ok');
+  else toast('Could not copy automatically. Select the text and press Ctrl+C.', 'error');
+  return ok;
 }
 
 export function confirmDialog({ title, body, message, confirmText = 'Confirm', danger = false, typeToConfirm = '', onConfirm }) {

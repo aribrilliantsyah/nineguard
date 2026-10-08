@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed zoneinfo so viewer timezones resolve without system tzdata
 
 	"github.com/mattn/go-isatty"
 
@@ -20,6 +21,7 @@ import (
 	"nineguard/internal/handler"
 	"nineguard/internal/keys"
 	"nineguard/internal/models"
+	"nineguard/internal/plugins"
 	"nineguard/internal/providers"
 	"nineguard/internal/proxy"
 	"nineguard/internal/syslog"
@@ -41,6 +43,7 @@ Options:
   -t, --tray              Run in system tray mode (desktop) or daemon mode (server)
   -l, --logs              Start server and stream live running logs
   -d, --daemon            Run in headless/daemon mode (no interactive TUI)
+  -v, --version           Print version and build commit
   -h, --help              Show this help message
 
 Environment Variables:
@@ -73,6 +76,13 @@ func main() {
 			flagLogs = true
 		case "-d", "--daemon", "--headless":
 			flagDaemon = true
+		case "-v", "--version":
+			if version.Commit != "" && version.Commit != "dev" && version.Commit != "none" {
+				fmt.Printf("NineGuard %s (%s)\n", version.Version, version.Commit)
+			} else {
+				fmt.Printf("NineGuard %s\n", version.Version)
+			}
+			return
 		case "-h", "--help":
 			printHelp()
 			return
@@ -109,6 +119,9 @@ func main() {
 	// Wrap slog: records to syslogMgr (SQLite) and LogHub (live UI / stream)
 	baseHandler := ui.NewLogHubHandler(logHub, nil)
 	slog.SetDefault(slog.New(syslog.NewSlogHandler(syslogMgr, baseHandler)))
+	if n := db.BackfilledTrafficKeyIDs; n > 0 {
+		slog.Info("linked historical traffic to API keys", "rows", n)
+	}
 
 	authMgr := auth.NewManager(database, cfg.AuthEnabled)
 	keysMgr := keys.NewManager(database, cfg.RouterAPIKey)
@@ -116,9 +129,10 @@ func main() {
 	providersMgr := providers.NewManager(database)
 	modelsMgr := models.NewManager(database)
 	trafficMgr := traffic.NewManager(database)
+	pluginsMgr := plugins.NewManager(database, nil)
 
 	// 3. Initialize Reverse Proxy
-	revProxy, err := proxy.NewProxy(modelsMgr, trafficMgr, keysMgr, providersMgr)
+	revProxy, err := proxy.NewProxy(modelsMgr, trafficMgr, keysMgr, providersMgr, pluginsMgr)
 	if err != nil {
 		slog.Error("failed to initialize reverse proxy", "error", err)
 		os.Exit(1)
@@ -126,6 +140,7 @@ func main() {
 
 	// 4. Handlers
 	h := handler.New(authMgr, modelsMgr, trafficMgr, syslogMgr, keysMgr, providersMgr, revProxy, routerTarget)
+	h.SetPlugins(pluginsMgr)
 
 	// Background Auto-Sync: automatically fetch models from active upstream providers
 	go func() {
@@ -235,6 +250,7 @@ func main() {
 	mux.HandleFunc("GET /api/v1/traffic/export", h.ExportTrafficLogs)
 	mux.HandleFunc("GET /api/v1/traffic/stats", h.GetTrafficStats)
 	mux.HandleFunc("GET /api/v1/traffic/report", h.GetUsageReport)
+	mux.HandleFunc("GET /api/v1/traffic/{id}/payload", h.GetTrafficPayload)
 
 	mux.HandleFunc("GET /api/v1/logs", h.GetSystemLogs)
 	mux.HandleFunc("GET /api/v1/logs/volume", h.GetSystemLogVolume)
@@ -247,6 +263,7 @@ func main() {
 	mux.HandleFunc("POST /api/v1/keys/{id}", h.UpdateKey)
 	mux.HandleFunc("POST /api/v1/keys/{id}/toggle", h.ToggleKey)
 	mux.HandleFunc("DELETE /api/v1/keys/{id}", h.DeleteKey)
+	mux.HandleFunc("GET /api/v1/keys/{id}/velocity", h.GetKeyVelocity)
 
 	mux.HandleFunc("GET /api/v1/providers", h.ListProviders)
 	mux.HandleFunc("POST /api/v1/providers", h.CreateProvider)
@@ -260,6 +277,24 @@ func main() {
 	mux.HandleFunc("GET /api/v1/settings/upstream", h.GetUpstreamSettings)
 	mux.HandleFunc("POST /api/v1/settings/upstream", h.SetUpstreamSettings)
 	mux.HandleFunc("POST /api/v1/settings/upstream/test", h.TestUpstreamConnection)
+	mux.HandleFunc("GET /api/v1/settings/traffic", h.GetTrafficSettings)
+	mux.HandleFunc("POST /api/v1/settings/traffic", h.SetTrafficSettings)
+
+	// Plugins API
+	mux.HandleFunc("GET /api/v1/plugins", h.ListPlugins)
+	mux.HandleFunc("POST /api/v1/plugins", h.CreatePlugin)
+	mux.HandleFunc("PUT /api/v1/plugins/{id}", h.UpdatePlugin)
+	mux.HandleFunc("POST /api/v1/plugins/{id}/rotate-secret", h.RotatePluginSecret)
+	mux.HandleFunc("DELETE /api/v1/plugins/{id}", h.DeletePlugin)
+	mux.HandleFunc("POST /api/v1/plugins/{id}/test", h.TestPlugin)
+	mux.HandleFunc("PUT /api/v1/plugins/order", h.UpdatePipelineOrder)
+	mux.HandleFunc("GET /api/v1/plugins/bindings", h.ListScopeBindings)
+	mux.HandleFunc("GET /api/v1/plugins/{id}/bindings", h.ListPluginBindings)
+	mux.HandleFunc("PUT /api/v1/plugins/{id}/bindings", h.UpsertPluginBinding)
+	mux.HandleFunc("POST /api/v1/plugins/{id}/bindings", h.UpsertPluginBinding)
+	mux.HandleFunc("GET /api/v1/plugins/resolve", h.ResolvePlugins)
+	mux.HandleFunc("GET /api/v1/plugins/warnings", h.GetPluginWarnings)
+	mux.HandleFunc("POST /api/v1/plugins/{id}/reset-prompt", h.ResetPromptOverride)
 
 	// Static Assets
 	fileServer := web.StaticHandler()
@@ -324,6 +359,17 @@ func main() {
 	} else {
 		slog.Info("NineGuard started", "port", cfg.Port, "auth", cfg.AuthEnabled)
 	}
+
+	// Background worker: auto-purge payloads older than 7 days every 12 hours
+	go func() {
+		ticker := time.NewTicker(12 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			if deleted, err := trafficMgr.PurgeOldPayloads(7 * 24 * time.Hour); err == nil && deleted > 0 {
+				slog.Info("purged expired traffic payloads", "deleted", deleted)
+			}
+		}
+	}()
 
 	// 5. Handle Execution Modes
 

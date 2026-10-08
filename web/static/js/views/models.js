@@ -483,7 +483,8 @@ export function mount(root) {
         h('td', null,
           h('div', { class: 'strong', style: { display: 'flex', alignItems: 'center', gap: '6px' } },
             icon('sparkles'),
-            g.name
+            g.name,
+            h('span', { class: 'badge', style: { fontSize: '10px' }, title: 'Plugin conflict resolution priority' }, `Pri: ${g.priority || 0}`)
           ),
           g.description ? h('div', { class: 'sub', style: { marginTop: '2px' } }, g.description) : null
         ),
@@ -522,9 +523,57 @@ export function mount(root) {
     contentWrap.replaceChildren(card);
   }
 
-  function openGroupModal(existingGroup = null) {
+  async function openGroupModal(existingGroup = null) {
     const isEdit = Boolean(existingGroup);
     const existingModels = (existingGroup && Array.isArray(existingGroup.models)) ? existingGroup.models : [];
+
+    let pluginsList = [];
+    let groupBindings = new Map();
+    try {
+      const [pRes, bRes] = await Promise.all([
+        api.get('/plugins').catch(() => ({ plugins: [] })),
+        existingGroup ? api.get('/plugins/bindings', { scope_type: 'group', scope_id: existingGroup.id }).catch(() => ({ bindings: [] })) : Promise.resolve({ bindings: [] })
+      ]);
+      pluginsList = pRes.plugins || [];
+      (bRes.bindings || []).forEach(b => groupBindings.set(b.plugin_id, b.state));
+    } catch { /* ignore */ }
+
+    const pluginSelectMap = new Map();
+    const pluginRows = pluginsList.map(p => {
+      const curState = groupBindings.get(p.id) || 'inherit';
+      const sel = h('select', { class: 'input', style: { width: '140px', fontSize: '12px' } },
+        h('option', { value: 'inherit', selected: curState === 'inherit' }, 'Inherit (Default)'),
+        h('option', { value: 'on', selected: curState === 'on' }, 'On (Force Enable)'),
+        h('option', { value: 'off', selected: curState === 'off' }, 'Off (Force Disable)')
+      );
+      pluginSelectMap.set(p.id, sel);
+
+      const catBadge = h('span', { class: 'badge', style: { fontSize: '10px' } },
+        p.category === 'input_compression' ? 'Compress' : (p.category === 'output_style' ? 'Style' : 'Plugin')
+      );
+
+      return h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 10px', background: 'var(--panel)', borderRadius: '6px' } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+          h('b', { style: { fontSize: '12px' } }, p.name),
+          catBadge
+        ),
+        sel
+      );
+    });
+
+    const pluginsWrap = h('div', {
+      style: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '6px',
+        padding: '10px',
+        borderRadius: '8px',
+        border: '1px solid var(--border)',
+        background: 'var(--hover)'
+      }
+    },
+      pluginRows.length ? pluginRows : h('span', { class: 'muted', style: { fontSize: '12px' } }, 'No plugins registered')
+    );
 
     const nameInput = h('input', {
       class: 'input',
@@ -538,6 +587,13 @@ export function mount(root) {
       type: 'text',
       placeholder: 'e.g. Curated models for high-performance agent tasks',
       value: existingGroup ? existingGroup.description : ''
+    });
+
+    const priorityInput = h('input', {
+      class: 'input',
+      type: 'number',
+      value: existingGroup ? (existingGroup.priority || 0) : 0,
+      style: { width: '120px' }
     });
 
     const filterInput = h('input', {
@@ -700,8 +756,24 @@ export function mount(root) {
           )
         },
         {
+          label: 'Plugin Priority',
+          node: h('div', null,
+            priorityInput,
+            h('p', { class: 'muted', style: { fontSize: '11px', margin: '3px 0 0' } }, 'Higher priority wins when a model belongs to multiple groups with conflicting plugin bindings (default: 0).')
+          )
+        },
+        {
           label: 'Select Models in this Group',
           node: modelPickerWrap
+        },
+        {
+          label: 'Plugin Overrides (Optional)',
+          node: h('div', null,
+            pluginsWrap,
+            h('p', { class: 'muted', style: { fontSize: '11px', margin: '4px 0 0' } },
+              'Override plugins for models in this group. Model Groups override All keys, all models.'
+            )
+          )
         }
       ],
       onSubmit: async () => {
@@ -724,13 +796,33 @@ export function mount(root) {
         }
 
         try {
+          const priority = parseInt(priorityInput.value || '0', 10);
+          let targetGroupID = '';
           if (isEdit) {
-            await api.put(`/model-groups/${existingGroup.id}`, { name, description, models: selected });
+            await api.put(`/model-groups/${existingGroup.id}`, { name, description, models: selected, priority });
+            targetGroupID = existingGroup.id;
             toast(`Model group "${name}" updated!`, 'ok');
           } else {
-            await api.post('/model-groups', { name, description, models: selected });
+            const newGrp = await api.post('/model-groups', { name, description, models: selected, priority });
+            targetGroupID = newGrp ? newGrp.id : '';
             toast(`Model group "${name}" created!`, 'ok');
           }
+
+          if (targetGroupID) {
+            for (const [pluginID, sel] of pluginSelectMap.entries()) {
+              const nextState = sel.value;
+              const prevState = groupBindings.get(pluginID) || 'inherit';
+              if (nextState !== prevState) {
+                await api.put(`/plugins/${encodeURIComponent(pluginID)}/bindings`, {
+                  scope_type: 'group',
+                  scope_id: targetGroupID,
+                  state: nextState,
+                  settings: '{}'
+                }).catch(() => {});
+              }
+            }
+          }
+
           await load();
         } catch (e) {
           throw new Error(e.message || 'Operation failed');

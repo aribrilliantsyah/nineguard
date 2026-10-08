@@ -1,4 +1,4 @@
-.PHONY: all run build build-desktop build-server build-windows build-all test test-server clean
+.PHONY: all run build build-desktop build-server build-windows build-docker build-all test test-server clean
 
 all: build
 
@@ -20,6 +20,10 @@ build-server:
 # Windows build (with system tray)
 build-windows:
 	@./scripts/build.sh windows
+
+# Docker build with version & commit injection
+build-docker:
+	@./scripts/build.sh docker
 
 # Build both desktop and server editions
 build-all:

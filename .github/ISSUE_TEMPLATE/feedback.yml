@@ -1,0 +1,36 @@
+name: "💬 Feedback"
+description: "Share general feedback, impressions, or suggestions for NineGuard"
+title: "[Feedback]: "
+labels: ["feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for sharing your feedback on NineGuard! We appreciate your thoughts and insights to make NineGuard better.
+  - type: dropdown
+    id: category
+    attributes:
+      label: Feedback Category
+      description: Which aspect of NineGuard does your feedback relate to?
+      options:
+        - Dashboard & Web UI
+        - Gateway & Routing Performance
+        - Model Firewall & Access Controls
+        - Authentication & API Key Management
+        - Documentation & Guides
+        - Developer Experience
+        - General Impressions
+    validations:
+      required: true
+  - type: textarea
+    id: feedback
+    attributes:
+      label: Your Feedback
+      description: What is your feedback, recommendation, or experience?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Add any relevant context, screenshots, or background info here.

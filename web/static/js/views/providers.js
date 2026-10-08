@@ -165,13 +165,18 @@ export function mount(root) {
             }
           }, 'Set as Default');
 
+      const tokenSavingTag = p.upstream_token_saving
+        ? h('span', { class: 'badge', style: { background: 'rgba(234, 179, 8, 0.15)', color: '#ca8a04', border: '1px solid #ca8a04' }, title: p.upstream_token_saving_note || 'Upstream applies token saving' }, 'Token Saver Upstream')
+        : null;
+
       return h('div', { class: 'card', style: { marginBottom: '12px' } },
         h('div', { class: 'card-head', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
             icon('server'),
             h('h2', { style: { margin: 0, fontSize: '14px' } }, p.name),
             prefixTag,
-            defaultTag
+            defaultTag,
+            tokenSavingTag
           ),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
             statusBadge,
@@ -247,6 +252,31 @@ export function mount(root) {
       h('span', null, 'Set as Default Provider (fallback for models without prefix)')
     );
 
+    const tokenSavingCheck = h('input', {
+      type: 'checkbox',
+      checked: existing ? Boolean(existing.upstream_token_saving) : false
+    });
+    const tokenSavingNoteInput = h('input', {
+      class: 'input',
+      type: 'text',
+      placeholder: 'e.g. 9router RTK enabled, another NineGuard',
+      value: existing ? (existing.upstream_token_saving_note || '') : '',
+      style: { fontSize: '12px' }
+    });
+    const tokenSavingSection = h('div', { class: 'field', style: { padding: '8px 12px', background: 'var(--hover)', borderRadius: '6px' } },
+      h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '12px', fontWeight: 'bold' } },
+        tokenSavingCheck,
+        h('span', null, 'Upstream already applies token saving')
+      ),
+      h('p', { class: 'muted', style: { fontSize: '11px', margin: '4px 0 6px' } },
+        'Tick this if the provider does its own token saving (for example 9router RTK or another NineGuard with plugins on). NineGuard will warn when its own token savers stack on top.'
+      ),
+      h('div', null,
+        h('span', { class: 'muted', style: { fontSize: '11px', display: 'block', marginBottom: '2px' } }, 'Note / details (optional, max 200 chars):'),
+        tokenSavingNoteInput
+      )
+    );
+
     formDialog({
       title: isEdit ? `Edit Provider: ${existing.name}` : 'Add OpenAI-Compatible Provider',
       submitText: isEdit ? 'Save Changes' : 'Add Provider',
@@ -285,7 +315,8 @@ export function mount(root) {
             )
           )
         },
-        { node: defaultLabel }
+        { node: defaultLabel },
+        { node: tokenSavingSection }
       ],
       onSubmit: async () => {
         const name = nameInput.value.trim();
@@ -293,13 +324,16 @@ export function mount(root) {
         const prefix = prefixInput.value.trim();
         const apiKey = keyField.input.value.trim();
         const isDef = Boolean(defaultCheck.checked);
+        const upstream_token_saving = Boolean(tokenSavingCheck.checked);
+        const upstream_token_saving_note = tokenSavingNoteInput.value.trim();
 
         if (!name) throw new Error('Provider name is required');
         if (!route) throw new Error('Route target URL is required');
 
         if (isEdit) {
           const payload = {
-            name, route, prefix, is_default: isDef, is_active: existing.is_active
+            name, route, prefix, is_default: isDef, is_active: existing.is_active,
+            upstream_token_saving, upstream_token_saving_note
           };
           if (apiKey !== '') {
             payload.api_key = apiKey;
@@ -308,7 +342,8 @@ export function mount(root) {
           toast(`Provider "${name}" updated`, 'ok');
         } else {
           await api.post('/providers', {
-            name, route, prefix, api_key: apiKey, is_default: isDef, is_active: true
+            name, route, prefix, api_key: apiKey, is_default: isDef, is_active: true,
+            upstream_token_saving, upstream_token_saving_note
           });
           toast(`Provider "${name}" added`, 'ok');
         }

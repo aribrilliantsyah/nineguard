@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"nineguard/internal/db"
+	"nineguard/internal/timeutil"
+	"nineguard/internal/traffic"
 )
 
 type KeyInfo struct {
@@ -24,6 +26,9 @@ type KeyInfo struct {
 	ModelAccessMode string    `json:"model_access_mode"` // "all", "group", "custom"
 	ModelGroupIDs   []string  `json:"model_group_ids"`
 	AllowedModels   []string  `json:"allowed_models"`
+	QuotaLimit      int64     `json:"quota_limit"`
+	QuotaPeriod     string    `json:"quota_period"`
+	QuotaUsage      int64     `json:"quota_usage"`
 	TotalRequests   int       `json:"total_requests"`
 	TotalTokens     int       `json:"total_tokens"`
 	LastUsedAt      *string   `json:"last_used_at,omitempty"`
@@ -176,15 +181,15 @@ func matchModelPattern(allowed, model string) bool {
 		}
 	}
 	// Provider prefix matching:
-	// 1. Key allows "gpt-4o", but request is "provider/gpt-4o"
-	if strings.Contains(model, "/") {
+	// 1. Key allows bare "gpt-4o", but request is "provider/gpt-4o"
+	if strings.Contains(model, "/") && !strings.Contains(allowed, "/") {
 		parts := strings.SplitN(model, "/", 2)
 		if strings.EqualFold(parts[1], allowed) {
 			return true
 		}
 	}
-	// 2. Key allows "provider/gpt-4o", but request is "gpt-4o"
-	if strings.Contains(allowed, "/") {
+	// 2. Key allows "provider/gpt-4o", but request is bare "gpt-4o"
+	if strings.Contains(allowed, "/") && !strings.Contains(model, "/") {
 		parts := strings.SplitN(allowed, "/", 2)
 		if strings.EqualFold(parts[1], model) {
 			return true
@@ -386,7 +391,9 @@ func (m *Manager) loadLocalCache() {
 		SELECT id, key, prefix, name, is_active, 
 		       COALESCE(model_access_mode, 'all'), 
 		       COALESCE(model_group_ids, '[]'), 
-		       COALESCE(allowed_models, '') 
+		       COALESCE(allowed_models, ''),
+		       COALESCE(quota_limit, 0),
+		       COALESCE(quota_period, 'none') 
 		FROM api_keys
 	`)
 	if err != nil {
@@ -401,7 +408,7 @@ func (m *Manager) loadLocalCache() {
 		var ki KeyInfo
 		var isAct int
 		var mode, rawGroupIDs, rawModels string
-		if err := rows.Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct, &mode, &rawGroupIDs, &rawModels); err == nil {
+		if err := rows.Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct, &mode, &rawGroupIDs, &rawModels, &ki.QuotaLimit, &ki.QuotaPeriod); err == nil {
 			ki.IsActive = (isAct == 1)
 			ki.Key = MaskKey(ki.RawKey)
 			ki.ModelAccessMode = mode
@@ -429,22 +436,50 @@ func (m *Manager) ensureDefaultKey() {
 	}
 }
 
+type CreateKeyOptions struct {
+	ModelAccessMode string
+	ModelGroupIDs   []string
+	AllowedModels   []string
+	QuotaLimit      int64
+	QuotaPeriod     string
+}
+
 // CreateKey issues a new NineGuard API key with customizable model access mode, groups, and allowed models
 func (m *Manager) CreateKey(name, modelAccessMode string, modelGroupIDs, allowedModels []string) (*KeyInfo, error) {
+	return m.CreateKeyWithOptions(name, CreateKeyOptions{
+		ModelAccessMode: modelAccessMode,
+		ModelGroupIDs:   modelGroupIDs,
+		AllowedModels:   allowedModels,
+		QuotaLimit:      0,
+		QuotaPeriod:     "none",
+	})
+}
+
+// CreateKeyWithOptions issues a new NineGuard API key with customizable options including quotas
+func (m *Manager) CreateKeyWithOptions(name string, opts CreateKeyOptions) (*KeyInfo, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "Agent Key"
 	}
 
-	modelAccessMode = strings.ToLower(strings.TrimSpace(modelAccessMode))
+	modelAccessMode := strings.ToLower(strings.TrimSpace(opts.ModelAccessMode))
 	if modelAccessMode == "" {
-		if len(modelGroupIDs) > 0 {
+		if len(opts.ModelGroupIDs) > 0 {
 			modelAccessMode = "group"
-		} else if len(allowedModels) > 0 {
+		} else if len(opts.AllowedModels) > 0 {
 			modelAccessMode = "custom"
 		} else {
 			modelAccessMode = "all"
 		}
+	}
+
+	quotaPeriod := strings.ToLower(strings.TrimSpace(opts.QuotaPeriod))
+	if quotaPeriod == "" {
+		quotaPeriod = "none"
+	}
+	quotaLimit := opts.QuotaLimit
+	if quotaLimit < 0 {
+		quotaLimit = 0
 	}
 
 	rawKey, prefix, err := generateSecureToken("sk-ng-")
@@ -456,17 +491,17 @@ func (m *Manager) CreateKey(name, modelAccessMode string, modelGroupIDs, allowed
 	_, _ = rand.Read(idBytes)
 	id := hex.EncodeToString(idBytes)
 
-	serializedGroups := SerializeAllowedModels(modelGroupIDs)
+	serializedGroups := SerializeAllowedModels(opts.ModelGroupIDs)
 	cleanGroups := ParseAllowedModels(serializedGroups)
 
-	serializedModels := SerializeAllowedModels(allowedModels)
+	serializedModels := SerializeAllowedModels(opts.AllowedModels)
 	cleanModels := ParseAllowedModels(serializedModels)
 
 	now := time.Now()
 	_, err = m.db.Exec(`
-		INSERT INTO api_keys (id, key, prefix, name, is_active, model_access_mode, model_group_ids, allowed_models, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-	`, id, rawKey, prefix, name, modelAccessMode, serializedGroups, serializedModels)
+		INSERT INTO api_keys (id, key, prefix, name, is_active, model_access_mode, model_group_ids, allowed_models, quota_limit, quota_period, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`, id, rawKey, prefix, name, modelAccessMode, serializedGroups, serializedModels, quotaLimit, quotaPeriod)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save new key: %w", err)
 	}
@@ -481,6 +516,8 @@ func (m *Manager) CreateKey(name, modelAccessMode string, modelGroupIDs, allowed
 		ModelAccessMode: modelAccessMode,
 		ModelGroupIDs:   cleanGroups,
 		AllowedModels:   cleanModels,
+		QuotaLimit:      quotaLimit,
+		QuotaPeriod:     quotaPeriod,
 		TotalRequests:   0,
 		TotalTokens:     0,
 		CreatedAt:       now,
@@ -533,6 +570,30 @@ func (m *Manager) UpdateKey(id, name, modelAccessMode string, modelGroupIDs, all
 	return m.GetKey(id)
 }
 
+// UpdateKeyQuota updates quota limit and period for a key
+func (m *Manager) UpdateKeyQuota(id string, quotaLimit int64, quotaPeriod string) (*KeyInfo, error) {
+	if quotaLimit < 0 {
+		quotaLimit = 0
+	}
+	quotaPeriod = strings.ToLower(strings.TrimSpace(quotaPeriod))
+	if quotaPeriod == "" {
+		quotaPeriod = "none"
+	}
+	res, err := m.db.Exec(`
+		UPDATE api_keys
+		SET quota_limit = ?, quota_period = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, quotaLimit, quotaPeriod, id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, fmt.Errorf("api key not found")
+	}
+	m.loadLocalCache()
+	return m.GetKey(id)
+}
+
 // GetKey retrieves a key by ID
 func (m *Manager) GetKey(id string) (*KeyInfo, error) {
 	var ki KeyInfo
@@ -544,9 +605,11 @@ func (m *Manager) GetKey(id string) (*KeyInfo, error) {
 		       COALESCE(model_access_mode, 'all'), 
 		       COALESCE(model_group_ids, '[]'), 
 		       COALESCE(allowed_models, ''), 
+		       COALESCE(quota_limit, 0),
+		       COALESCE(quota_period, 'none'),
 		       created_at, updated_at
 		FROM api_keys WHERE id = ?
-	`, id).Scan(&ki.ID, &rawKey, &ki.Prefix, &ki.Name, &isActiveInt, &mode, &rawGroupIDs, &rawModels, &ki.CreatedAt, &ki.UpdatedAt)
+	`, id).Scan(&ki.ID, &rawKey, &ki.Prefix, &ki.Name, &isActiveInt, &mode, &rawGroupIDs, &rawModels, &ki.QuotaLimit, &ki.QuotaPeriod, &ki.CreatedAt, &ki.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -557,38 +620,41 @@ func (m *Manager) GetKey(id string) (*KeyInfo, error) {
 	ki.ModelGroupIDs = ParseAllowedModels(rawGroupIDs)
 	ki.AllowedModels = ParseAllowedModels(rawModels)
 	ki.manager = m
+	if ki.QuotaLimit > 0 && ki.QuotaPeriod != "" && ki.QuotaPeriod != "none" {
+		usage, _, _ := traffic.GetQuotaUsage(m.db, ki.ID, ki.QuotaPeriod, time.Now())
+		ki.QuotaUsage = usage
+	}
 	return &ki, nil
 }
 
-// ListKeys returns all NineGuard API keys with request and token stats
-func (m *Manager) ListKeys() ([]KeyInfo, error) {
-	query := `
-		SELECT 
-			k.id,
-			k.key,
-			k.prefix,
-			k.name,
-			k.is_active,
-			COALESCE(k.model_access_mode, 'all'),
-			COALESCE(k.model_group_ids, '[]'),
-			COALESCE(k.allowed_models, ''),
-			k.created_at,
-			k.updated_at,
-			COUNT(t.id) as total_requests,
-			COALESCE(SUM(t.total_tokens), 0) as total_tokens,
-			MAX(t.timestamp) as last_used_at
-		FROM api_keys k
-		LEFT JOIN traffic_logs t ON (t.api_key = k.key OR t.api_key_name = k.name OR t.api_key LIKE '%' || k.prefix || '%')
-		GROUP BY k.id
-		ORDER BY k.created_at DESC
-	`
-	rows, err := m.db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+// keyStatsFrom is the FROM clause shared by ListKeys and ListKeysPage: every
+// key with its all-time traffic stats, linked by traffic_logs.api_key_id.
+const keyStatsFrom = `
+	FROM api_keys k
+	LEFT JOIN (
+		SELECT api_key_id,
+		       COUNT(*) AS total_requests,
+		       COALESCE(SUM(total_tokens), 0) AS total_tokens,
+		       MAX(timestamp) AS last_used_at
+		FROM traffic_logs
+		WHERE api_key_id IS NOT NULL
+		GROUP BY api_key_id
+	) s ON s.api_key_id = k.id`
 
-	var list []KeyInfo
+const keyStatsColumns = `
+	k.id, k.key, k.prefix, k.name, k.is_active,
+	COALESCE(k.model_access_mode, 'all'),
+	COALESCE(k.model_group_ids, '[]'),
+	COALESCE(k.allowed_models, ''),
+	COALESCE(k.quota_limit, 0),
+	COALESCE(k.quota_period, 'none'),
+	k.created_at, k.updated_at,
+	COALESCE(s.total_requests, 0),
+	COALESCE(s.total_tokens, 0),
+	s.last_used_at`
+
+func (m *Manager) scanKeyRows(rows *sql.Rows) ([]KeyInfo, error) {
+	list := make([]KeyInfo, 0)
 	for rows.Next() {
 		var ki KeyInfo
 		var rawKey string
@@ -596,19 +662,11 @@ func (m *Manager) ListKeys() ([]KeyInfo, error) {
 		var mode, rawGroupIDs, rawModels string
 		var lastUsed sql.NullString
 		if err := rows.Scan(
-			&ki.ID,
-			&rawKey,
-			&ki.Prefix,
-			&ki.Name,
-			&isActiveInt,
-			&mode,
-			&rawGroupIDs,
-			&rawModels,
-			&ki.CreatedAt,
-			&ki.UpdatedAt,
-			&ki.TotalRequests,
-			&ki.TotalTokens,
-			&lastUsed,
+			&ki.ID, &rawKey, &ki.Prefix, &ki.Name, &isActiveInt,
+			&mode, &rawGroupIDs, &rawModels,
+			&ki.QuotaLimit, &ki.QuotaPeriod,
+			&ki.CreatedAt, &ki.UpdatedAt,
+			&ki.TotalRequests, &ki.TotalTokens, &lastUsed,
 		); err != nil {
 			return nil, err
 		}
@@ -619,12 +677,35 @@ func (m *Manager) ListKeys() ([]KeyInfo, error) {
 		ki.ModelGroupIDs = ParseAllowedModels(rawGroupIDs)
 		ki.AllowedModels = ParseAllowedModels(rawModels)
 		ki.manager = m
-		if lastUsed.Valid {
-			ki.LastUsedAt = &lastUsed.String
-		}
+		ki.LastUsedAt = timeutil.NullTimeString(lastUsed)
 		list = append(list, ki)
 	}
+	return list, rows.Err()
+}
 
+func (m *Manager) enrichQuotaUsage(list []KeyInfo) {
+	now := time.Now().UTC()
+	for i := range list {
+		if list[i].QuotaLimit > 0 && list[i].QuotaPeriod != "" && list[i].QuotaPeriod != "none" {
+			usage, _, _ := traffic.GetQuotaUsage(m.db, list[i].ID, list[i].QuotaPeriod, now)
+			list[i].QuotaUsage = usage
+		}
+	}
+}
+
+// ListKeys returns all NineGuard API keys with all-time request and token
+// stats, newest first. Used by the legacy (unpaged) GET /api/v1/keys.
+func (m *Manager) ListKeys() ([]KeyInfo, error) {
+	rows, err := m.db.Query("SELECT " + keyStatsColumns + keyStatsFrom + " ORDER BY k.created_at DESC, k.id")
+	if err != nil {
+		return nil, err
+	}
+	list, err := m.scanKeyRows(rows)
+	_ = rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	m.enrichQuotaUsage(list)
 	return list, nil
 }
 
@@ -653,6 +734,7 @@ func (m *Manager) DeleteKey(id string) error {
 	if err != nil {
 		return err
 	}
+	_, _ = m.db.Exec("DELETE FROM plugin_bindings WHERE scope_type = 'key' AND scope_id = ?", id)
 
 	if rawKey != "" {
 		m.mu.Lock()

@@ -1,0 +1,46 @@
+# NineGuard + 9router stack.
+# Both ports bind to 127.0.0.1 only. Access via SSH tunnel:
+#   ssh -L 8080:localhost:8080 -L 20128:localhost:20128 user@VM_IP
+# In NineGuard (Gateway -> Providers) register 9router as:
+#   http://9router:20128/v1
+
+services:
+  nineguard:
+    build:
+      context: .
+      args:
+        VERSION: ${NINEGUARD_VERSION:-v1.1.0}
+        COMMIT: ${NINEGUARD_COMMIT:-dev}
+    image: ${NINEGUARD_IMAGE:-nineguard:latest}
+    container_name: nineguard
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - nineguard-data:/data
+    environment:
+      NINEGUARD_PORT: "8080"
+      NINEGUARD_AUTH_ENABLED: "true"
+    depends_on:
+      - 9router
+
+  9router:
+    image: decolua/9router:latest
+    container_name: 9router
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:20128:20128"
+    volumes:
+      - 9router-data:/app/data
+    environment:
+      DATA_DIR: /app/data
+      NODE_ENV: production
+      REQUIRE_API_KEY: "true"
+      INITIAL_PASSWORD: ${NINEROUTER_INITIAL_PASSWORD:?set NINEROUTER_INITIAL_PASSWORD in .env}
+      JWT_SECRET: ${NINEROUTER_JWT_SECRET:?set NINEROUTER_JWT_SECRET in .env}
+      API_KEY_SECRET: ${NINEROUTER_API_KEY_SECRET:?set NINEROUTER_API_KEY_SECRET in .env}
+      MACHINE_ID_SALT: ${NINEROUTER_MACHINE_ID_SALT:?set NINEROUTER_MACHINE_ID_SALT in .env}
+
+volumes:
+  nineguard-data:
+  9router-data:

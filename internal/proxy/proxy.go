@@ -10,11 +10,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"nineguard/internal/keys"
 	"nineguard/internal/models"
+	"nineguard/internal/plugins"
 	"nineguard/internal/providers"
 	"nineguard/internal/traffic"
 )
@@ -24,17 +26,18 @@ type Proxy struct {
 	traffic    *traffic.Manager
 	keys       *keys.Manager
 	providers  *providers.Manager
+	plugins    *plugins.Manager
 	httpClient *http.Client
 }
 
-func NewProxy(mm *models.Manager, tm *traffic.Manager, km *keys.Manager, pm *providers.Manager) (*Proxy, error) {
+func NewProxy(mm *models.Manager, tm *traffic.Manager, km *keys.Manager, pm *providers.Manager, plm *plugins.Manager) (*Proxy, error) {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Minute,
 		IdleConnTimeout:       90 * time.Second,
 	}
 	client := &http.Client{
@@ -46,13 +49,38 @@ func NewProxy(mm *models.Manager, tm *traffic.Manager, km *keys.Manager, pm *pro
 		traffic:    tm,
 		keys:       km,
 		providers:  pm,
+		plugins:    plm,
 		httpClient: client,
 	}, nil
 }
 
+type chatMessage struct {
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
+}
+
 type chatRequest struct {
-	Model  string `json:"model"`
-	Stream bool   `json:"stream"`
+	Model    string        `json:"model"`
+	Stream   bool          `json:"stream"`
+	Messages []chatMessage `json:"messages"`
+}
+
+func detectImages(messages []chatMessage) (bool, int) {
+	count := 0
+	for _, m := range messages {
+		switch parts := m.Content.(type) {
+		case []interface{}:
+			for _, part := range parts {
+				if obj, ok := part.(map[string]interface{}); ok {
+					pType, _ := obj["type"].(string)
+					if pType == "image" || pType == "image_url" || pType == "input_image" || obj["image_url"] != nil {
+						count++
+					}
+				}
+			}
+		}
+	}
+	return count > 0, count
 }
 
 type openAIUsage struct {
@@ -143,6 +171,66 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 2.5 Enforce Token Quotas per API Key (ADR 0005)
+	if p.traffic != nil && keyInfo != nil && keyInfo.QuotaLimit > 0 && keyInfo.QuotaPeriod != "" && keyInfo.QuotaPeriod != "none" {
+		consumed, resetAt, err := p.traffic.GetQuotaUsage(keyInfo.ID, keyInfo.QuotaPeriod, time.Now())
+		if err == nil && consumed >= keyInfo.QuotaLimit {
+			slog.Warn("quota exceeded for api key", "key", keyInfo.Name, "consumed", consumed, "limit", keyInfo.QuotaLimit, "period", keyInfo.QuotaPeriod)
+			retryAfterSecs := int(time.Until(resetAt).Seconds())
+			if retryAfterSecs < 1 {
+				retryAfterSecs = 1
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSecs))
+			w.WriteHeader(http.StatusTooManyRequests)
+
+			durationUntil := time.Until(resetAt)
+			hours := int(durationUntil.Hours())
+			mins := int(durationUntil.Minutes()) % 60
+			resetDesc := fmt.Sprintf("%dh %dm", hours, mins)
+			if hours <= 0 {
+				resetDesc = fmt.Sprintf("%dm", mins)
+			}
+
+			wibLoc, err := time.LoadLocation("Asia/Jakarta")
+			if err != nil {
+				wibLoc = time.FixedZone("WIB", 7*3600)
+			}
+			wibTime := resetAt.In(wibLoc).Format("15:04 WIB")
+			utcTime := resetAt.UTC().Format("15:04 UTC")
+			var atDisplay string
+			if keyInfo.QuotaPeriod == "weekly" || keyInfo.QuotaPeriod == "monthly" {
+				wibDate := resetAt.In(wibLoc).Format("02 Jan")
+				atDisplay = fmt.Sprintf("%s on %s / %s", wibTime, wibDate, utcTime)
+			} else {
+				atDisplay = fmt.Sprintf("%s / %s", wibTime, utcTime)
+			}
+
+			errJSON := fmt.Sprintf(`{
+	"error": {
+		"message": "API key token quota exceeded (%s / %s tokens %s). Resets in %s (at %s).",
+		"type": "insufficient_quota",
+		"code": "quota_exceeded"
+	}
+}`, formatTokenCount(consumed), formatTokenCount(keyInfo.QuotaLimit), keyInfo.QuotaPeriod, resetDesc, atDisplay)
+			_, _ = w.Write([]byte(errJSON))
+
+			errMsg := fmt.Sprintf("quota exceeded (%d/%d tokens %s)", consumed, keyInfo.QuotaLimit, keyInfo.QuotaPeriod)
+			_ = p.traffic.Record(&traffic.LogEntry{
+				APIKey:       maskedKey,
+				APIKeyName:   keyName,
+				APIKeyID:     keyInfo.ID,
+				Model:        "unknown",
+				DurationMs:   int(time.Since(start).Milliseconds()),
+				StatusCode:   http.StatusTooManyRequests,
+				ClientIP:     clientIP,
+				ErrorMessage: &errMsg,
+				Level:        "WARN",
+			})
+			return
+		}
+	}
+
 	// 3. Handle Other Requests (e.g. POST /v1/chat/completions)
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -154,6 +242,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	_ = json.Unmarshal(bodyBytes, &req)
 	modelName := strings.TrimSpace(req.Model)
+	hasImages, imageCount := detectImages(req.Messages)
 
 	// Check Allowed Models for this API Key
 	if modelName != "" && keyInfo != nil && !keyInfo.IsModelAllowed(modelName) {
@@ -174,6 +263,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = p.traffic.Record(&traffic.LogEntry{
 			APIKey:       maskedKey,
 			APIKeyName:   keyName,
+			APIKeyID:     keyInfo.ID,
 			Model:        modelName,
 			DurationMs:   int(time.Since(start).Milliseconds()),
 			StatusCode:   http.StatusForbidden,
@@ -204,6 +294,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = p.traffic.Record(&traffic.LogEntry{
 			APIKey:       maskedKey,
 			APIKeyName:   keyName,
+			APIKeyID:     keyInfo.ID,
 			Model:        modelName,
 			DurationMs:   int(time.Since(start).Milliseconds()),
 			StatusCode:   http.StatusForbidden,
@@ -243,6 +334,84 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 4. Intercept Chat Completions for Plugin Pipeline Execution
+	isChat := (r.Method == http.MethodPost && (r.URL.Path == "/v1/chat/completions" || r.URL.Path == "/chat/completions"))
+	var pluginsApplied, pluginsSkipped, pluginErrors string
+	var tokensSaved, tokensOverhead, pluginMs int
+	var upstreamAppliedHeader string
+
+	if isChat && p.plugins != nil {
+		isBypass := strings.EqualFold(r.Header.Get("X-NineGuard-Plugins"), "off")
+		incomingApplied := r.Header.Get("X-NineGuard-Plugins-Applied")
+
+		var groups []models.ModelGroup
+		if p.models != nil {
+			groups, _ = p.models.ListGroups()
+		}
+
+		pipeRes, appliedHdr, pipeErr := p.plugins.ExecutePipeline(
+			r.Context(),
+			groups,
+			keyInfo.ID,
+			keyName,
+			actualModel,
+			provider.ID,
+			isBypass,
+			incomingApplied,
+			forwardBody,
+		)
+		if pipeErr != nil {
+			slog.Error("plugin pipeline execution error", "error", pipeErr)
+		} else if pipeRes != nil {
+			pluginsApplied = strings.Join(pipeRes.PluginsApplied, ",")
+			pluginsSkipped = strings.Join(pipeRes.PluginsSkipped, ",")
+			pluginErrors = strings.Join(pipeRes.PluginErrors, ",")
+			tokensSaved = pipeRes.TokensSaved
+			tokensOverhead = pipeRes.TokensOverhead
+			pluginMs = int(pipeRes.DurationMs)
+			upstreamAppliedHeader = appliedHdr
+
+			if pipeRes.Rejected {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(pipeRes.RejectCode)
+				errType := "permission_error"
+				errCode := "plugin_rejected"
+				if pipeRes.RejectCode == http.StatusServiceUnavailable {
+					errType = "server_error"
+					errCode = "plugin_unavailable"
+				}
+				errJSON := fmt.Sprintf(`{"error":{"message":%q,"type":%q,"param":null,"code":%q}}`, pipeRes.RejectMessage, errType, errCode)
+				_, _ = w.Write([]byte(errJSON))
+
+				errMsg := pipeRes.RejectMessage
+				if p.traffic != nil {
+					_ = p.traffic.Record(&traffic.LogEntry{
+						APIKey:         maskedKey,
+						APIKeyName:     keyName,
+						APIKeyID:       keyInfo.ID,
+						ProviderID:     provider.ID,
+						Model:          modelName,
+						DurationMs:     int(time.Since(start).Milliseconds()),
+						StatusCode:     pipeRes.RejectCode,
+						ClientIP:       clientIP,
+						Stream:         req.Stream,
+						ErrorMessage:   &errMsg,
+						Level:          "ERROR",
+						PluginsApplied: pluginsApplied,
+						PluginsSkipped: pluginsSkipped,
+						PluginErrors:   pluginErrors,
+						PluginMs:       pluginMs,
+					})
+				}
+				return
+			}
+
+			if len(pipeRes.Body) > 0 {
+				forwardBody = pipeRes.Body
+			}
+		}
+	}
+
 	// Build target URL
 	targetBase := strings.TrimRight(provider.Route, "/")
 	forwardPath := r.URL.Path
@@ -265,6 +434,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			outReq.Header.Add(k, v)
 		}
 	}
+	outReq.Header.Del("X-NineGuard-Plugins") // Never forward bypass header upstream
+	if upstreamAppliedHeader != "" {
+		outReq.Header.Set("X-NineGuard-Plugins-Applied", upstreamAppliedHeader)
+	} else {
+		outReq.Header.Del("X-NineGuard-Plugins-Applied")
+	}
 	if parsedU, err := url.Parse(targetBase); err == nil {
 		outReq.Host = parsedU.Host
 	}
@@ -282,7 +457,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
 			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second,
+			ResponseHeaderTimeout: 5 * time.Minute,
 			IdleConnTimeout:       90 * time.Second,
 		}
 		client = &http.Client{
@@ -301,6 +476,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = p.traffic.Record(&traffic.LogEntry{
 			APIKey:       maskedKey,
 			APIKeyName:   keyName,
+			APIKeyID:     keyInfo.ID,
 			ProviderID:   provider.ID,
 			Model:        modelName,
 			DurationMs:   int(time.Since(start).Milliseconds()),
@@ -320,14 +496,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Add(k, v)
 		}
 	}
+	if pluginsApplied != "" {
+		w.Header().Set("X-NineGuard-Plugins-Applied", pluginsApplied)
+	}
+	if tokensSaved > 0 {
+		w.Header().Set("X-NineGuard-Tokens-Saved", strconv.Itoa(tokensSaved))
+	}
+	w.Header().Add("Access-Control-Expose-Headers", "X-NineGuard-Plugins-Applied, X-NineGuard-Tokens-Saved")
 	w.WriteHeader(resp.StatusCode)
 
 	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 
 	var promptTokens, completionTokens, totalTokens int
 	var responseErrMsg *string
+	var capturedRespBody []byte
 
 	if isSSE {
+		capturedRespBody = []byte("[Streaming SSE Event Stream]")
 		flusher, isFlusher := w.(http.Flusher)
 		reader := bufio.NewReader(resp.Body)
 		chunkCount := 0
@@ -371,6 +556,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		respBody, err := io.ReadAll(resp.Body)
 		if err == nil {
+			capturedRespBody = respBody
 			_, _ = w.Write(respBody)
 
 			var chatResp chatResponse
@@ -387,9 +573,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		durMs := int(time.Since(start).Milliseconds())
-		_ = p.traffic.Record(&traffic.LogEntry{
+		logEntry := &traffic.LogEntry{
 			APIKey:           maskedKey,
 			APIKeyName:       keyName,
+			APIKeyID:         keyInfo.ID,
 			ProviderID:       provider.ID,
 			Model:            modelName,
 			PromptTokens:     promptTokens,
@@ -400,11 +587,54 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ClientIP:         clientIP,
 			Stream:           isSSE || req.Stream,
 			ErrorMessage:     responseErrMsg,
-		})
+			PluginsApplied:   pluginsApplied,
+			PluginsSkipped:   pluginsSkipped,
+			TokensSaved:      tokensSaved,
+			TokensOverhead:   tokensOverhead,
+			PluginErrors:     pluginErrors,
+			PluginMs:         pluginMs,
+			HasImages:        hasImages,
+			ImageCount:       imageCount,
+		}
+		_ = p.traffic.Record(logEntry)
+
+		if p.traffic != nil {
+			recMode := p.traffic.GetRecordPayloadsSetting()
+			shouldRecord := (recMode == "all") || (recMode == "errors_only" && resp.StatusCode >= 400)
+			if shouldRecord && logEntry.ID > 0 {
+				_ = p.traffic.SavePayload(logEntry.ID, bodyBytes, capturedRespBody)
+			}
+		}
+
 		if resp.StatusCode >= 400 {
-			slog.Warn("proxy request failed", "model", modelName, "status", resp.StatusCode, "duration_ms", durMs, "source", "proxy")
+			slog.Warn("proxy request failed", "model", modelName, "status", resp.StatusCode, "duration_ms", durMs, "source", "proxy", "plugins", pluginsApplied)
 		} else {
-			slog.Info("proxy request completed", "model", modelName, "status", resp.StatusCode, "duration_ms", durMs, "tokens", totalTokens, "source", "proxy")
+			if pluginsApplied != "" {
+				slog.Info("proxy request completed", "model", modelName, "status", resp.StatusCode, "duration_ms", durMs, "tokens", totalTokens, "plugins", pluginsApplied, "tokens_saved", tokensSaved, "source", "proxy")
+			} else {
+				slog.Info("proxy request completed", "model", modelName, "status", resp.StatusCode, "duration_ms", durMs, "tokens", totalTokens, "source", "proxy")
+			}
+		}
+
+		heavyThreshold := 8000
+		if p.traffic != nil {
+			heavyThreshold = p.traffic.GetHeavyTokenThreshold()
+		}
+		if totalTokens >= heavyThreshold {
+			slog.Warn("token_spike: heavy token usage detected", "source", "traffic", "key_id", keyInfo.ID, "key_name", keyInfo.Name, "tokens", totalTokens, "threshold", heavyThreshold)
 		}
 	}()
+}
+
+func formatTokenCount(n int64) string {
+	in := strconv.FormatInt(n, 10)
+	var out []byte
+	l := len(in)
+	for i := 0; i < l; i++ {
+		if i > 0 && (l-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, in[i])
+	}
+	return string(out)
 }

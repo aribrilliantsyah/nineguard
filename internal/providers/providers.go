@@ -15,16 +15,18 @@ import (
 )
 
 type Provider struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Route     string    `json:"route"`
-	APIKey    string    `json:"-"`
-	MaskedKey string    `json:"masked_key"`
-	Prefix    string    `json:"prefix"`
-	IsDefault bool      `json:"is_default"`
-	IsActive  bool      `json:"is_active"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID                     string    `json:"id"`
+	Name                   string    `json:"name"`
+	Route                  string    `json:"route"`
+	APIKey                 string    `json:"-"`
+	MaskedKey              string    `json:"masked_key"`
+	Prefix                 string    `json:"prefix"`
+	IsDefault              bool      `json:"is_default"`
+	IsActive               bool      `json:"is_active"`
+	UpstreamTokenSaving    bool      `json:"upstream_token_saving"`
+	UpstreamTokenSavingNote string   `json:"upstream_token_saving_note"`
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
 }
 
 type Manager struct {
@@ -55,7 +57,9 @@ func (m *Manager) ListProviders() ([]Provider, error) {
 	defer m.mu.RUnlock()
 
 	rows, err := m.db.Query(`
-		SELECT id, name, route, COALESCE(api_key, ''), prefix, is_default, is_active, created_at, updated_at
+		SELECT id, name, route, COALESCE(api_key, ''), prefix, is_default, is_active,
+		       COALESCE(upstream_token_saving, 0), COALESCE(upstream_token_saving_note, ''),
+		       created_at, updated_at
 		FROM providers
 		ORDER BY is_default DESC, is_active DESC, name ASC
 	`)
@@ -67,15 +71,17 @@ func (m *Manager) ListProviders() ([]Provider, error) {
 	var list []Provider
 	for rows.Next() {
 		var p Provider
-		var defInt, actInt int
+		var defInt, actInt, utsInt int
 		if err := rows.Scan(
 			&p.ID, &p.Name, &p.Route, &p.APIKey, &p.Prefix,
-			&defInt, &actInt, &p.CreatedAt, &p.UpdatedAt,
+			&defInt, &actInt, &utsInt, &p.UpstreamTokenSavingNote,
+			&p.CreatedAt, &p.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
 		p.IsDefault = (defInt == 1)
 		p.IsActive = (actInt == 1)
+		p.UpstreamTokenSaving = (utsInt == 1)
 		p.MaskedKey = maskKey(p.APIKey)
 		list = append(list, p)
 	}
@@ -92,21 +98,28 @@ func (m *Manager) GetProvider(id string) (*Provider, error) {
 
 func (m *Manager) getProviderUnlocked(id string) (*Provider, error) {
 	var p Provider
-	var defInt, actInt int
+	var defInt, actInt, utsInt int
 	err := m.db.QueryRow(`
-		SELECT id, name, route, COALESCE(api_key, ''), prefix, is_default, is_active, created_at, updated_at
+		SELECT id, name, route, COALESCE(api_key, ''), prefix, is_default, is_active,
+		       COALESCE(upstream_token_saving, 0), COALESCE(upstream_token_saving_note, ''),
+		       created_at, updated_at
 		FROM providers WHERE id = ?
-	`, id).Scan(&p.ID, &p.Name, &p.Route, &p.APIKey, &p.Prefix, &defInt, &actInt, &p.CreatedAt, &p.UpdatedAt)
+	`, id).Scan(&p.ID, &p.Name, &p.Route, &p.APIKey, &p.Prefix, &defInt, &actInt, &utsInt, &p.UpstreamTokenSavingNote, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	p.IsDefault = (defInt == 1)
 	p.IsActive = (actInt == 1)
+	p.UpstreamTokenSaving = (utsInt == 1)
 	p.MaskedKey = maskKey(p.APIKey)
 	return &p, nil
 }
 
 func (m *Manager) CreateProvider(name, route, apiKey, prefix string, isDefault, isActive bool) (*Provider, error) {
+	return m.CreateProviderWithTokenSaving(name, route, apiKey, prefix, isDefault, isActive, false, "")
+}
+
+func (m *Manager) CreateProviderWithTokenSaving(name, route, apiKey, prefix string, isDefault, isActive, upstreamTokenSaving bool, upstreamTokenSavingNote string) (*Provider, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -114,6 +127,10 @@ func (m *Manager) CreateProvider(name, route, apiKey, prefix string, isDefault, 
 	route = strings.TrimRight(strings.TrimSpace(route), "/")
 	apiKey = strings.TrimSpace(apiKey)
 	prefix = strings.ToLower(strings.Trim(strings.TrimSpace(prefix), "/"))
+	upstreamTokenSavingNote = strings.TrimSpace(upstreamTokenSavingNote)
+	if len(upstreamTokenSavingNote) > 200 {
+		upstreamTokenSavingNote = upstreamTokenSavingNote[:200]
+	}
 
 	if name == "" {
 		return nil, fmt.Errorf("provider name is required")
@@ -165,11 +182,16 @@ func (m *Manager) CreateProvider(name, route, apiKey, prefix string, isDefault, 
 		actInt = 1
 	}
 
+	utsInt := 0
+	if upstreamTokenSaving {
+		utsInt = 1
+	}
+
 	now := time.Now()
 	_, err = tx.Exec(`
-		INSERT INTO providers (id, name, route, api_key, prefix, is_default, is_active, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, name, route, apiKey, prefix, defInt, actInt, now, now)
+		INSERT INTO providers (id, name, route, api_key, prefix, is_default, is_active, upstream_token_saving, upstream_token_saving_note, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, name, route, apiKey, prefix, defInt, actInt, utsInt, upstreamTokenSavingNote, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -179,20 +201,33 @@ func (m *Manager) CreateProvider(name, route, apiKey, prefix string, isDefault, 
 	}
 
 	return &Provider{
-		ID:        id,
-		Name:      name,
-		Route:     route,
-		APIKey:    apiKey,
-		MaskedKey: maskKey(apiKey),
-		Prefix:    prefix,
-		IsDefault: isDefault,
-		IsActive:  isActive,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:                     id,
+		Name:                   name,
+		Route:                  route,
+		APIKey:                 apiKey,
+		MaskedKey:              maskKey(apiKey),
+		Prefix:                 prefix,
+		IsDefault:              isDefault,
+		IsActive:               isActive,
+		UpstreamTokenSaving:    upstreamTokenSaving,
+		UpstreamTokenSavingNote: upstreamTokenSavingNote,
+		CreatedAt:              now,
+		UpdatedAt:              now,
 	}, nil
 }
 
 func (m *Manager) UpdateProvider(id, name, route, apiKey, prefix string, isDefault, isActive bool) (*Provider, error) {
+	curr, err := m.GetProvider(id)
+	uts := false
+	utsNote := ""
+	if err == nil && curr != nil {
+		uts = curr.UpstreamTokenSaving
+		utsNote = curr.UpstreamTokenSavingNote
+	}
+	return m.UpdateProviderWithTokenSaving(id, name, route, apiKey, prefix, isDefault, isActive, uts, utsNote)
+}
+
+func (m *Manager) UpdateProviderWithTokenSaving(id, name, route, apiKey, prefix string, isDefault, isActive, upstreamTokenSaving bool, upstreamTokenSavingNote string) (*Provider, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -200,6 +235,10 @@ func (m *Manager) UpdateProvider(id, name, route, apiKey, prefix string, isDefau
 	route = strings.TrimRight(strings.TrimSpace(route), "/")
 	apiKey = strings.TrimSpace(apiKey)
 	prefix = strings.ToLower(strings.Trim(strings.TrimSpace(prefix), "/"))
+	upstreamTokenSavingNote = strings.TrimSpace(upstreamTokenSavingNote)
+	if len(upstreamTokenSavingNote) > 200 {
+		upstreamTokenSavingNote = upstreamTokenSavingNote[:200]
+	}
 
 	if name == "" {
 		return nil, fmt.Errorf("provider name is required")
@@ -237,10 +276,15 @@ func (m *Manager) UpdateProvider(id, name, route, apiKey, prefix string, isDefau
 		actInt = 1
 	}
 
+	utsInt := 0
+	if upstreamTokenSaving {
+		utsInt = 1
+	}
+
 	_, err = tx.Exec(`
-		UPDATE providers SET name = ?, route = ?, api_key = ?, prefix = ?, is_default = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+		UPDATE providers SET name = ?, route = ?, api_key = ?, prefix = ?, is_default = ?, is_active = ?, upstream_token_saving = ?, upstream_token_saving_note = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, name, route, apiKey, prefix, defInt, actInt, id)
+	`, name, route, apiKey, prefix, defInt, actInt, utsInt, upstreamTokenSavingNote, id)
 	if err != nil {
 		return nil, err
 	}

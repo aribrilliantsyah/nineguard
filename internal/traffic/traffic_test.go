@@ -184,17 +184,17 @@ func TestDateFilterParameterized(t *testing.T) {
 	defer cleanup()
 
 	// 1. Verify buildDateFilter returns ? placeholders instead of raw string interpolation
-	clause, args := buildDateFilter("", "2026-01-01", "2026-01-02")
-	if clause != "timestamp >= datetime(?) AND timestamp <= datetime(?)" {
+	clause, args := buildDateFilter("", "2026-01-01", "2026-01-02", nil)
+	if clause != "timestamp >= datetime(?) AND timestamp < datetime(?)" {
 		t.Fatalf("expected parameterized clause with '?', got %q", clause)
 	}
-	if len(args) != 2 || args[0] != "2026-01-01 00:00:00" || args[1] != "2026-01-02 23:59:59" {
+	if len(args) != 2 || args[0] != "2026-01-01 00:00:00" || args[1] != "2026-01-03 00:00:00" {
 		t.Fatalf("unexpected date filter args: %v", args)
 	}
 
 	// 2. Verify buildPrevDateFilter returns ? placeholders
-	prevClause, prevArgs := buildPrevDateFilter("", "2026-01-01", "2026-01-02")
-	if prevClause != "timestamp >= datetime(?) AND timestamp <= datetime(?)" {
+	prevClause, prevArgs := buildPrevDateFilter("", "2026-01-01", "2026-01-02", nil)
+	if prevClause != "timestamp >= datetime(?) AND timestamp < datetime(?)" {
 		t.Fatalf("expected parameterized prev clause with '?', got %q", prevClause)
 	}
 	if len(prevArgs) != 2 {
@@ -213,7 +213,7 @@ func TestDateFilterParameterized(t *testing.T) {
 		ClientIP:    "127.0.0.1",
 	})
 
-	stats, err := mgr.GetDashboardStats("today", "", "")
+	stats, err := mgr.GetDashboardStats("today", "", "", nil)
 	if err != nil {
 		t.Fatalf("GetDashboardStats failed: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestDateFilterParameterized(t *testing.T) {
 		t.Errorf("expected 1 request, got %d", stats.TotalRequests)
 	}
 
-	report, err := mgr.GetUsageReports("today", "", "")
+	report, err := mgr.GetUsageReports("today", "", "", nil)
 	if err != nil {
 		t.Fatalf("GetUsageReports failed: %v", err)
 	}
@@ -229,3 +229,50 @@ func TestDateFilterParameterized(t *testing.T) {
 		t.Errorf("expected 1 request in usage report, got %d", report.TotalRequests)
 	}
 }
+
+func TestTrafficLog_PluginTelemetry(t *testing.T) {
+	mgr, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	entry := &LogEntry{
+		APIKey:         "sk-ng-test1234",
+		APIKeyName:     "TestKey",
+		Model:          "gpt-4o",
+		StatusCode:     200,
+		TokensSaved:    128,
+		TokensOverhead: 15,
+		PluginsApplied: "headroom,caveman",
+		PluginsSkipped: "ponytail:marker_present",
+		PluginErrors:   "",
+		PluginMs:       45,
+	}
+	if err := mgr.Record(entry); err != nil {
+		t.Fatalf("failed to record entry: %v", err)
+	}
+
+	stats, err := mgr.GetDashboardStats("all", "", "", nil)
+	if err != nil {
+		t.Fatalf("failed to get stats: %v", err)
+	}
+	if stats.TokensSaved < 128 {
+		t.Fatalf("expected at least 128 tokens saved in stats, got %d", stats.TokensSaved)
+	}
+
+	logs, _, err := mgr.QueryLogs(FilterParams{Period: "all", Limit: 10})
+	if err != nil || len(logs) == 0 {
+		t.Fatalf("failed to query logs: %v", err)
+	}
+	found := logs[0]
+	if found.TokensSaved != 128 || found.TokensOverhead != 15 || found.PluginsApplied != "headroom,caveman" || found.PluginMs != 45 {
+		t.Fatalf("unexpected plugin telemetry on query logs: %+v", found)
+	}
+
+	rep, err := mgr.GetUsageReports("all", "", "", nil)
+	if err != nil {
+		t.Fatalf("failed to get usage report: %v", err)
+	}
+	if rep.TokensSaved < 128 {
+		t.Fatalf("expected at least 128 tokens saved in usage report, got %d", rep.TokensSaved)
+	}
+}
+
