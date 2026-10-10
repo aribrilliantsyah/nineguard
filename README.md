@@ -36,6 +36,26 @@ Dalam ekosistem AI engineering, tim dan developer sering menggunakan berbagai mo
 
 ---
 
+## Tampilan Antarmuka (Screenshots)
+
+### Web (Desktop)
+
+| Dashboard | Traffic Explorer |
+| --- | --- |
+| ![Dashboard](docs/images/web-dashboard.png) | ![Traffic Explorer](docs/images/web-traffic.png) |
+
+![Plugins & Token Savers](docs/images/web-plugins.png)
+
+### Mobile
+
+Di layar ≤ 860px, sidebar diganti **Bottom Navigation**: Dashboard, Traffic, Keys, Providers, dan **More** (sheet berisi halaman lainnya, Search, dan Theme).
+
+| Dashboard | Plugins + menu More | Mode terang |
+| --- | --- | --- |
+| <img src="docs/images/mobile-dashboard.png" width="240" alt="Dashboard mobile"> | <img src="docs/images/mobile-more.png" width="240" alt="Menu More"> | <img src="docs/images/mobile-light.png" width="240" alt="Mode terang"> |
+
+---
+
 ## Arsitektur: Bagaimana NineGuard Bekerja?
 
 NineGuard bertindak sebagai gateway tunggal antara AI Coding Agents dan Upstream Providers:

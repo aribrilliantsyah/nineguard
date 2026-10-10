@@ -1,6 +1,6 @@
 // Plugins view: Manage token savers, prompt injectors, HTTP filters, pipeline order, and scope bindings.
 import { api } from '../api.js';
-import { h, icon, toast, formDialog, confirmDialog } from '../ui.js';
+import { h, icon, toast, formDialog, confirmDialog, copy } from '../ui.js';
 import { store } from '../state.js';
 import { scopeLabel, scopeSubLabel, formatInheritText, sortPipeline, warningBannerText } from '../pluginhelpers.js';
 
@@ -84,6 +84,48 @@ function promptSecretGuardMode(currentAction = 'block', onSave) {
       await onSave(selected);
     }
   });
+}
+
+// Shows a plugin secret once, with a Copy button.
+function showSecretDialog(secret, title = 'Plugin shared secret') {
+  const field = h('input', { class: 'input', value: secret, readOnly: true, 'aria-label': 'Plugin secret', style: { flex: '1', minWidth: '0', fontFamily: 'var(--font)' } });
+  field.addEventListener('focus', () => field.select());
+  return formDialog({
+    title,
+    body: h('div', null,
+      h('p', null, 'Copy this secret now. It will not be shown again. Your plugin must check it in the X-NineGuard-Plugin-Secret header.'),
+      h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
+        field,
+        h('button', { class: 'btn', type: 'button', onclick: () => copy(secret, 'Secret copied') }, icon('copy'), 'Copy'))),
+    submitText: 'Done',
+    cancel: false,
+    onSubmit: async () => true,
+  });
+}
+
+// Result line for an endpoint test: reachable with latency, or what went wrong.
+async function probeEndpoint(url, timeoutMs, out, btn) {
+  const target = (url || '').trim();
+  if (!/^https?:\/\//i.test(target)) {
+    out.className = 'form-error';
+    out.textContent = 'Enter a URL that starts with http:// or https:// first.';
+    return;
+  }
+  btn.disabled = true;
+  out.className = 'muted';
+  out.textContent = 'Testing...';
+  try {
+    const res = await api.post('/plugins/test-url', { url: target, timeout_ms: parseInt(timeoutMs || '3000', 10) });
+    out.className = 'muted';
+    out.style.color = 'var(--ok)';
+    out.textContent = `Reachable, answered in ${res.latency_ms || 0}ms`;
+  } catch (e) {
+    out.className = 'form-error';
+    out.style.color = '';
+    out.textContent = `Not reachable: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 export function mount(root) {
@@ -298,7 +340,7 @@ export function mount(root) {
 
       return h('div', { class: 'card', style: { padding: '14px' } },
         h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' } },
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
             h('span', { class: 'badge', style: { fontWeight: 'bold' } }, `#${p.pipeline_order}`),
             h('h3', { style: { margin: 0, fontSize: '15px' } }, p.name),
             h('span', { class: 'badge' }, p.kind),
@@ -306,7 +348,7 @@ export function mount(root) {
             policyBadge,
             bypassBadge
           ),
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
             moveUpBtn, moveDownBtn,
             toggleGlobBtn,
             testBtn, latencyLabel,
@@ -832,10 +874,96 @@ export function mount(root) {
       );
     }
 
+    // HTTP plugins: edit connection details, rotate the secret, or delete (admin only).
+    let httpSection = null;
+    if (p.kind === 'http' && isAdmin()) {
+      const nameIn = h('input', { class: 'input', value: p.name || '', 'aria-label': 'Name' });
+      const urlIn = h('input', { class: 'input', value: p.url || '', spellcheck: 'false', 'aria-label': 'Endpoint URL' });
+      const timeoutIn = h('input', { class: 'input', type: 'number', min: '100', value: String(p.timeout_ms || 3000), 'aria-label': 'Timeout in milliseconds' });
+      const policyIn = h('select', { class: 'select wide', 'aria-label': 'Failure policy' },
+        h('option', { value: 'open', selected: p.failure_policy !== 'closed' }, 'Fail Open (skip on error)'),
+        h('option', { value: 'closed', selected: p.failure_policy === 'closed' }, 'Fail Closed (block request on error)'));
+      const summaryIn = h('input', { class: 'input', value: p.summary || '', placeholder: 'What this plugin does (optional)', 'aria-label': 'Summary' });
+      const out = h('span', { class: 'muted', style: { fontSize: '11.5px' }, 'aria-live': 'polite' });
+      const testBtn2 = h('button', { class: 'btn btn-sm', type: 'button' }, icon('play'), 'Test endpoint');
+      testBtn2.addEventListener('click', () => probeEndpoint(urlIn.value, timeoutIn.value, out, testBtn2));
+      const saveBtn = h('button', { class: 'btn btn-sm btn-primary', type: 'button' }, 'Save changes');
+      saveBtn.addEventListener('click', async () => {
+        saveBtn.disabled = true;
+        try {
+          await api.put(`/plugins/${encodeURIComponent(p.id)}`, {
+            name: nameIn.value.trim(),
+            url: urlIn.value.trim(),
+            timeout_ms: parseInt(timeoutIn.value || '3000', 10),
+            failure_policy: policyIn.value,
+            category: p.category,
+            bypassable: policyIn.value !== 'closed' && p.bypassable !== false,
+            summary: summaryIn.value.trim(),
+          });
+          toast('Plugin saved', 'ok');
+          reload();
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          saveBtn.disabled = false;
+        }
+      });
+      const rotateBtn = h('button', { class: 'btn btn-sm', type: 'button' }, 'Rotate secret');
+      rotateBtn.addEventListener('click', () => {
+        confirmDialog({
+          title: `Rotate secret for ${p.name}?`,
+          message: 'The old secret stops working at once. Update your plugin with the new one, or requests to it will fail.',
+          confirmText: 'Rotate secret',
+          danger: true,
+          onConfirm: async () => {
+            try {
+              const res = await api.post(`/plugins/${encodeURIComponent(p.id)}/rotate-secret`);
+              showSecretDialog(res.secret, 'New plugin secret');
+            } catch (e) {
+              toast(e.message, 'error');
+              throw e;
+            }
+          },
+        });
+      });
+      const deleteBtn = h('button', { class: 'btn btn-sm btn-danger', type: 'button' }, icon('trash'), 'Delete plugin');
+      deleteBtn.addEventListener('click', () => {
+        confirmDialog({
+          title: `Delete ${p.name}?`,
+          message: 'This removes the plugin and all its scope rules. Requests stop going through it. This cannot be undone.',
+          confirmText: 'Delete plugin',
+          danger: true,
+          typeToConfirm: p.name,
+          onConfirm: async () => {
+            try {
+              await api.del(`/plugins/${encodeURIComponent(p.id)}`);
+              toast('Plugin deleted', 'ok');
+              document.querySelector('.dialog')?.closest('.overlay')?.remove();
+              reload();
+            } catch (e) {
+              toast(e.message, 'error');
+              throw e;
+            }
+          },
+        });
+      });
+      const row = (label, el) => h('label', { class: 'field', style: { marginBottom: '8px' } }, h('span', null, label), el);
+      httpSection = h('div', { style: { marginBottom: '16px', padding: '14px', background: 'var(--hover)', borderRadius: '6px' } },
+        h('h4', { style: { margin: '0 0 8px', fontSize: '13px' } }, 'Connection'),
+        row('Name', nameIn),
+        row('Endpoint URL', urlIn),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', margin: '0 0 8px' } }, testBtn2, out),
+        row('Timeout (ms)', timeoutIn),
+        row('Failure policy', policyIn),
+        row('Summary', summaryIn),
+        h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '4px' } }, saveBtn, rotateBtn, deleteBtn));
+    }
+
     formDialog({
       title: `Configure ${p.name}`,
       wide: true,
       body: h('div', null,
+        httpSection,
         settingsSection,
         h('h4', { style: { margin: '0 0 4px', fontSize: '13px' } }, 'Base Rule (Default for All Requests)'),
         globalPanel,
@@ -854,19 +982,20 @@ export function mount(root) {
 
   // ── Register HTTP Plugin Modal ──
   function openRegisterModal() {
-    let nameVal = '';
-    let urlVal = '';
-    let catVal = 'other';
-    let timeoutVal = '3000';
-    let policyVal = 'open';
-    let bypassVal = true;
-    let summaryVal = '';
+    const urlInput = h('input', { class: 'input', name: 'url', type: 'text', required: true, autocomplete: 'off', spellcheck: 'false', placeholder: 'http://127.0.0.1:9090/transform' });
+    const testOut = h('span', { class: 'muted', style: { fontSize: '11.5px' }, 'aria-live': 'polite' });
+    const testEndpointBtn = h('button', { class: 'btn btn-sm', type: 'button' }, icon('play'), 'Test endpoint');
+    testEndpointBtn.addEventListener('click', () => {
+      const t = document.querySelector('.dialog [name=timeout_ms]');
+      probeEndpoint(urlInput.value, t ? t.value : '3000', testOut, testEndpointBtn);
+    });
 
     formDialog({
       title: 'Register HTTP Plugin',
       fields: [
-        { label: 'Name', name: 'name', placeholder: 'e.g. PII Filter', required: true },
-        { label: 'Endpoint URL', name: 'url', placeholder: 'http://127.0.0.1:9090/transform', required: true },
+        { label: 'Name', name: 'name', placeholder: 'e.g. PII Filter', required: true, hint: 'Shown in the plugin list and in traffic logs.' },
+        { label: 'Endpoint URL', name: 'url', input: urlInput, hint: 'NineGuard sends each request here as JSON. Must start with http:// or https://.' },
+        { node: h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' } }, testEndpointBtn, testOut) },
         {
           label: 'Category', name: 'category', type: 'select',
           options: [
@@ -875,7 +1004,7 @@ export function mount(root) {
             { value: 'output_style', label: 'Output Style' },
           ]
         },
-        { label: 'Timeout (ms)', name: 'timeout_ms', type: 'number', value: '3000' },
+        { label: 'Timeout (ms)', name: 'timeout_ms', type: 'number', value: '3000', hint: 'How long to wait for the plugin before the failure policy applies.' },
         {
           label: 'Failure Policy', name: 'failure_policy', type: 'select',
           options: [
@@ -883,7 +1012,7 @@ export function mount(root) {
             { value: 'closed', label: 'Fail Closed (block request on error)' },
           ]
         },
-        { label: 'Summary', name: 'summary', placeholder: 'Optional description of what this plugin transforms' },
+        { label: 'Summary', name: 'summary', required: false, placeholder: 'What this plugin does (optional)' },
       ],
       onSubmit: async (data) => {
         try {
@@ -899,19 +1028,7 @@ export function mount(root) {
           toast('Plugin registered');
           reload();
 
-          // Show secret modal once
-          if (res.secret) {
-            formDialog({
-              title: 'Plugin Shared Secret',
-              body: h('div', null,
-                h('p', null, 'Copy this secret now. It will not be shown again:'),
-                h('input', { class: 'input', value: res.secret, readOnly: true, style: { width: '100%', fontFamily: 'monospace' } })
-              ),
-              submitText: 'I have copied the secret',
-              cancel: false,
-              onSubmit: async () => true
-            });
-          }
+          if (res.secret) showSecretDialog(res.secret);
           return true;
         } catch (e) {
           toast(e.message, 'error');

@@ -620,6 +620,35 @@ func (h *Handler) DeleteModel(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// RemovedModelsSummary serves GET /api/v1/models/removed-summary for the dashboard card.
+func (h *Handler) RemovedModelsSummary(w http.ResponseWriter, r *http.Request) {
+	summary, err := h.models.GetRemovedSummary()
+	if err != nil {
+		slog.Error("failed to build removed models summary", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to load removed models summary")
+		return
+	}
+	jsonResponse(w, http.StatusOK, summary)
+}
+
+// ClearRemovedModels serves POST /api/v1/models/clear-removed: hard-deletes all Removed Models.
+func (h *Handler) ClearRemovedModels(w http.ResponseWriter, r *http.Request) {
+	n, err := h.models.ClearRemovedModels()
+	if err != nil {
+		slog.Error("failed to clear removed models", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to clear removed models")
+		return
+	}
+	var actorID int64
+	var username string
+	if u := auth.UserFromContext(r.Context()); u != nil {
+		actorID = u.ID
+		username = u.Username
+	}
+	h.logAudit(r, actorID, username, "model.clear_removed", "", "success", fmt.Sprintf("deleted=%d", n))
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "deleted": n})
+}
+
 // ── Model Groups Handlers ──
 
 func (h *Handler) ListModelGroups(w http.ResponseWriter, r *http.Request) {
@@ -710,6 +739,24 @@ func (h *Handler) UpdateModelGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, group)
+}
+
+// RemoveUnavailableFromGroup serves POST /api/v1/model-groups/{id}/remove-unavailable.
+// It drops entries naming a Removed Model from that one group (ADR 0006).
+func (h *Handler) RemoveUnavailableFromGroup(w http.ResponseWriter, r *http.Request) {
+	if h.models == nil {
+		jsonError(w, http.StatusBadRequest, "Models manager not available")
+		return
+	}
+	group, removed, err := h.models.RemoveUnavailableEntries(r.PathValue("id"))
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if h.keys != nil {
+		h.keys.ReloadGroupCache()
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"group": group, "removed": removed})
 }
 
 func (h *Handler) DeleteModelGroup(w http.ResponseWriter, r *http.Request) {

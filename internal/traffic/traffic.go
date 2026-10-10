@@ -37,6 +37,8 @@ type LogEntry struct {
 	PluginMs         int       `json:"plugin_ms"`
 	HasImages        bool      `json:"has_images"`
 	ImageCount       int       `json:"image_count"`
+	// ModelRemoved is true when the model of this row is a Removed Model (ADR 0006).
+	ModelRemoved bool `json:"model_removed"`
 }
 
 type FilterParams struct {
@@ -216,6 +218,7 @@ type KeyUsageBreakdown struct {
 type ModelUsageBreakdown struct {
 	Model            string            `json:"model"`
 	Enabled          bool              `json:"enabled"`
+	Removed          bool              `json:"removed"`
 	TotalTokens      int               `json:"total_tokens"`
 	PromptTokens     int               `json:"prompt_tokens"`
 	CompletionTokens int               `json:"completion_tokens"`
@@ -686,7 +689,8 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 		       duration_ms, status_code, client_ip, stream, error_message, COALESCE(level, ''),
 		       COALESCE(plugins_skipped, ''), COALESCE(plugins_applied, ''), COALESCE(tokens_saved, 0), COALESCE(tokens_overhead, 0),
 		       COALESCE(plugin_errors, ''), COALESCE(plugin_ms, 0),
-		       COALESCE(has_images, 0), COALESCE(image_count, 0)
+		       COALESCE(has_images, 0), COALESCE(image_count, 0),
+		       EXISTS(SELECT 1 FROM models rm WHERE rm.id = traffic_logs.model AND rm.removed_at IS NOT NULL)
 		FROM traffic_logs
 		%s
 		ORDER BY id DESC
@@ -707,13 +711,14 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 		var errMsg sql.NullString
 		var lvlStr string
 		var hasImgInt, imgCount int
+		var removedInt int
 		if err := rows.Scan(
 			&e.ID, &e.Timestamp, &e.APIKey, &e.APIKeyName, &e.APIKeyID, &e.ProviderID, &e.Model,
 			&e.PromptTokens, &e.CompletionTokens, &e.TotalTokens,
 			&e.DurationMs, &e.StatusCode, &e.ClientIP, &streamInt, &errMsg, &lvlStr,
 			&e.PluginsSkipped, &e.PluginsApplied, &e.TokensSaved, &e.TokensOverhead,
 			&e.PluginErrors, &e.PluginMs,
-			&hasImgInt, &imgCount,
+			&hasImgInt, &imgCount, &removedInt,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -724,6 +729,7 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 		e.Level = lvlStr
 		e.HasImages = (hasImgInt == 1)
 		e.ImageCount = imgCount
+		e.ModelRemoved = (removedInt == 1)
 		e.ComputeLevelAndMessage()
 		list = append(list, e)
 	}
@@ -1632,6 +1638,7 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 		SELECT 
 			t.model,
 			COALESCE(m.enabled, 1) as enabled,
+			CASE WHEN m.removed_at IS NOT NULL THEN 1 ELSE 0 END as removed,
 			COALESCE(SUM(t.total_tokens), 0) as tot_toks,
 			COALESCE(SUM(t.prompt_tokens), 0) as p_toks,
 			COALESCE(SUM(t.completion_tokens), 0) as c_toks,
@@ -1652,13 +1659,14 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 		defer mRows.Close()
 		for mRows.Next() {
 			var mb ModelUsageBreakdown
-			var enInt int
+			var enInt, rmInt int
 			if err := mRows.Scan(
-				&mb.Model, &enInt, &mb.TotalTokens, &mb.PromptTokens, &mb.CompletionTokens,
+				&mb.Model, &enInt, &rmInt, &mb.TotalTokens, &mb.PromptTokens, &mb.CompletionTokens,
 				&mb.TotalRequests, &mb.SuccessRequests, &mb.ErrorRequests, &mb.BlockedRequests,
 				&mb.AvgDurationMs,
 			); err == nil {
 				mb.Enabled = (enInt == 1)
+				mb.Removed = (rmInt == 1)
 				if report.TotalTokens > 0 {
 					mb.TokenShare = float64(mb.TotalTokens) / float64(report.TotalTokens) * 100
 				}

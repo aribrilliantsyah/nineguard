@@ -47,6 +47,11 @@ func maskKey(key string) string {
 		if len(key) == 0 {
 			return "none"
 		}
+		// Showing the last 2 chars of a very short key reveals all or most of it (and slicing a
+		// 1-char key panics), so keys of 4 chars or fewer show no tail.
+		if len(key) <= 4 {
+			return "sk-..."
+		}
 		return "sk-..." + key[len(key)-2:]
 	}
 	return key[:6] + "..." + key[len(key)-4:]

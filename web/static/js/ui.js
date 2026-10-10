@@ -300,7 +300,7 @@ export function formDialog({ title, body, fields = [], submitText = 'Save', dang
           ariaLabel: f.label || '',
         });
       } else if (f.type === 'select') {
-        input = h('select', { class: 'select wide', name: f.name }, f.options.map(([v, l]) => h('option', { value: v }, l)));
+        input = h('select', { class: 'select wide', name: f.name }, (f.options || []).map((o) => (Array.isArray(o) ? o : [o.value, o.label])).map(([v, l]) => h('option', { value: v }, l)));
         if (f.value != null) input.value = f.value;
       } else {
         input = h('input', {

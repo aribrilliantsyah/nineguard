@@ -490,6 +490,28 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	// A Removed Model that upstream rejects as unknown gets a clear 404 instead of the
+	// provider's generic error (ADR 0006). Other statuses (429, 5xx...) pass through untouched.
+	if (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusBadRequest) &&
+		p.models != nil && modelName != "" && p.models.IsModelRemoved(modelName) {
+		upstreamBody, _ := io.ReadAll(resp.Body)
+		msg := fmt.Sprintf("Model '%s' was removed from its provider and is no longer available.", modelName)
+		rewritten, _ := json.Marshal(map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": msg,
+				"type":    "invalid_request_error",
+				"param":   "model",
+				"code":    "model_removed",
+			},
+		})
+		slog.Warn("upstream rejected a removed model", "model", modelName, "upstream_status", resp.StatusCode, "upstream_body", truncateForLog(upstreamBody))
+		resp.StatusCode = http.StatusNotFound
+		resp.Header.Del("Content-Encoding")
+		resp.Header.Del("Content-Length")
+		resp.Header.Set("Content-Type", "application/json")
+		resp.Body = io.NopCloser(bytes.NewReader(rewritten))
+	}
+
 	// Copy response headers
 	for k, vv := range resp.Header {
 		for _, v := range vv {
@@ -624,6 +646,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("token_spike: heavy token usage detected", "source", "traffic", "key_id", keyInfo.ID, "key_name", keyInfo.Name, "tokens", totalTokens, "threshold", heavyThreshold)
 		}
 	}()
+}
+
+func truncateForLog(b []byte) string {
+	const max = 300
+	if len(b) > max {
+		return string(b[:max]) + "..."
+	}
+	return string(b)
 }
 
 func formatTokenCount(n int64) string {

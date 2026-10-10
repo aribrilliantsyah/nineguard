@@ -13,6 +13,18 @@ A named set of model IDs or patterns. Serves two independent roles:
 **Provider**
 An upstream OpenAI-compatible endpoint, addressed through its routing prefix (e.g. `9router/...`).
 
+**Model**
+A model ID NineGuard knows about, prefixed by its Provider (e.g. `9router/gpt-4o`). The ID is unique across Providers.
+
+**Disabled Model**
+A Model an admin switched off. An admin choice, independent of what the Provider offers.
+
+**Removed Model**
+A Model its Provider stopped listing. Detected by sync, never set by an admin. Its record is kept, so old traffic can still be tagged "removed". Clears itself when the Provider lists the Model again. Independent of Disabled Model.
+
+**Unavailable Entry**
+A Model Group member that names a Removed Model. A count label in the group view only. Wildcard members are never Unavailable Entries.
+
 ## Plugins
 
 **Plugin**

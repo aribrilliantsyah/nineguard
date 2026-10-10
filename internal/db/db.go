@@ -201,6 +201,7 @@ func (d *DB) migrate() error {
 	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN provider_id TEXT")
 	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN level TEXT DEFAULT ''")
 	_, _ = d.Exec("ALTER TABLE models ADD COLUMN provider_id TEXT DEFAULT ''")
+	_, _ = d.Exec("ALTER TABLE models ADD COLUMN removed_at DATETIME")
 	_, _ = d.Exec("DELETE FROM providers WHERE id = 'dak' AND name = 'DAK Upstream'")
 	_, _ = d.Exec("DELETE FROM models WHERE provider_id = 'dak' OR id LIKE 'dak/%'")
 	_, _ = d.Exec("CREATE INDEX IF NOT EXISTS idx_traffic_key_name ON traffic_logs(api_key_name)")

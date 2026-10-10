@@ -630,6 +630,7 @@ export function mount(root) {
           h('div', { class: 'col-entity', style: { display: 'flex', alignItems: 'center', gap: '10px' } },
             chevron,
             h('span', { style: { fontWeight: 'bold', fontSize: '13.5px' } }, m.model),
+            m.removed ? h('span', { class: 'badge removed removed-tag', title: 'This model was removed from its provider. Usage history is kept.' }, 'removed') : null,
             m.enabled
               ? h('span', { class: 'badge ok', style: { fontSize: '10px' } }, 'Active')
               : h('span', { class: 'badge err', style: { fontSize: '10px' } }, 'Disabled')

@@ -141,6 +141,8 @@ func main() {
 	// 4. Handlers
 	h := handler.New(authMgr, modelsMgr, trafficMgr, syslogMgr, keysMgr, providersMgr, revProxy, routerTarget)
 	h.SetPlugins(pluginsMgr)
+	// Key allow lists skip Removed Models, so refresh them after each sync (ADR 0006).
+	modelsMgr.SetOnSynced(keysMgr.ReloadGroupCache)
 
 	// Background Auto-Sync: automatically fetch models from active upstream providers
 	go func() {
@@ -236,6 +238,8 @@ func main() {
 	mux.HandleFunc("GET /api/v1/models", h.ListModels)
 	mux.HandleFunc("POST /api/v1/models/toggle", h.ToggleModel)
 	mux.HandleFunc("POST /api/v1/models/sync", h.SyncModels)
+	mux.HandleFunc("GET /api/v1/models/removed-summary", h.RemovedModelsSummary)
+	mux.HandleFunc("POST /api/v1/models/clear-removed", h.ClearRemovedModels)
 	mux.HandleFunc("DELETE /api/v1/models/{id...}", h.DeleteModel)
 
 	mux.HandleFunc("GET /api/v1/model-groups", h.ListModelGroups)
@@ -244,6 +248,7 @@ func main() {
 	mux.HandleFunc("PUT /api/v1/model-groups/{id}", h.UpdateModelGroup)
 	mux.HandleFunc("POST /api/v1/model-groups/{id}", h.UpdateModelGroup)
 	mux.HandleFunc("DELETE /api/v1/model-groups/{id}", h.DeleteModelGroup)
+	mux.HandleFunc("POST /api/v1/model-groups/{id}/remove-unavailable", h.RemoveUnavailableFromGroup)
 
 	mux.HandleFunc("GET /api/v1/traffic", h.GetTrafficLogs)
 	mux.HandleFunc("GET /api/v1/traffic/volume", h.GetTrafficVolume)
@@ -286,6 +291,7 @@ func main() {
 	mux.HandleFunc("PUT /api/v1/plugins/{id}", h.UpdatePlugin)
 	mux.HandleFunc("POST /api/v1/plugins/{id}/rotate-secret", h.RotatePluginSecret)
 	mux.HandleFunc("DELETE /api/v1/plugins/{id}", h.DeletePlugin)
+	mux.HandleFunc("POST /api/v1/plugins/test-url", h.TestPluginURL)
 	mux.HandleFunc("POST /api/v1/plugins/{id}/test", h.TestPlugin)
 	mux.HandleFunc("PUT /api/v1/plugins/order", h.UpdatePipelineOrder)
 	mux.HandleFunc("GET /api/v1/plugins/bindings", h.ListScopeBindings)

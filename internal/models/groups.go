@@ -16,6 +16,9 @@ type ModelGroup struct {
 	Description string    `json:"description"`
 	Models      []string  `json:"models"`
 	ModelsCount int       `json:"models_count"`
+	// UnavailableModels lists entries that name a Removed Model (ADR 0006).
+	UnavailableModels []string `json:"unavailable_models"`
+	UnavailableCount  int      `json:"unavailable_count"`
 	KeysCount   int       `json:"keys_count"`
 	Priority    int       `json:"priority"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -71,6 +74,39 @@ func SerializeJSONStringArray(items []string) string {
 	return string(b)
 }
 
+// markUnavailable fills the unavailable fields of a group from an availability snapshot.
+func (g *ModelGroup) markUnavailable(a *Availability) {
+	g.UnavailableModels = []string{}
+	for _, e := range g.Models {
+		if a.IsUnavailable(e) {
+			g.UnavailableModels = append(g.UnavailableModels, e)
+		}
+	}
+	g.UnavailableCount = len(g.UnavailableModels)
+}
+
+// RemoveUnavailableEntries deletes the entries that name a Removed Model from one group.
+// It returns the updated group and how many entries were dropped.
+func (m *Manager) RemoveUnavailableEntries(id string) (*ModelGroup, int, error) {
+	g, err := m.GetGroup(id)
+	if err != nil {
+		return nil, 0, err
+	}
+	if g.UnavailableCount == 0 {
+		return g, 0, nil
+	}
+	a, err := LoadAvailability(m.db)
+	if err != nil {
+		return nil, 0, err
+	}
+	kept := a.FilterAvailable(g.Models)
+	updated, err := m.UpdateGroupWithPriority(g.ID, g.Name, g.Description, kept, g.Priority)
+	if err != nil {
+		return nil, 0, err
+	}
+	return updated, len(g.Models) - len(kept), nil
+}
+
 func generateGroupID() string {
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
@@ -79,6 +115,9 @@ func generateGroupID() string {
 
 // ListGroups returns all model groups with their models, models count, and count of linked API keys
 func (m *Manager) ListGroups() ([]ModelGroup, error) {
+	// Load before opening cursors below: the database holds a single connection.
+	avail, _ := LoadAvailability(m.db)
+
 	// Tally keys count per group ID
 	keyCounts := make(map[string]int)
 	kRows, err := m.db.Query("SELECT COALESCE(model_group_ids, '[]') FROM api_keys WHERE model_access_mode = 'group'")
@@ -110,6 +149,7 @@ func (m *Manager) ListGroups() ([]ModelGroup, error) {
 		}
 		g.Models = ParseJSONStringArray(rawModels)
 		g.ModelsCount = len(g.Models)
+		g.markUnavailable(avail)
 		g.KeysCount = keyCounts[g.ID]
 		groups = append(groups, g)
 	}
@@ -131,6 +171,8 @@ func (m *Manager) GetGroup(id string) (*ModelGroup, error) {
 	}
 	g.Models = ParseJSONStringArray(rawModels)
 	g.ModelsCount = len(g.Models)
+	avail, _ := LoadAvailability(m.db)
+	g.markUnavailable(avail)
 
 	// Count linked keys
 	var count int
@@ -184,6 +226,7 @@ func (m *Manager) CreateGroupWithPriority(name, description string, modelsList [
 		Description: strings.TrimSpace(description),
 		Models:      ParseJSONStringArray(serialized),
 		ModelsCount: len(modelsList),
+		UnavailableModels: []string{},
 		KeysCount:   0,
 		Priority:    priority,
 		CreatedAt:   now,

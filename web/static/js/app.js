@@ -40,6 +40,14 @@ const NAV = [
   { id: 'about', links: [{ view: 'about', label: 'About', icon: 'info', keywords: 'author credits stack license version help' }] },
 ];
 
+// Mobile bottom bar: daily-use pages. Everything else opens from More.
+const TABS = [
+  { view: 'dashboard', label: 'Dashboard', icon: 'overview' },
+  { view: 'traffic', label: 'Traffic', icon: 'clock' },
+  { view: 'endpoints', label: 'Keys', icon: 'key' },
+  { view: 'providers', label: 'Providers', icon: 'server' },
+];
+
 const $ = (id) => document.getElementById(id);
 const rootEl = document.documentElement;
 const viewRoot = $('view');
@@ -76,6 +84,7 @@ function renderRoute() {
   }
   $('crumbs').replaceChildren(...crumbs);
   renderSidebar(r);
+  renderBottomNav(r);
 }
 
 // ── Sidebar ──
@@ -106,6 +115,51 @@ function renderSidebar(r = getRoute()) {
     return links.length ? sideGroup(g.id, g.title || '', links) : null;
   }).filter(Boolean));
 }
+
+// ── Bottom navigation (phones) ──
+const tabViews = new Set(TABS.map((t) => t.view));
+
+function renderBottomNav(r = getRoute()) {
+  const moreActive = !tabViews.has(r.view);
+  const tab = (active, label, ic, attrs) => h(attrs.href ? 'a' : 'button', {
+    class: `tab${active ? ' on' : ''}`, ...(active ? { 'aria-current': 'page' } : {}), ...attrs,
+  }, h('span', { class: 'pill' }, icon(ic)), label);
+  $('bottom-nav').replaceChildren(
+    ...TABS.filter((t) => pages().some((p) => p.view === t.view)).map((t) => tab(r.view === t.view, t.label, t.icon, { href: `#/${t.view}` })),
+    tab(moreActive, 'More', 'more', { type: 'button', 'aria-haspopup': 'dialog', onclick: () => openMore() }),
+  );
+}
+
+function closeMore() {
+  document.querySelector('.more-layer')?.remove();
+  document.removeEventListener('keydown', moreKey);
+}
+function moreKey(e) { if (e.key === 'Escape') closeMore(); }
+
+function openMore() {
+  closeMore();
+  const r = getRoute();
+  const groups = NAV.filter(visible).map((g) => {
+    const links = g.links.filter(visible).filter((l) => !tabViews.has(l.view));
+    if (!links.length) return null;
+    return h('section', null,
+      g.title ? h('h2', { class: 'more-title' }, g.title) : null,
+      h('div', { class: 'more-grid' }, links.map((l) => h('a', {
+        class: `more-item${r.view === l.view ? ' on' : ''}`, href: `#/${l.view}`, onclick: closeMore,
+      }, icon(l.icon), l.label))));
+  }).filter(Boolean);
+  const foot = h('div', { class: 'more-foot' },
+    h('button', { class: 'more-item', type: 'button', onclick: () => { closeMore(); showPalette(); } }, icon('search'), 'Search'),
+    h('button', { class: 'more-item', type: 'button', onclick: toggleTheme }, icon('moon'), 'Theme'),
+    store.authEnabled ? h('button', { class: 'more-item', type: 'button', onclick: signOut }, icon('logout'), 'Sign out') : null);
+  document.body.append(h('div', { class: 'more-layer' },
+    h('div', { class: 'more-scrim', onclick: closeMore }),
+    h('div', { class: 'more-sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'More pages' },
+      h('div', { class: 'more-grab' }), ...groups, foot)));
+  document.addEventListener('keydown', moreKey);
+  document.querySelector('.more-sheet a, .more-sheet button')?.focus();
+}
+window.addEventListener('hashchange', closeMore);
 
 // ── Command palette: pages from NAV, then actions ──
 function paletteItems() {
@@ -208,7 +262,7 @@ async function start() {
     $('brand-ver').textContent = [...new Set([cfg.version, cfg.commit].filter(Boolean))].join(' · ');
   }
 
-  on('user', () => { renderAvatar(); renderSidebar(); });
+  on('user', () => { renderAvatar(); renderSidebar(); renderBottomNav(); });
   on('route', renderRoute);
   window.addEventListener('hashchange', renderRoute);
   renderRoute();

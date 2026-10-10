@@ -156,3 +156,55 @@ func TestPluginHandlers_BindingsAndResolve(t *testing.T) {
 		t.Errorf("expected Caveman in resolve results")
 	}
 }
+
+func TestTestPluginURL(t *testing.T) {
+	h, db := setupTestHandler(t)
+	defer db.Close()
+
+	admin := &auth.User{ID: 1, Username: "admin", Role: "admin"}
+	operator := &auth.User{ID: 2, Username: "op", Role: "operator"}
+
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"request":{}}`))
+	}))
+	defer good.Close()
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+
+	call := func(user *auth.User, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/test-url", bytes.NewReader([]byte(body)))
+		if user != nil {
+			req = contextWithUser(req, user)
+		}
+		rec := httptest.NewRecorder()
+		h.TestPluginURL(rec, req)
+		return rec
+	}
+
+	if rec := call(operator, `{"url":"`+good.URL+`"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("operator: want 403, got %d", rec.Code)
+	}
+	if rec := call(nil, `{"url":"`+good.URL+`"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("anonymous: want 403, got %d", rec.Code)
+	}
+	if rec := call(admin, `{"url":"ftp://x"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad scheme: want 400, got %d", rec.Code)
+	}
+	if rec := call(admin, `{"url":"`+good.URL+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("reachable: want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec := call(admin, `{"url":"`+bad.URL+`"}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("http 500 upstream: want 502, got %d", rec.Code)
+	}
+	var res map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&res)
+	if res["status"] != "error" {
+		t.Fatalf("want status error, got %v", res)
+	}
+	if rec := call(admin, `{"url":"http://127.0.0.1:1","timeout_ms":500}`); rec.Code != http.StatusBadGateway {
+		t.Fatalf("unreachable: want 502, got %d", rec.Code)
+	}
+}

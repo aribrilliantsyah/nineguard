@@ -297,6 +297,37 @@ func (h *Handler) TestPlugin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// For HTTP plugin: send dummy chat completion request
+	status, body := probeHTTPPlugin(r.Context(), pRaw.URL, pRaw.Secret, pRaw.TimeoutMs)
+	jsonResponse(w, status, body)
+}
+
+// TestPluginURL checks that an endpoint answers before it is registered (admin only).
+// No secret exists yet, so none is sent; a plugin that requires one may answer 401/403.
+func (h *Handler) TestPluginURL(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil || user.Role != "admin" {
+		jsonError(w, http.StatusForbidden, "Only administrators can test plugin endpoints")
+		return
+	}
+	var body struct {
+		URL       string `json:"url"`
+		TimeoutMs int    `json:"timeout_ms"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	url := strings.TrimSpace(body.URL)
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		jsonError(w, http.StatusBadRequest, "plugin URL must use http or https")
+		return
+	}
+	status, res := probeHTTPPlugin(r.Context(), url, "", body.TimeoutMs)
+	jsonResponse(w, status, res)
+}
+
+// probeHTTPPlugin sends a dummy chat completion to an HTTP plugin and reports reachability and latency.
+func probeHTTPPlugin(parent context.Context, url, secret string, timeoutMs int) (int, map[string]any) {
 	dummyPayload := map[string]any{
 		"request": map[string]any{
 			"model": "test-model",
@@ -312,50 +343,38 @@ func (h *Handler) TestPlugin(w http.ResponseWriter, r *http.Request) {
 	}
 	b, _ := json.Marshal(dummyPayload)
 
-	timeout := time.Duration(pRaw.TimeoutMs) * time.Millisecond
+	timeout := time.Duration(timeoutMs) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, pRaw.URL, bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
 	if err != nil {
-		jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid plugin URL: %v", err))
-		return
+		return http.StatusBadRequest, map[string]any{"status": "error", "error": fmt.Sprintf("invalid plugin URL: %v", err), "latency_ms": 0}
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if pRaw.Secret != "" {
-		req.Header.Set("X-NineGuard-Plugin-Secret", pRaw.Secret)
+	if secret != "" {
+		req.Header.Set("X-NineGuard-Plugin-Secret", secret)
 	}
 
 	start := time.Now()
 	resp, err := http.DefaultClient.Do(req)
 	latencyMs := time.Since(start).Milliseconds()
-
 	if err != nil {
-		jsonResponse(w, http.StatusBadGateway, map[string]any{
-			"status":     "error",
-			"error":      err.Error(),
-			"latency_ms": latencyMs,
-		})
-		return
+		return http.StatusBadGateway, map[string]any{"status": "error", "error": err.Error(), "latency_ms": latencyMs}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		jsonResponse(w, http.StatusBadGateway, map[string]any{
+		return http.StatusBadGateway, map[string]any{
 			"status":     "error",
 			"error":      fmt.Sprintf("plugin returned HTTP %d", resp.StatusCode),
 			"latency_ms": latencyMs,
-		})
-		return
+		}
 	}
-
-	jsonResponse(w, http.StatusOK, map[string]any{
-		"status":     "ok",
-		"latency_ms": latencyMs,
-	})
+	return http.StatusOK, map[string]any{"status": "ok", "latency_ms": latencyMs}
 }
 
 // UpdatePipelineOrder updates the global execution order of plugins.

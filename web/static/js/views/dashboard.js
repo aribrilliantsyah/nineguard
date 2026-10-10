@@ -114,6 +114,89 @@ export function mount(root) {
 
   const recoveryBanner = h('div', { class: 'dashboard-recovery-banner', style: { display: 'none' } });
 
+  // ── Removed models card (ADR 0006): hidden unless there is something to act on ──
+  const STALE_SYNC_MS = 2 * 60 * 60 * 1000;
+  const removedCard = h('div', { class: 'card mt removed-card', style: { display: 'none' } });
+
+  function renderRemovedCard(s) {
+    const sync = (s && s.sync) || {};
+    const pending = Array.isArray(sync.pending_providers) ? sync.pending_providers : [];
+    const lastOk = sync.last_success_at ? Date.parse(sync.last_success_at) : 0;
+    // Before the first sync of this process there is no timestamp: not stale yet.
+    const stale = Boolean(lastOk) && (Date.now() - lastOk) > STALE_SYNC_MS;
+    const failing = Boolean(sync.last_error);
+    const removed = s ? s.removed_count || 0 : 0;
+    const groups = s && Array.isArray(s.groups) ? s.groups : [];
+
+    if (!removed && !pending.length && !stale && !failing) {
+      removedCard.style.display = 'none';
+      removedCard.replaceChildren();
+      return;
+    }
+    removedCard.style.display = '';
+
+    const syncLine = failing
+      ? h('span', { class: 'badge err', title: sync.last_error }, icon('alert'), lastOk ? `Sync failing, last success ${fmtAgo(lastOk)}` : 'Sync failing')
+      : stale
+        ? h('span', { class: 'badge removed' }, icon('alert'), `Last synced ${fmtAgo(lastOk)}, results may be out of date`)
+        : lastOk
+          ? h('span', { class: 'muted' }, `Last synced ${fmtAgo(lastOk)}`)
+          : null;
+
+    const body = [];
+
+    if (removed) {
+      const items = (s.providers || []).map((p) => h('div', { class: 'removed-row' },
+        h('span', { class: 'badge', style: { fontWeight: '600' } }, icon('server'), ' ', p.provider_id || 'root'),
+        h('span', null, `${fmtNum(p.count)} model${p.count === 1 ? '' : 's'}`),
+        h('span', { class: 'muted removed-sample', title: (p.sample || []).join('\n') },
+          (p.sample || []).join(', ') + (p.count > (p.sample || []).length ? ', ...' : ''))
+      ));
+      body.push(h('div', { class: 'removed-list' }, ...items));
+    }
+
+    if (s && s.unavailable_count > 0) {
+      const names = groups.map((g) => g.name).join(', ');
+      body.push(h('p', { class: 'removed-note' },
+        `${fmtNum(s.unavailable_count)} unavailable entr${s.unavailable_count === 1 ? 'y' : 'ies'} in ${groups.length} group${groups.length === 1 ? '' : 's'} (${names}). `,
+        s.affected_keys > 0
+          ? `${fmtNum(s.affected_keys)} API key${s.affected_keys === 1 ? '' : 's'} linked to ${groups.length === 1 ? 'it' : 'them'} already cannot use ${s.unavailable_count === 1 ? 'it' : 'them'}.`
+          : 'No API key is linked to them.'));
+    }
+
+    if (pending.length) {
+      body.push(h('p', { class: 'removed-note' },
+        icon('alert'),
+        ` Possible mass removal from ${pending.join(', ')}. Most of its models vanished in one sync, so nothing was marked. The next sync confirms it.`));
+    }
+
+    const actions = h('div', { class: 'removed-actions' },
+      removed ? h('button', { class: 'btn btn-sm', type: 'button', onclick: () => setRoute('models') }, 'Review models') : null,
+      groups.length ? h('button', { class: 'btn btn-sm', type: 'button', onclick: () => { try { sessionStorage.setItem('nineguard_models_tab', 'groups'); } catch {} setRoute('models'); } }, 'Review groups') : null
+    );
+
+    removedCard.replaceChildren(
+      h('div', { class: 'card-head' },
+        h('div', null,
+          h('h3', null, icon('alert'), removed ? ` ${fmtNum(removed)} model${removed === 1 ? '' : 's'} removed from provider` : ' Model sync needs attention'),
+          h('p', { class: 'card-sub' }, 'Providers stopped listing these models. Usage history is kept.')
+        ),
+        syncLine
+      ),
+      h('div', { class: 'removed-body' }, ...body, actions)
+    );
+  }
+
+  async function loadRemovedSummary() {
+    try {
+      const s = await api.get('/models/removed-summary');
+      if (alive) renderRemovedCard(s);
+    } catch {
+      // Optional card: never let it break the dashboard.
+      if (alive) { removedCard.style.display = 'none'; removedCard.replaceChildren(); }
+    }
+  }
+
   function updateRecoveryBanner() {
     if (store.authEnabled && store.role === 'admin' && !store.hasRecovery && !dismissedBanner) {
       recoveryBanner.style.display = 'flex';
@@ -183,6 +266,7 @@ export function mount(root) {
       )
     ),
     recoveryBanner,
+    removedCard,
     errorCard,
     kpiRow,
     rowVolumeMix,
@@ -1062,6 +1146,7 @@ export function mount(root) {
     rowRecentLogs.replaceChildren(renderRecentLogsCard(cachedLogs));
 
     updateRecoveryBanner();
+    loadRemovedSummary();
   }
 
   load();

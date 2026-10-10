@@ -170,15 +170,15 @@ export function mount(root) {
         : null;
 
       return h('div', { class: 'card', style: { marginBottom: '12px' } },
-        h('div', { class: 'card-head', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+        h('div', { class: 'card-head', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
             icon('server'),
             h('h2', { style: { margin: 0, fontSize: '14px' } }, p.name),
             prefixTag,
             defaultTag,
             tokenSavingTag
           ),
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
             statusBadge,
             h('button', {
               class: 'btn btn-sm',
@@ -201,7 +201,7 @@ export function mount(root) {
             h('span', { class: 'muted', style: { fontSize: '11px', display: 'block', textTransform: 'uppercase' } }, 'Upstream API Key'),
             h('code', { class: 'muted' }, p.masked_key || '(None required)')
           ),
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
             testBtn
           )
         ),

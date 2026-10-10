@@ -5,6 +5,11 @@ import { h, icon, emptyState, toast, formDialog, confirmDialog, fmtNum, fmtCompa
 export function mount(root) {
   let alive = true;
   let activeTab = 'models'; // 'models' | 'groups'
+  // One-shot hint from the dashboard card ("Review groups").
+  try {
+    if (sessionStorage.getItem('nineguard_models_tab') === 'groups') activeTab = 'groups';
+    sessionStorage.removeItem('nineguard_models_tab');
+  } catch { /* storage unavailable */ }
   let allModels = [];
   let modelGroups = [];
   let providersList = [];
@@ -16,7 +21,9 @@ export function mount(root) {
 
   const contentWrap = h('div', { class: 'tab-body' });
   const actionsWrap = h('div', { class: 'page-actions' });
-  const subText = h('p', null, 'Control model firewall rules and access. Models are grouped by provider prefix (e.g. openrouter/model-id).');
+  const subText = h('p', null, activeTab === 'groups'
+    ? 'Create reusable groups of models (e.g. GPT Ecosystem, Claude) that API keys dynamically link to.'
+    : 'Control model firewall rules and access. Models are grouped by provider prefix (e.g. openrouter/model-id).');
 
   // ── Tab Navigation ──
   const tabModelsBadge = h('span', { class: 'badge' }, '0');
@@ -35,6 +42,8 @@ export function mount(root) {
   }, icon('sparkles'), 'Model Groups', tabGroupsBadge);
 
   const tabsNav = h('div', { class: 'tabs' }, tabModelsBtn, tabGroupsBtn);
+  tabModelsBtn.classList.toggle('active', activeTab === 'models');
+  tabGroupsBtn.classList.toggle('active', activeTab === 'groups');
 
   // ── All Models Controls ──
   const searchInput = h('input', {
@@ -76,6 +85,15 @@ export function mount(root) {
     onclick: addModel
   }, icon('plus'), 'Add Model');
 
+  // Shown only while Removed Models exist (ADR 0006).
+  const clearRemovedBtn = h('button', {
+    class: 'btn',
+    type: 'button',
+    title: 'Delete every model its provider stopped listing',
+    onclick: () => confirmClearRemoved()
+  }, icon('trash'), 'Clear removed');
+  clearRemovedBtn.hidden = true;
+
   // ── Model Groups Controls ──
   const groupSearchInput = h('input', {
     class: 'input',
@@ -114,7 +132,7 @@ export function mount(root) {
 
     if (tab === 'models') {
       subText.textContent = 'Control model firewall rules and access. Models are grouped by provider prefix (e.g. openrouter/model-id).';
-      actionsWrap.replaceChildren(searchInput, providerSelect, fetchBtn, addModelBtn);
+      actionsWrap.replaceChildren(searchInput, providerSelect, clearRemovedBtn, fetchBtn, addModelBtn);
       renderModelsTable();
     } else {
       subText.textContent = 'Create reusable groups of models (e.g. GPT Ecosystem, Claude) that API keys dynamically link to.';
@@ -179,10 +197,32 @@ export function mount(root) {
     }
   }
 
+  async function confirmClearRemoved() {
+    const n = allModels.filter(m => m.removed).length;
+    if (!n) return;
+    const ok = await confirmDialog({
+      title: `Clear ${n} removed model${n === 1 ? '' : 's'}?`,
+      body: 'Deletes every model its provider stopped listing. Old traffic keeps the model name but loses its "removed" tag. Group entries are not touched.',
+      confirmText: 'Clear removed',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const res = await api.post('/models/clear-removed');
+      const d = res.deleted || 0;
+      toast(`Cleared ${d} removed model${d === 1 ? '' : 's'}`, 'ok');
+      await load();
+    } catch (e) {
+      toast(`Failed to clear: ${e.message}`, 'error');
+    }
+  }
+
   async function confirmDeleteModel(m) {
     const ok = await confirmDialog({
       title: `Delete Model "${m.id}"?`,
-      body: 'This will remove the model from NineGuard local database. It can be re-added anytime or re-synced from its provider.',
+      body: m.removed
+        ? 'This model was removed from its provider. Deleting it also drops the "removed" tag on its old traffic.'
+        : 'This will remove the model from NineGuard local database. It can be re-added anytime or re-synced from its provider.',
       confirmText: 'Delete Model',
       danger: true,
     });
@@ -247,6 +287,12 @@ export function mount(root) {
       const statusBadge = m.enabled
         ? h('span', { class: 'badge ok' }, icon('check'), 'Enabled')
         : h('span', { class: 'badge err' }, icon('alert'), 'Disabled');
+      const removedBadge = m.removed
+        ? h('span', {
+            class: 'badge removed',
+            title: m.removed_at ? `Provider stopped listing this model ${fmtAgo(Date.parse(m.removed_at))}` : 'Provider stopped listing this model'
+          }, icon('alert'), 'Removed from provider')
+        : null;
 
       const actionBtn = h('button', {
         class: `btn btn-sm ${m.enabled ? 'btn-danger' : 'btn-primary'}`,
@@ -270,13 +316,13 @@ export function mount(root) {
           )
         : h('span', { class: 'badge muted' }, 'root');
 
-      return h('tr', null,
+      return h('tr', { class: m.removed ? 'row-removed' : '' },
         h('td', null,
           h('div', { class: 'strong' }, m.id),
           m.name && m.name !== m.id ? h('div', { class: 'sub' }, m.name) : null
         ),
         h('td', null, provBadge),
-        h('td', null, statusBadge),
+        h('td', null, h('div', { style: { display: 'inline-flex', gap: '6px', flexWrap: 'wrap' } }, statusBadge, removedBadge)),
         h('td', { class: 'num' }, fmtNum(m.total_requests || 0)),
         h('td', { class: 'num' }, fmtCompact(m.total_tokens || 0)),
         h('td', { class: 'muted' }, lastUsed),
@@ -444,10 +490,14 @@ export function mount(root) {
       const count = modelsArr.length;
 
       // Badges preview
+      const unavailable = new Set(Array.isArray(g.unavailable_models) ? g.unavailable_models : []);
+      const unavailableCount = g.unavailable_count || 0;
+
       const previewBadges = modelsArr.slice(0, 3).map(m =>
         h('span', {
-          class: 'badge',
-          style: { background: 'var(--hover)', fontSize: '11px', fontFamily: 'monospace', marginRight: '4px' }
+          class: unavailable.has(m) ? 'badge removed' : 'badge',
+          title: unavailable.has(m) ? 'Removed from provider' : '',
+          style: { background: unavailable.has(m) ? '' : 'var(--hover)', fontSize: '11px', fontFamily: 'monospace', marginRight: '4px' }
         }, m)
       );
 
@@ -479,6 +529,15 @@ export function mount(root) {
         onclick: () => confirmDeleteGroup(g)
       }, icon('trash'));
 
+      const removeUnavailableBtn = unavailableCount > 0
+        ? h('button', {
+            class: 'btn btn-sm',
+            type: 'button',
+            title: 'Remove entries whose model was removed from its provider',
+            onclick: () => confirmRemoveUnavailable(g)
+          }, icon('trash'), `Remove ${unavailableCount} unavailable`)
+        : null;
+
       return h('tr', null,
         h('td', null,
           h('div', { class: 'strong', style: { display: 'flex', alignItems: 'center', gap: '6px' } },
@@ -492,12 +551,16 @@ export function mount(root) {
           h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '2px', alignItems: 'center' } }, ...previewBadges)
         ),
         h('td', { class: 'num' },
-          h('span', { class: 'badge', style: { fontWeight: '600' } }, `${count} model${count === 1 ? '' : 's'}`)
+          h('span', { class: 'badge', style: { fontWeight: '600' } }, `${count} model${count === 1 ? '' : 's'}`),
+          unavailableCount > 0
+            ? h('div', { style: { marginTop: '4px' } },
+                h('span', { class: 'badge removed', title: Array.from(unavailable).join('\n') }, icon('alert'), `${unavailableCount} unavailable`))
+            : null
         ),
         h('td', { style: { textAlign: 'center' } }, keysBadge),
         h('td', { class: 'muted', style: { fontSize: '11.5px' } }, g.updated_at ? fmtAgo(Date.parse(g.updated_at)) : '-'),
         h('td', { class: 'num' },
-          h('div', { style: { display: 'inline-flex', gap: '6px' } }, editBtn, deleteBtn)
+          h('div', { style: { display: 'inline-flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end' } }, removeUnavailableBtn, editBtn, deleteBtn)
         )
       );
     });
@@ -521,6 +584,24 @@ export function mount(root) {
     );
 
     contentWrap.replaceChildren(card);
+  }
+
+  async function confirmRemoveUnavailable(g) {
+    const names = Array.isArray(g.unavailable_models) ? g.unavailable_models : [];
+    const ok = await confirmDialog({
+      title: `Remove ${names.length} unavailable entr${names.length === 1 ? 'y' : 'ies'} from "${g.name}"?`,
+      body: `${names.slice(0, 5).join(', ')}${names.length > 5 ? ` and ${names.length - 5} more` : ''} ${names.length === 1 ? 'was' : 'were'} removed from the provider. Keys linked to this group already cannot use ${names.length === 1 ? 'it' : 'them'}. Wildcard entries are kept.`,
+      confirmText: 'Remove from group',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const res = await api.post(`/model-groups/${encodeURIComponent(g.id)}/remove-unavailable`);
+      toast(`Removed ${res.removed || 0} unavailable entr${res.removed === 1 ? 'y' : 'ies'} from "${g.name}"`, 'ok');
+      await load();
+    } catch (e) {
+      toast(`Failed: ${e.message}`, 'error');
+    }
   }
 
   async function openGroupModal(existingGroup = null) {
@@ -647,7 +728,8 @@ export function mount(root) {
         onmouseleave: (e) => e.currentTarget.style.background = 'transparent'
       },
         cb,
-        h('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, m.id),
+        h('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: m.removed ? '.6' : '1' } }, m.id),
+        m.removed ? h('span', { class: 'badge removed', style: { fontSize: '10px' }, title: 'Provider stopped listing this model' }, 'removed') : null,
         m.provider_id ? h('span', { class: 'badge', style: { fontSize: '10px' } }, m.provider_id) : null
       );
 
@@ -897,8 +979,9 @@ export function mount(root) {
     }
 
     if (!alive) return;
+    clearRemovedBtn.hidden = !allModels.some(m => m.removed);
     if (activeTab === 'models') {
-      actionsWrap.replaceChildren(searchInput, providerSelect, fetchBtn, addModelBtn);
+      actionsWrap.replaceChildren(searchInput, providerSelect, clearRemovedBtn, fetchBtn, addModelBtn);
       renderModelsTable();
     } else {
       actionsWrap.replaceChildren(groupSearchInput, addGroupBtn);

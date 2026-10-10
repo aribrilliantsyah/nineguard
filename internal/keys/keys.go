@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"nineguard/internal/db"
+	"nineguard/internal/models"
 	"nineguard/internal/timeutil"
 	"nineguard/internal/traffic"
 )
@@ -147,10 +148,13 @@ func (ki *KeyInfo) GetEffectiveAllowedModels() []string {
 		return []string{"*"}
 	case "group":
 		if ki.manager != nil {
-			return ki.manager.GetModelsForGroups(ki.ModelGroupIDs)
+			return ki.manager.availableOnly(ki.manager.GetModelsForGroups(ki.ModelGroupIDs))
 		}
 		return ki.AllowedModels
 	case "custom":
+		if ki.manager != nil {
+			return ki.manager.availableOnly(ki.AllowedModels)
+		}
 		return ki.AllowedModels
 	default:
 		return []string{"*"}
@@ -224,6 +228,15 @@ type Manager struct {
 	upstreamKey string
 	cache       map[string]*KeyInfo // rawKey -> KeyInfo
 	groupCache  map[string][]string // groupID -> []models
+	avail       *models.Availability // which model ids are Removed Models (ADR 0006)
+}
+
+// availableOnly drops entries that name a Removed Model.
+func (m *Manager) availableOnly(entries []string) []string {
+	m.mu.RLock()
+	a := m.avail
+	m.mu.RUnlock()
+	return a.FilterAvailable(entries)
 }
 
 func NewManager(database *db.DB, defaultRouterAPIKey string) *Manager {
@@ -268,9 +281,13 @@ func (m *Manager) ReloadGroupCache() {
 			newCache[id] = ParseAllowedModels(rawModels)
 		}
 	}
+	rows.Close() // release the single db connection before the next query
+
+	avail, _ := models.LoadAvailability(m.db)
 
 	m.mu.Lock()
 	m.groupCache = newCache
+	m.avail = avail
 	m.mu.Unlock()
 }
 

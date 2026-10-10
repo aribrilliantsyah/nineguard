@@ -514,6 +514,7 @@ export function mount(root) {
       h('span', { class: 'c-model', title: `${e.model || '-'}${e.error_message ? `\nError: ${e.error_message}` : ''}` },
         modPrefix ? h('span', { class: 'source-ns' }, modPrefix) : null,
         h('span', { class: 'strong' }, highlight(modShort, terms)),
+        e.model_removed ? h('span', { class: 'badge removed removed-tag', title: 'This model was removed from its provider' }, 'removed') : null,
         (heavyThreshold > 0 && (e.total_tokens || 0) >= heavyThreshold) ? h('span', {
           class: 'badge',
           style: {
@@ -619,7 +620,7 @@ export function mount(root) {
       ['Timestamp', e.timestamp ? new Date(e.timestamp).toLocaleString() : '-'],
       ['Guard Status', statusText],
       ['Client Key', e.api_key_name ? `${e.api_key_name} (${e.api_key})` : (e.api_key || '-')],
-      ['Target Model', e.model || '-'],
+      ['Target Model', e.model ? (e.model_removed ? `${e.model} (removed from provider)` : e.model) : '-'],
       ['Images in Prompt Context', e.has_images ? `${e.image_count || 1} image(s) in conversation history` : 'None (text only)'],
       ['Provider', e.provider_id || '(default upstream)'],
       ['Tokens', `${fmtNum(e.total_tokens)} (prompt: ${fmtNum(e.prompt_tokens)}, completion: ${fmtNum(e.completion_tokens)})`],
