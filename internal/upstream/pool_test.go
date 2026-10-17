@@ -62,10 +62,11 @@ func TestMergeAccountPools_MathAndEarliestReset(t *testing.T) {
 		},
 	}
 
-	merged := upstream.MergeAccountPools("9router", conns)
-	if merged == nil {
-		t.Fatalf("expected non-nil merged pool")
+	pools := upstream.MergeAccountPools("9router", conns)
+	if len(pools) != 1 {
+		t.Fatalf("expected 1 merged pool, got %d", len(pools))
 	}
+	merged := pools[0]
 
 	if merged.Provider != "9router" {
 		t.Fatalf("expected provider 9router, got %s", merged.Provider)
@@ -141,5 +142,52 @@ func TestFilterPoolsByModelAccess(t *testing.T) {
 	wildcard := upstream.FilterPoolsByModelAccess(pools, []string{"*"})
 	if len(wildcard) != 2 {
 		t.Fatalf("expected all pools on wildcard, got %d", len(wildcard))
+	}
+}
+
+func TestMergeAccountPools_SubProviderGrouping(t *testing.T) {
+	conns := []upstream.ConnectionQuota{
+		{
+			ConnectionID: "c1",
+			Provider:     "antigravity",
+			Buckets: []upstream.QuotaBucket{
+				{Name: "Claude & GPT (5h)", Used: 10, Total: 1000},
+			},
+		},
+		{
+			ConnectionID: "c2",
+			Provider:     "antigravity",
+			Buckets: []upstream.QuotaBucket{
+				{Name: "Gemini (5h)", Used: 20, Total: 1000},
+			},
+		},
+		{
+			ConnectionID: "c3",
+			Provider:     "copilot",
+			Buckets: []upstream.QuotaBucket{
+				{Name: "5h Session", Used: 5, Total: 100},
+			},
+		},
+	}
+
+	pools := upstream.MergeAccountPools("9router DAK", conns)
+	if len(pools) != 2 {
+		t.Fatalf("expected 2 distinct pools, got %d: %+v", len(pools), pools)
+	}
+
+	p1 := pools[0]
+	if p1.Provider != "9router DAK" || p1.SubProvider != "antigravity" || p1.Family != "9router DAK · Antigravity" {
+		t.Fatalf("unexpected pool 1: %+v", p1)
+	}
+	if len(p1.Buckets) != 2 {
+		t.Fatalf("expected 2 buckets in Antigravity pool, got %d", len(p1.Buckets))
+	}
+
+	p2 := pools[1]
+	if p2.Provider != "9router DAK" || p2.SubProvider != "copilot" || p2.Family != "9router DAK · Copilot" {
+		t.Fatalf("unexpected pool 2: %+v", p2)
+	}
+	if len(p2.Buckets) != 1 || p2.Buckets[0].Name != "5h Session" {
+		t.Fatalf("expected 1 bucket '5h Session' in Copilot pool, got %+v", p2.Buckets)
 	}
 }

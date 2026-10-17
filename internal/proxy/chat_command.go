@@ -153,6 +153,7 @@ func FormatQuotaMarkdown(resp *upstream.UnifiedQuotaResponse, arg string) string
 	for _, pool := range resp.UpstreamPools {
 		if filterStr != "" {
 			matches := strings.Contains(strings.ToLower(pool.Provider), filterStr) ||
+				strings.Contains(strings.ToLower(pool.SubProvider), filterStr) ||
 				strings.Contains(strings.ToLower(pool.Family), filterStr)
 			if !matches {
 				for _, b := range pool.Buckets {
@@ -183,8 +184,14 @@ func FormatQuotaMarkdown(resp *upstream.UnifiedQuotaResponse, arg string) string
 	sb.WriteString("|---|---|---|---|---|\n")
 
 	for _, pool := range matchingPools {
+		displayFamily := pool.Family
+		if displayFamily == "" {
+			displayFamily = pool.Provider
+		}
+
 		for _, b := range pool.Buckets {
 			if filterStr != "" && !strings.Contains(strings.ToLower(pool.Provider), filterStr) &&
+				!strings.Contains(strings.ToLower(pool.SubProvider), filterStr) &&
 				!strings.Contains(strings.ToLower(pool.Family), filterStr) &&
 				!strings.Contains(strings.ToLower(b.Name), filterStr) {
 				continue
@@ -208,7 +215,7 @@ func FormatQuotaMarkdown(resp *upstream.UnifiedQuotaResponse, arg string) string
 			}
 
 			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s |\n",
-				pool.Provider,
+				displayFamily,
 				b.Name,
 				usedTotal,
 				remPct,

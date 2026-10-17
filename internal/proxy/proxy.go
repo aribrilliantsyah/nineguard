@@ -285,8 +285,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check Allowed Models for this API Key
-	if modelName != "" && keyInfo != nil && !keyInfo.IsModelAllowed(modelName) {
+	// Resolve the requested name to its canonical Model ID (ADR 0008) before any model check, so
+	// "cx/gpt" and "9dak/cx/gpt" are one model for access, firewall and statistics. A resolve error
+	// is reported later, at the same place as before.
+	provider, actualModel, modelID, resolveErr := p.providers.ResolveModelID(modelName)
+
+	// Check Allowed Models for this API Key (the requested name or its canonical form)
+	if modelName != "" && keyInfo != nil && !keyInfo.IsModelAllowed(modelName) && !(modelID != "" && keyInfo.IsModelAllowed(modelID)) {
 		slog.Warn("model forbidden for api key", "key", keyInfo.Name, "model", modelName, "ip", clientIP)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
@@ -316,9 +321,46 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check Model Blocking Rule in NineGuard
-	if modelName != "" && !p.models.IsModelEnabled(modelName) {
-		slog.Warn("model blocked by NineGuard firewall", "model", modelName, "ip", clientIP)
+	// Unknown models are rejected, never registered: only the sync (or the admin) creates rows.
+	// A provider with no registered models at all (it has no usable listing) is let through.
+	var modelFound, modelEnabled bool
+	if resolveErr == nil && modelID != "" {
+		modelFound, modelEnabled, _ = p.models.Status(modelID)
+		if !modelFound && p.models.HasModelsFor(provider.ID, provider.Prefix) {
+			slog.Warn("unknown model rejected", "model", modelName, "resolved", modelID, "key", keyInfo.Name, "ip", clientIP)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			errJSON := fmt.Sprintf(`{
+			"error": {
+				"message": "The model '%s' does not exist. Use the full model id with its provider prefix (e.g. %s).",
+				"type": "invalid_request_error",
+				"param": "model",
+				"code": "model_not_found"
+			}
+		}`, modelName, modelID)
+			_, _ = w.Write([]byte(errJSON))
+
+			errMsg := fmt.Sprintf("unknown model '%s'", modelName)
+			_ = p.traffic.Record(&traffic.LogEntry{
+				APIKey:       maskedKey,
+				APIKeyName:   keyName,
+				APIKeyID:     keyInfo.ID,
+				ProviderID:   provider.ID,
+				Model:        modelName,
+				DurationMs:   int(time.Since(start).Milliseconds()),
+				StatusCode:   http.StatusNotFound,
+				ClientIP:     clientIP,
+				Stream:       req.Stream,
+				ErrorMessage: &errMsg,
+				Level:        "WARN",
+			})
+			return
+		}
+	}
+
+	// Check Model Blocking Rule in NineGuard (on the canonical ID)
+	if modelFound && !modelEnabled {
+		slog.Warn("model blocked by NineGuard firewall", "model", modelName, "resolved", modelID, "ip", clientIP)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		errJSON := fmt.Sprintf(`{
@@ -347,9 +389,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve Upstream Provider based on model prefix (e.g. openrouter/anthropic/claude-3.5-sonnet -> provider openrouter, model anthropic/claude-3.5-sonnet)
-	provider, actualModel, modelID, err := p.providers.ResolveModelID(modelName)
-	if err != nil {
+	// Upstream provider was resolved above from the model prefix (e.g. openrouter/anthropic/claude-3.5-sonnet -> provider openrouter, model anthropic/claude-3.5-sonnet)
+	if err := resolveErr; err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		errJSON := fmt.Sprintf(`{
@@ -853,10 +894,8 @@ func (p *Proxy) buildUnifiedQuotaResponse(ctx context.Context, keyInfo *keys.Key
 				}
 
 				if res != nil && len(res.Connections) > 0 {
-					merged := upstream.MergeAccountPools(prov.Name, res.Connections)
-					if merged != nil {
-						resp.UpstreamPools = append(resp.UpstreamPools, *merged)
-					}
+					mergedPools := upstream.MergeAccountPools(prov.Name, res.Connections)
+					resp.UpstreamPools = append(resp.UpstreamPools, mergedPools...)
 					if resp.LastUpdated == nil || res.LastUpdated.After(*resp.LastUpdated) {
 						tCopy := res.LastUpdated
 						resp.LastUpdated = &tCopy

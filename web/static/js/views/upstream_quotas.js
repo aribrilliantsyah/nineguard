@@ -157,11 +157,16 @@ export function renderUpstreamQuotas(container) {
       }
     }, icon('refresh'), ` ${conn.reset_credits} Reset`) : null;
 
+    const isSharedPool = provider.quota_type === 'nineguard' || conn.plan === 'Shared Upstream Pool';
     const tierBadge = isKeyAllowance
       ? h('span', { class: 'badge ok', style: { fontWeight: 'bold', border: '1px solid var(--ok)' } }, '👤 Key Allowance (Admin Limit)')
-      : (provider.quota_type === 'nineguard'
+      : (isSharedPool
           ? h('span', { class: 'badge', style: { background: 'var(--hover)', fontWeight: 'bold', border: '1px solid var(--border)' } }, '🌐 Shared Upstream Pool')
           : null);
+
+    const planBadge = (conn.plan && conn.plan !== 'Shared Upstream Pool')
+      ? h('span', { class: 'badge' }, conn.plan)
+      : null;
 
     return h('div', {
       style: {
@@ -177,7 +182,7 @@ export function renderUpstreamQuotas(container) {
           icon(isKeyAllowance ? 'shield' : 'user'),
           h('span', { style: { fontWeight: '700', fontSize: '13px' } }, conn.account_label || conn.connection_id),
           tierBadge,
-          conn.plan ? h('span', { class: 'badge' }, conn.plan) : null,
+          planBadge,
           resetBtn
         ),
         h('span', { class: `badge ${conn.status === 'ok' ? 'ok' : 'err'}` }, conn.status)

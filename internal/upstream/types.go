@@ -42,8 +42,9 @@ type ProviderQuotaResult struct {
 
 // MergedPoolQuota represents client-facing aggregated quotas grouped by provider & family.
 type MergedPoolQuota struct {
-	Provider      string        `json:"provider"` // Provider display name / prefix
-	Family        string        `json:"family"`   // Bucket family name
+	Provider      string        `json:"provider"`                 // Provider display name / prefix
+	SubProvider   string        `json:"sub_provider,omitempty"`   // Underlying service provider (e.g. "antigravity", "copilot")
+	Family        string        `json:"family"`                   // Composite family name (e.g. "9router · Antigravity")
 	Buckets       []QuotaBucket `json:"buckets"`
 	AllowedModels []string      `json:"allowed_models,omitempty"`
 	Status        string        `json:"status"`

@@ -85,23 +85,29 @@ func NewManager(database *db.DB) *Manager {
 	}
 }
 
-// IsModelEnabled checks if a model is allowed. Returns true by default if not explicitly disabled.
+// IsModelEnabled reports whether a model is not disabled. Unknown ids are reported enabled and are
+// never auto-registered (a request must not create a row); only the sync and the admin do.
 func (m *Manager) IsModelEnabled(modelID string) bool {
 	var enabled int
-	err := m.db.QueryRow("SELECT enabled FROM models WHERE id = ?", modelID).Scan(&enabled)
+	err := m.db.QueryRow("SELECT enabled FROM models WHERE id = ? COLLATE NOCASE", modelID).Scan(&enabled)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			// Auto-register model as enabled with detected provider prefix
-			provID := ""
-			if idx := strings.Index(modelID, "/"); idx != -1 {
-				provID = modelID[:idx]
-			}
-			_, _ = m.db.Exec("INSERT OR IGNORE INTO models (id, name, provider_id, enabled) VALUES (?, ?, ?, 1)", modelID, modelID, provID)
-			return true
-		}
-		return true // default to allow if db error
+		return true // unknown or db error: not disabled. Never registers a row; only the sync does.
 	}
 	return enabled == 1
+}
+
+// HasModelsFor reports whether any model is registered for a provider (by id or prefix). A provider
+// with none has no usable listing, so unknown names cannot be judged against it.
+func (m *Manager) HasModelsFor(providerID, prefix string) bool {
+	var n int
+	err := m.db.QueryRow(`SELECT COUNT(*) FROM models WHERE removed_at IS NULL AND (provider_id = ? OR (? != '' AND provider_id = ?) OR (? != '' AND id LIKE ? ESCAPE '\'))`,
+		providerID, prefix, prefix, prefix, escapeLike(prefix)+"/%").Scan(&n)
+	return err == nil && n > 0 // on a db error do not judge names unknown
+}
+
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
 
 // SetModelEnabled toggles or sets model status.
@@ -158,11 +164,18 @@ func (m *Manager) ListModels(providerFilter string) ([]ModelInfo, error) {
 			m.removed_at,
 			m.created_at, 
 			m.updated_at,
-			COUNT(t.id) as total_requests,
-			COALESCE(SUM(t.total_tokens), 0) as total_tokens,
-			MAX(t.timestamp) as last_used_at
+			COALESCE(SUM(t.id_count), 0) as total_requests,
+			COALESCE(SUM(t.tok), 0) as total_tokens,
+			MAX(t.last_ts) as last_used_at
 		FROM models m
-		LEFT JOIN traffic_logs t ON m.id = t.model
+		LEFT JOIN (
+			SELECT COALESCE(NULLIF(model_id, ''), model) AS mid,
+			       COUNT(*) AS id_count,
+			       COALESCE(SUM(total_tokens), 0) AS tok,
+			       MAX(timestamp) AS last_ts
+			FROM traffic_logs
+			GROUP BY COALESCE(NULLIF(model_id, ''), model)
+		) t ON t.mid = m.id COLLATE NOCASE
 		%s
 		GROUP BY m.id
 		ORDER BY m.enabled DESC, total_requests DESC, m.id ASC

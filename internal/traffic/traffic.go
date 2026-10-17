@@ -461,8 +461,8 @@ func (m *Manager) Record(entry *LogEntry) error {
 		}
 	}
 
-	// Ensure model is recorded in models table
-	_, _ = m.db.Exec("INSERT OR IGNORE INTO models (id, name, enabled) VALUES (?, ?, 1)", entry.Model, entry.Model)
+	// Logging a request never registers a model: a request-supplied name must not create rows in the
+	// models table. Only the provider sync and the admin do (docs/BUGS_2026-10-16.md, bug 1).
 
 	return err
 }
@@ -507,8 +507,8 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 	}
 
 	if p.Model != "" {
-		conditions = append(conditions, "model = ?")
-		args = append(args, p.Model)
+		conditions = append(conditions, "(model_id = ? OR model = ?)")
+		args = append(args, p.Model, p.Model)
 	}
 
 	if p.APIKey != "" {
@@ -692,7 +692,7 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 		       COALESCE(plugins_skipped, ''), COALESCE(plugins_applied, ''), COALESCE(tokens_saved, 0), COALESCE(tokens_overhead, 0),
 		       COALESCE(plugin_errors, ''), COALESCE(plugin_ms, 0),
 		       COALESCE(has_images, 0), COALESCE(image_count, 0),
-		       EXISTS(SELECT 1 FROM models rm WHERE rm.id = traffic_logs.model AND rm.removed_at IS NOT NULL)
+		       EXISTS(SELECT 1 FROM models rm WHERE rm.id = COALESCE(NULLIF(traffic_logs.model_id, ''), traffic_logs.model) COLLATE NOCASE AND rm.removed_at IS NOT NULL)
 		FROM traffic_logs
 		%s
 		ORDER BY id DESC
@@ -803,8 +803,8 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 		args = append(args, p.Provider)
 	}
 	if p.Model != "" {
-		conditions = append(conditions, "model = ?")
-		args = append(args, p.Model)
+		conditions = append(conditions, "(model_id = ? OR model = ?)")
+		args = append(args, p.Model, p.Model)
 	}
 	if p.APIKey != "" {
 		conditions = append(conditions, "(api_key = ? OR api_key_name = ? OR api_key LIKE ? OR api_key_name LIKE ?)")
@@ -1032,7 +1032,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string, loc *time
 			COALESCE(MIN(CASE WHEN duration_ms > 0 THEN duration_ms ELSE NULL END), 0),
 			COALESCE(MAX(duration_ms), 0),
 			COALESCE(SUM(CASE WHEN stream = 1 THEN 1 ELSE 0 END), 0),
-			COUNT(DISTINCT model)
+			COUNT(DISTINCT COALESCE(NULLIF(model_id, ''), model))
 		FROM traffic_logs
 		WHERE %s
 	`, dateFilter)
@@ -1297,10 +1297,10 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string, loc *time
 
 	// Top models
 	topModelsQuery := fmt.Sprintf(`
-		SELECT model, COUNT(*) as reqs, COALESCE(SUM(total_tokens), 0) as toks
+		SELECT COALESCE(NULLIF(model_id, ''), model) AS mdl, COUNT(*) as reqs, COALESCE(SUM(total_tokens), 0) as toks
 		FROM traffic_logs
 		WHERE %s
-		GROUP BY model
+		GROUP BY mdl
 		ORDER BY reqs DESC
 		LIMIT 5
 	`, dateFilter)
@@ -1325,10 +1325,10 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string, loc *time
 	}
 	if len(stats.TopModels) > 0 {
 		trendQ := fmt.Sprintf(`
-			SELECT model, %s as ts, COUNT(*) 
+			SELECT COALESCE(NULLIF(model_id, ''), model) AS mdl, %s as ts, COUNT(*) 
 			FROM traffic_logs
 			WHERE %s
-			GROUP BY model, ts
+			GROUP BY mdl, ts
 		`, slotExpr, dateFilter)
 		if rTr, errTr := m.db.Query(trendQ, dateFilterArgs...); errTr == nil {
 			for rTr.Next() {
@@ -1406,7 +1406,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string, loc *time
 	// Top Error Sources
 	topErrQuery := fmt.Sprintf(`
 		SELECT 
-			COALESCE(NULLIF(model, ''), 'unknown') as source,
+			COALESCE(NULLIF(COALESCE(NULLIF(model_id, ''), model), ''), 'unknown') as source,
 			CASE 
 				WHEN status_code = 403 THEN 'policy-403'
 				WHEN status_code = 401 THEN 'unauthorized-401'
@@ -1442,10 +1442,10 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string, loc *time
 	}
 	if len(stats.TopErrorSources) > 0 {
 		trendErrQ := fmt.Sprintf(`
-			SELECT model, %s as ts, COUNT(*) 
+			SELECT COALESCE(NULLIF(COALESCE(NULLIF(model_id, ''), model), ''), 'unknown') AS mdl, %s as ts, COUNT(*) 
 			FROM traffic_logs
 			WHERE status_code >= 400 AND %s
-			GROUP BY model, ts
+			GROUP BY mdl, ts
 		`, slotExpr, dateFilter)
 		if rTrend, errTrend := m.db.Query(trendErrQ, dateFilterArgs...); errTrend == nil {
 			for rTrend.Next() {
@@ -1539,14 +1539,14 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 			%s AS g,
 			%s AS key_name,
 			MAX(t.api_key),
-			t.model,
+			COALESCE(NULLIF(t.model_id, ''), t.model) AS mdl,
 			COALESCE(SUM(t.total_tokens), 0) AS tot_toks,
 			COALESCE(SUM(t.prompt_tokens), 0) AS p_toks,
 			COALESCE(SUM(t.completion_tokens), 0) AS c_toks,
 			COUNT(*) AS reqs
 		FROM traffic_logs t%s
 		WHERE %s
-		GROUP BY g, t.model
+		GROUP BY g, mdl
 		ORDER BY tot_toks DESC
 	`, keyGroupExpr, keyNameExpr, keyJoin, dateFilter)
 
@@ -1582,7 +1582,7 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 
 	// 3. Last Active per key and per model: all-time, any status (not period-bound).
 	keyLastActive := m.lastActiveBy(keyGroupExpr, keyJoin)
-	modelLastActive := m.lastActiveBy("t.model", "")
+	modelLastActive := m.lastActiveBy("COALESCE(NULLIF(t.model_id, ''), t.model)", "")
 
 	// 4. Query Grouping per API Key
 	keysQuery := fmt.Sprintf(`
@@ -1638,7 +1638,7 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 	// 5. Query Grouping per Model
 	modelsQuery := fmt.Sprintf(`
 		SELECT 
-			t.model,
+			COALESCE(NULLIF(t.model_id, ''), t.model) AS mdl,
 			COALESCE(m.enabled, 1) as enabled,
 			CASE WHEN m.removed_at IS NOT NULL THEN 1 ELSE 0 END as removed,
 			COALESCE(SUM(t.total_tokens), 0) as tot_toks,
@@ -1650,9 +1650,9 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 			COALESCE(SUM(CASE WHEN t.status_code = 403 THEN 1 ELSE 0 END), 0) as blk_reqs,
 			COALESCE(ROUND(AVG(t.duration_ms)), 0) as avg_dur
 		FROM traffic_logs t
-		LEFT JOIN models m ON t.model = m.id
+		LEFT JOIN models m ON COALESCE(NULLIF(t.model_id, ''), t.model) = m.id COLLATE NOCASE
 		WHERE %s
-		GROUP BY t.model
+		GROUP BY mdl
 		ORDER BY tot_toks DESC, tot_reqs DESC
 	`, dateFilter)
 

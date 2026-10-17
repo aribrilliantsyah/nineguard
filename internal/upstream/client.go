@@ -84,6 +84,17 @@ func (m *Manager) GetCachedQuota(p providers.Provider) *ProviderQuotaResult {
 	return nil
 }
 
+func countBuckets(r *ProviderQuotaResult) int {
+	if r == nil {
+		return 0
+	}
+	n := 0
+	for _, c := range r.Connections {
+		n += len(c.Buckets)
+	}
+	return n
+}
+
 // GetProviderQuotas retrieves quotas for a provider, using cache unless force=true or expired.
 func (m *Manager) GetProviderQuotas(ctx context.Context, p providers.Provider, force bool) (*ProviderQuotaResult, error) {
 	if p.QuotaType == "disabled" || p.QuotaType == "" {
@@ -140,6 +151,28 @@ func (m *Manager) GetProviderQuotas(ctx context.Context, p providers.Provider, f
 
 	// Update cache
 	if res != nil {
+		if countBuckets(res) == 0 && hasCache && countBuckets(cached.result) > 0 {
+			// Upstream failed or returned no buckets, but we hold previously valid buckets.
+			// Preserve last known good buckets (stale-on-error) so client/dashboard does not show a blank card.
+			staleCopy := *cached.result
+			staleCopy.Status = "degraded"
+			if res.ErrorMsg != "" {
+				staleCopy.ErrorMsg = fmt.Sprintf("Live refresh failed (%s) · showing cached limits", res.ErrorMsg)
+			} else {
+				staleCopy.ErrorMsg = "Live refresh failed · showing cached limits"
+			}
+			m.cacheMu.Lock()
+			m.cache[p.ID] = cachedQuota{
+				result:    &staleCopy,
+				expiresAt: time.Now().Add(2 * time.Minute),
+			}
+			if force {
+				m.lastForce[p.ID] = time.Now()
+			}
+			m.cacheMu.Unlock()
+			return &staleCopy, nil
+		}
+
 		m.cacheMu.Lock()
 		m.cache[p.ID] = cachedQuota{
 			result:    res,

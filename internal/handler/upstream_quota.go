@@ -113,10 +113,8 @@ func (h *Handler) BuildUnifiedQuotaResponse(ctx context.Context, keyInfo *keys.K
 
 				res, fetchErr := h.upstream.GetProviderQuotas(ctx, prov, force)
 				if fetchErr == nil && res != nil && len(res.Connections) > 0 {
-					merged := upstream.MergeAccountPools(prov.Name, res.Connections)
-					if merged != nil {
-						resp.UpstreamPools = append(resp.UpstreamPools, *merged)
-					}
+					mergedPools := upstream.MergeAccountPools(prov.Name, res.Connections)
+					resp.UpstreamPools = append(resp.UpstreamPools, mergedPools...)
 				}
 			}
 		}

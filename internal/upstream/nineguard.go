@@ -21,7 +21,7 @@ type NineGuardAdapter struct {
 func NewNineGuardAdapter() *NineGuardAdapter {
 	return &NineGuardAdapter{
 		client: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 45 * time.Second,
 		},
 	}
 }
@@ -51,7 +51,10 @@ func (a *NineGuardAdapter) FetchQuotas(ctx context.Context, p providers.Provider
 		reqURL += "?force=1"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	callCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(callCtx, "GET", reqURL, nil)
 	if err != nil {
 		res.Status = "error"
 		res.ErrorMsg = err.Error()
@@ -69,7 +72,11 @@ func (a *NineGuardAdapter) FetchQuotas(ctx context.Context, p providers.Provider
 	resp, err := a.client.Do(req)
 	if err != nil {
 		res.Status = "error"
-		res.ErrorMsg = fmt.Sprintf("failed to contact upstream NineGuard: %v", err)
+		if strings.Contains(err.Error(), "deadline exceeded") || strings.Contains(err.Error(), "Timeout exceeded") {
+			res.ErrorMsg = "cascaded NineGuard instance timed out while refreshing quotas"
+		} else {
+			res.ErrorMsg = fmt.Sprintf("failed to contact upstream NineGuard: %v", err)
+		}
 		return res, nil
 	}
 	defer resp.Body.Close()
@@ -154,10 +161,27 @@ func (a *NineGuardAdapter) FetchQuotas(ctx context.Context, p providers.Provider
 		buckets := make([]QuotaBucket, len(pool.Buckets))
 		copy(buckets, pool.Buckets)
 		sortBuckets(buckets)
+
+		sub := pool.SubProvider
+		if sub == "" && strings.Contains(pool.Family, " · ") {
+			parts := strings.Split(pool.Family, " · ")
+			if len(parts) > 1 {
+				sub = strings.TrimSpace(parts[len(parts)-1])
+			}
+		}
+		if sub == "" {
+			sub = pool.Provider
+		}
+
+		connLabel := pool.Family
+		if connLabel == "" {
+			connLabel = pool.Provider
+		}
+
 		res.Connections = append(res.Connections, ConnectionQuota{
 			ConnectionID: pool.Family,
-			Provider:     pool.Provider,
-			AccountLabel: pool.Family,
+			Provider:     sub,
+			AccountLabel: connLabel,
 			Plan:         "Shared Upstream Pool",
 			Status:       pool.Status,
 			LastUpdated:  time.Now(),

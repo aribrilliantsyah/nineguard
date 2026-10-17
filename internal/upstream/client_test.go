@@ -260,3 +260,106 @@ func TestDisabledQuotaType(t *testing.T) {
 		t.Fatalf("expected unsupported status, got %s", res.Status)
 	}
 }
+
+func TestRouter9Adapter_ForceTimeoutFallbackToCache(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/providers/client":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"connections": [{"id": "c1", "provider": "anthropic", "displayName": "Claude Pro"}]
+			}`))
+		case "/api/usage/c1":
+			if r.URL.Query().Get("force") == "1" {
+				// Simulate upstream live query error/timeout on 9router
+				http.Error(w, "upstream timeout awaiting headers", http.StatusGatewayTimeout)
+				return
+			}
+			// Cached usage succeeds
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"plan": "Pro",
+				"quotas": {
+					"five_hour": { "used": 10, "total": 100, "displayName": "5h Session" }
+				}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	mgr := upstream.NewManager()
+	prov := providers.Provider{
+		ID:        "p-fallback",
+		Name:      "9router Fallback",
+		Route:     server.URL,
+		QuotaType: "9router",
+	}
+
+	res, err := mgr.GetProviderQuotas(context.Background(), prov, true)
+	if err != nil {
+		t.Fatalf("expected fallback to succeed, got error: %v", err)
+	}
+	if res.Status != "ok" {
+		t.Fatalf("expected ok status from fallback cache, got %s: %s", res.Status, res.ErrorMsg)
+	}
+	if len(res.Connections) != 1 || len(res.Connections[0].Buckets) != 1 {
+		t.Fatalf("expected 1 connection with 1 bucket from fallback, got: %+v", res.Connections)
+	}
+}
+
+func TestManager_StaleOnError(t *testing.T) {
+	var shouldFail atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if shouldFail.Load() {
+			http.Error(w, "server down", http.StatusInternalServerError)
+			return
+		}
+		switch r.URL.Path {
+		case "/api/providers/client":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"connections": [{"id": "c1", "provider": "copilot", "displayName": "Copilot User"}]
+			}`))
+		case "/api/usage/c1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"quotas": {
+					"five_hour": { "used": 5, "total": 100, "displayName": "5h Session" }
+				}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	mgr := upstream.NewManager()
+	mgr.SetForceCooldown(0)
+	prov := providers.Provider{
+		ID:        "p-stale",
+		Name:      "9router Stale Test",
+		Route:     server.URL,
+		QuotaType: "9router",
+	}
+
+	// 1. Initial success: populates cache with 1 bucket
+	res1, err := mgr.GetProviderQuotas(context.Background(), prov, false)
+	if err != nil || len(res1.Connections) != 1 || len(res1.Connections[0].Buckets) != 1 {
+		t.Fatalf("initial fetch failed: err=%v, res=%+v", err, res1)
+	}
+
+	// 2. Server fails on subsequent force fetch
+	shouldFail.Store(true)
+	res2, err := mgr.GetProviderQuotas(context.Background(), prov, true)
+	if err != nil {
+		t.Fatalf("stale-on-error should suppress hard failure, got err: %v", err)
+	}
+	if res2.Status != "degraded" {
+		t.Fatalf("expected degraded status on stale cache, got %s", res2.Status)
+	}
+	if len(res2.Connections) != 1 || len(res2.Connections[0].Buckets) != 1 {
+		t.Fatalf("expected previous buckets preserved, got %+v", res2.Connections)
+	}
+}

@@ -28,7 +28,7 @@ type Router9Adapter struct {
 func NewRouter9Adapter() *Router9Adapter {
 	return &Router9Adapter{
 		client: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 45 * time.Second,
 		},
 		cookieJar: make(map[string][]*http.Cookie),
 	}
@@ -84,7 +84,7 @@ func (a *Router9Adapter) FetchQuotas(ctx context.Context, p providers.Provider, 
 	}
 
 	resultsChan := make(chan connResult, len(conns))
-	semaphore := make(chan struct{}, 5) // max 5 concurrent requests to avoid flood
+	semaphore := make(chan struct{}, 3) // max 3 concurrent requests to avoid flood
 
 	for _, c := range conns {
 		go func(connRaw router9Connection) {
@@ -126,8 +126,11 @@ type router9ClientResponse struct {
 }
 
 func (a *Router9Adapter) fetchConnections(ctx context.Context, p providers.Provider, baseURL string) ([]router9Connection, error) {
+	connCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
 	reqURL := baseURL + "/api/providers/client?pageSize=500"
-	respBody, err := a.doWithAuth(ctx, p, "GET", reqURL, nil)
+	respBody, err := a.doWithAuth(connCtx, p, "GET", reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -189,23 +192,48 @@ func (a *Router9Adapter) fetchConnectionQuota(ctx context.Context, p providers.P
 	}
 
 	forceParam := ""
+	timeout := 15 * time.Second
 	if force {
 		forceParam = "?force=1"
+		timeout = 35 * time.Second
 	}
 	reqURL := fmt.Sprintf("%s/api/usage/%s%s", baseURL, url.PathEscape(conn.ID), forceParam)
 
-	respBody, err := a.doWithAuth(ctx, p, "GET", reqURL, nil)
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var data router9UsageResponse
+	var fellBackToCache bool
+
+	respBody, err := a.doWithAuth(callCtx, p, "GET", reqURL, nil)
+	if err != nil && force {
+		// Live upstream refresh timed out or failed. Fall back immediately to 9router's warm cache.
+		fallbackURL := fmt.Sprintf("%s/api/usage/%s", baseURL, url.PathEscape(conn.ID))
+		fbCtx, fbCancel := context.WithTimeout(ctx, 6*time.Second)
+		fbBody, fbErr := a.doWithAuth(fbCtx, p, "GET", fallbackURL, nil)
+		fbCancel()
+		if fbErr == nil && json.Unmarshal(fbBody, &data) == nil && data.Error == "" {
+			err = nil
+			fellBackToCache = true
+		}
+	}
+
 	if err != nil {
 		cq.Status = "error"
-		cq.ErrorMsg = err.Error()
+		if strings.Contains(err.Error(), "deadline exceeded") || strings.Contains(err.Error(), "Timeout exceeded") {
+			cq.ErrorMsg = "Upstream provider timed out while refreshing live quota"
+		} else {
+			cq.ErrorMsg = err.Error()
+		}
 		return cq, err
 	}
 
-	var data router9UsageResponse
-	if err := json.Unmarshal(respBody, &data); err != nil {
-		cq.Status = "error"
-		cq.ErrorMsg = fmt.Sprintf("invalid usage JSON: %v", err)
-		return cq, err
+	if !fellBackToCache {
+		if err := json.Unmarshal(respBody, &data); err != nil {
+			cq.Status = "error"
+			cq.ErrorMsg = fmt.Sprintf("invalid usage JSON: %v", err)
+			return cq, err
+		}
 	}
 
 	if data.Error != "" {

@@ -6,41 +6,46 @@
 
 **Universal OpenAI-Compatible Gateway, Model Firewall & Multi-Provider Router**
 
-NineGuard adalah reverse proxy dan firewall cerdas berperforma tinggi untuk mengamankan, mengelompokkan, dan melacak penggunaan model LLM dari berbagai provider penyedia (*OpenAI-Compatible*) tanpa mengubah kode aplikasi client.
+NineGuard is a high-performance reverse proxy and intelligent firewall designed to secure, group, and track LLM usage across OpenAI-compatible providers without changing client application code.
 
 [![Go Version](https://img.shields.io/badge/Go-1.22%2B-00ADD8?style=flat&logo=go&logoColor=white)](https://go.dev)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat&logo=docker&logoColor=white)](https://www.docker.com)
 [![Storage](https://img.shields.io/badge/Storage-SQLite%20Pure%20Go-7952B3?style=flat)](https://modernc.org/sqlite)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+<p align="center">
+  <b>English</b> &bull;
+  <a href="README.id.md">Bahasa Indonesia</a>
+</p>
+
 </div>
 
 ---
 
-## Gambaran Umum (Overview)
+## Overview
 
-Dalam ekosistem AI engineering, tim dan developer sering menggunakan berbagai model LLM dari beragam penyedia OpenAI-compatible (seperti 9router, OpenRouter, vLLM, Ollama lokal, LiteLLM, dsb.). Namun, muncul beberapa tantangan:
+In modern AI engineering ecosystems, teams and developers frequently consume LLMs across diverse OpenAI-compatible providers (such as 9router, OpenRouter, vLLM, local Ollama, LiteLLM, etc.). However, several operational challenges arise:
 
-1. **Kebocoran Model & Kuota** — Model yang ingin di-nonaktifkan sering kali tetap bisa diakses jika client mengetahui atau mengetik nama modelnya secara manual.
-2. **Ketiadaan Kontrol API Key Client** — Client / agent langsung menggunakan master key provider upstream, sehingga sulit melacak siapa developer atau agent yang menghabiskan token.
-3. **Fragmentasi Multi-Provider** — Mengarahkan agent ke beberapa provider berbeda membutuhkan perubahan konfigurasi berulang kali.
+1. **Model & Quota Leaks** — Models intended to be disabled or restricted remain accessible if a client knows or manually enters the model ID.
+2. **Absence of Client API Key Governance** — Clients and agents connect directly with master upstream provider keys, making it difficult to trace which developer or agent consumed the quota.
+3. **Multi-Provider Fragmentation** — Routing different agents across distinct providers requires repeated, error-prone reconfiguration in each development environment.
 
-**NineGuard menyelesaikan masalah tersebut sebagai Single Gateway:**
-* **Gerbang Autentikasi Mandiri (*Strict Gatekeeper*)** — Client (Cursor, Cline, Pi, script) mengakses NineGuard menggunakan API key NineGuard (`sk-ng-...`). Tanpa key yang sah, request langsung ditolak dengan HTTP 401.
-* **Multi-Provider Routing dengan Prefix** — Daftarkan berbagai provider upstream dengan prefix kustom (misal `openrouter`, `local`, `ollama`). NineGuard menggabungkan model menjadi `openrouter/claude-3.5-sonnet`, secara otomatis memotong prefix saat meneruskan ke upstream provider yang sesuai.
-* **Per-Key Model Access Control** — Tentukan model apa saja yang diizinkan untuk masing-masing API key (whitelist kustom atau wildcard `*`). Request model di luar daftar izin ditolak seketika (HTTP 403).
-* **Firewall Model Permanen** — Mencegat request sebelum masuk ke upstream. Model yang di-disable langsung ditolak seketika dengan HTTP 403 Forbidden.
-* **Audit & Pelacakan Token Akurat** — Mencatat request, nama key client, nama model, prompt tokens, completion tokens, latency, dan IP client secara detail ke SQLite.
-* **Streaming Transparan Tanpa Latensi Tambahan** — Response Server-Sent Events (SSE) di-*flush* secara instan ke client.
-* **Single Binary Murni Tanpa Ketergantungan** — Dibangun dengan Go murni (`CGO_ENABLED=0`) dan frontend Vanilla JS yang di-embed langsung ke binary.
-* **Pemantauan Kuota Upstream & Cascaded Gateway (v1.4.0)** — Melacak kapasitas dan rolling limits provider upstream (misal rolling window 5 jam & mingguan di 9router, saldo kredit) serta gateway NineGuard bertingkat (*Office -> VM -> Local*) secara instan.
-* **Perintah Chat Langsung (`/quota`, `/limits`, `/usage`)** — Cek sisa kuota personal dan kapasitas upstream langsung dari jendela percakapan Cursor/Cline/Pi/IDE tanpa membuka browser, menghabiskan 0 token upstream.
-* **Secret Vault (Enkripsi AES-256-GCM di Database)** — Seluruh API key dan password upstream dienkripsi otomatis saat disimpan di SQLite menggunakan cipher AES-256-GCM terotentikasi.
-* **Proteksi Loop Rekursif (*Anti-Recursion Loop Guard*)** — Header `X-NineGuard-Trace` dan penghitung hop otomatis memblokir panggilan melingkar antar-gateway bertingkat (HTTP 508 Loop Detected).
+**NineGuard resolves these challenges as a Unified Gateway:**
+* **Strict Gatekeeper** — Clients (Cursor, Cline, Pi, custom scripts) authenticate using dedicated NineGuard API keys (`sk-ng-...`). Requests without a valid key are instantly rejected with HTTP 401 Unauthorized.
+* **Prefix Multi-Provider Routing** — Register upstream providers with custom routing prefixes (e.g. `openrouter`, `local`, `ollama`). NineGuard aggregates models into prefixed identifiers like `openrouter/claude-3.5-sonnet` and automatically strips the prefix when forwarding requests to the target provider.
+* **Per-Key Model Access Control** — Restrict accessible models per API key (custom whitelist, dynamic Model Groups, or global wildcard `*`). Requests for unlisted models are blocked immediately (HTTP 403 Forbidden).
+* **Permanent Model Firewall** — Intercept requests before they hit upstream endpoints. Disabled models are blocked on the spot with HTTP 403 Forbidden.
+* **Accurate Token Audit & Telemetry** — Captures request metadata, client key name, model ID, prompt tokens, completion tokens, latency, and client IP address in embedded SQLite.
+* **Zero-Latency Transparent Streaming** — Server-Sent Events (SSE) responses are flushed instantly back to the client.
+* **Pure Dependency-Free Single Binary** — Built with pure Go (`CGO_ENABLED=0`) and a Vanilla JS single-page frontend embedded directly into the binary.
+* **Upstream Quota Tracking & Cascaded Gateways (v1.4.0)** — Live visibility into upstream capacities and rolling limits (e.g. 5-hour rolling windows and weekly allowances in 9router, prepaid balances) as well as cascaded NineGuard gateways (*Office -> VM -> Local*).
+* **Direct Chat Commands (`/quota`, `/limits`, `/usage`)** — Inspect remaining key allowances and upstream capacity directly from within Cursor/Cline/Pi/IDE chat windows without leaving the workspace, consuming 0 upstream tokens.
+* **Secret Vault (AES-256-GCM Encryption-at-Rest)** — All upstream API keys, passwords, and secrets are encrypted at rest in SQLite using authenticated AES-256-GCM.
+* **Anti-Recursion Loop Guard** — `X-NineGuard-Trace` header and hop counters detect and block cyclic loops between cascaded gateways with HTTP 508 Loop Detected.
 
 ---
 
-## Tampilan Antarmuka (Screenshots)
+## Screenshots
 
 ### Web (Desktop)
 
@@ -52,17 +57,17 @@ Dalam ekosistem AI engineering, tim dan developer sering menggunakan berbagai mo
 
 ### Mobile
 
-Di layar ≤ 860px, sidebar diganti **Bottom Navigation**: Dashboard, Traffic, Keys, Providers, dan **More** (sheet berisi halaman lainnya, Search, dan Theme).
+On displays ≤ 860px, the sidebar is replaced by **Bottom Navigation**: Dashboard, Traffic, Keys, Providers, and **More** (sheet containing additional views, Search, and Theme toggle).
 
-| Dashboard | Plugins + menu More | Mode terang |
+| Dashboard | Plugins + More Menu | Light Theme |
 | --- | --- | --- |
-| <img src="docs/images/mobile-dashboard.png" width="240" alt="Dashboard mobile"> | <img src="docs/images/mobile-more.png" width="240" alt="Menu More"> | <img src="docs/images/mobile-light.png" width="240" alt="Mode terang"> |
+| <img src="docs/images/mobile-dashboard.png" width="240" alt="Mobile Dashboard"> | <img src="docs/images/mobile-more.png" width="240" alt="More Menu"> | <img src="docs/images/mobile-light.png" width="240" alt="Light Mode"> |
 
 ---
 
-## Arsitektur: Bagaimana NineGuard Bekerja?
+## Architecture: How NineGuard Works
 
-NineGuard bertindak sebagai gateway tunggal antara AI Coding Agents dan Upstream Providers:
+NineGuard acts as a unified gateway between AI Coding Agents and Upstream Providers:
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
@@ -74,16 +79,16 @@ NineGuard bertindak sebagai gateway tunggal antara AI Coding Agents dan Upstream
 ┌─────────────────────────────────────────────────────────────┐
 │  NineGuard Gateway (:8080)                                  │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │ 1. Gatekeeper: Validasi NineGuard Client API Key      │  │
-│  │    • Tidak Valid? ──► Tolak (HTTP 401 Unauthorized)   │  │
-│  │ 2. Firewall & Access Control: Cek Izin Model Per-Key  │  │
-│  │    • Model Tidak Diizinkan? ──► Tolak (403 Forbidden) │  │
-│  │ 3. Prefix Router: Identifikasi Provider Berdasarkan   │  │
-│  │    Prefix Model (contoh: openrouter/... atau local/..)│  │
-│  │ 4. Telemetry: Rekam Log, Latensi, & Token Usage       │  │
+│  │ 1. Gatekeeper: Validate NineGuard Client API Key      │  │
+│  │    • Invalid? ──► Reject (HTTP 401 Unauthorized)      │  │
+│  │ 2. Firewall & Access Control: Check Model Permission  │  │
+│  │    • Unauthorized? ──► Block (HTTP 403 Forbidden)     │  │
+│  │ 3. Prefix Router: Route Provider by Model Prefix      │  │
+│  │    (e.g., openrouter/... or local/..)                 │  │
+│  │ 4. Telemetry: Record Logs, Latency, & Token Usage     │  │
 │  └───────────────────────────────────────────────────────┘  │
 └──────────────────────────────┬──────────────────────────────┘
-                               │  Injeksi Upstream Master API Key
+                               │  Upstream Master API Key Injection
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Upstream OpenAI-Compatible Providers                       │
@@ -95,138 +100,142 @@ NineGuard bertindak sebagai gateway tunggal antara AI Coding Agents dan Upstream
 
 ---
 
-## Fitur Utama
+## Key Features
 
-| Fitur | Penjelasan |
+| Feature | Description |
 |---|---|
-| **Multi-Provider Routing** | Daftarkan rute upstream OpenAI-compatible dan kelompokkan model dengan prefix (e.g. `openrouter/model-id`). |
-| **Client Key Management** | Terbitkan dan cabut API key NineGuard (`sk-ng-...`) untuk melacak konsumsi tiap agent. |
-| **Per-Key Model Access Control** | Atur hak akses model per API key (akses global `*`, Model Groups dinamis, atau custom whitelist). |
-| **Model Groups** | Kelompokkan model ke grup reusable (e.g. GPT Ecosystem, Claude) dengan sinkronisasi dinamis ke API key. |
-| **Model Firewall** | Aktifkan/nonaktifkan model secara instan dengan HTTP 403 Forbidden. |
-| **Key Quotas & Rate Limiting** | Batasi anggaran token per API key (harian, mingguan, bulanan, lifetime) dengan soft post-facto gating, respons standar HTTP 429, header `Retry-After` (kecuali kuota lifetime yang tidak pernah reset), dan notifikasi waktu reset (WIB & UTC). |
-| **Model Quotas (Per Model)** | Alternatif Key Quota: tiap API key bisa punya batas token terpisah untuk model tertentu (misalnya `openai/gpt-4o` 50k/hari, `anthropic/claude-sonnet` 1M/bulan). Satu key memakai salah satu mode (Key Quota atau Per Model), tidak keduanya, dan pengaturan mode yang tidak aktif tetap tersimpan. Model tanpa batas tetap berjalan. Saat batas tercapai, respons HTTP 429 `model_quota_exceeded` hanya untuk model tersebut. |
-| **Halaman Quotas & Peringatan** | Halaman **Quotas** menampilkan pemakaian semua key dan model (difilter berdasarkan mode/status), kartu "Quotas near limit" di Dashboard, dan kolom Quota di tabel keys. Ambang peringatan diatur lewat `quota_warn_percent` (default 80%). |
-| **Token Burn Velocity & Presets** | Pantau laju konsumsi historis (24 jam, rata-rata 7 hari, 30 hari) per key untuk membantu penentuan batas kuota dengan tombol preset instan (1.5x / 2x rata-rata) yang mengikuti periode reset yang dipilih (daily, weekly, atau monthly). Tersedia untuk Key Quota dan tiap baris Model Quota. |
-| **Plugin Pipeline & Token Savers** | Hemat token dan modifikasi request otomatis via built-in plugins (Headroom, Ponytail, Caveman) atau layanan HTTP eksternal dengan urutan pipeline global dan hierarki override (Global $\rightarrow$ Model Group $\rightarrow$ API Key). |
-| **Secret Leak Guardrail (SecretGuard)** | Cegah kebocoran API token (`sk-`, `ghp-`, `AKIA`), private key, dan environment credential ke LLM upstream dengan inspeksi regex (pilihan mode Block HTTP 403, Redact in-flight, atau Audit mode). |
-| **Traffic Spike Alerts** | Tandai request raksasa yang melewati ambang batas (`heavy_token_threshold`) dengan badge peringatan ⚠️ di Traffic Explorer dan log audit tanpa memutus request. |
-| **Multimodal Image Logging** | Deteksi dan lacak request yang menyertakan input gambar/vision dalam riwayat percakapan beserta badge `🖼️ N img` dan filter eksplorasi. |
-| **Payload Inspector & Request Replay** | Inspeksi payload body request dan response (limit 512KB, auto-purge 7 hari), salin perintah cURL 1-klik, dan replay request langsung dari dashboard. |
-| **Auto & Manual Model Fetch** | Ambil daftar model otomatis dari semua provider aktif dan tampilkan secara terpusat. |
-| **Interactive Trend Line Chart** | Visualisasi throughput request, volume token, dan latensi respons dengan grafik interaktif. |
-| **Usage Reports & Breakdown** | Audit "siapa saja pemakai tokennya" dengan filter periode preset (Today, 7D, 30D, Month, Last Month) dan Custom Date Range. |
-| **Traffic Explorer** | Log real-time berdensitas tinggi dengan filter nama key client, status HTTP, dan live tail. |
-| **System Log & Audit Explorer** | Monitoring log gateway internal, rotasi SQLite, filter sumber komponen, dan audit keamanan RBAC. |
-| **Interactive TUI & System Tray** | Antarmuka terminal interaktif dan icon tray Windows/macOS/Linux untuk kemudahan monitoring & akses cepat ke dashboard. |
-| **Agent Setup Guides** | Panduan integrasi siap salin untuk Cursor IDE, Cline, Continue.dev, Pi Agent, Python, Node.js, dan cURL. |
+| **Multi-Provider Routing** | Register upstream OpenAI-compatible routes and namespace models with custom prefixes (e.g. `openrouter/model-id`). |
+| **Client Key Management** | Issue and revoke scoped NineGuard API keys (`sk-ng-...`) to track consumption per agent. |
+| **Per-Key Model Access Control** | Enforce model permissions per API key (global wildcard `*`, dynamic Model Groups, or manual whitelist). |
+| **Model Groups** | Organize models into reusable groups (e.g. GPT Ecosystem, Claude) with dynamic synchronization to associated keys. |
+| **Model Firewall** | Enable/disable models instantly with HTTP 403 Forbidden enforcement. |
+| **Key Quotas & Rate Limiting** | Impose token budgets per API key (daily, weekly, monthly, lifetime) with soft post-facto gating, standard HTTP 429 responses, `Retry-After` headers (except lifetime quotas which never reset), and reset countdowns. |
+| **Model Quotas (Per Model)** | Alternative to Key Quota: keys can have individual token ceilings for specific models (e.g. `openai/gpt-4o` 50k/day, `anthropic/claude-sonnet` 1M/month). A key uses one mode at a time without losing settings of the inactive mode. When depleted, HTTP 429 `model_quota_exceeded` blocks only that specific model. |
+| **Quotas View & Alerts** | Dedicated **Quotas** view displaying usage across all keys and models (filterable by mode/status), "Quotas near limit" cards on the Dashboard, and inline quota status in the keys table. Alert threshold configured via `quota_warn_percent` (default 80%). |
+| **Token Burn Velocity & Presets** | Monitor historical consumption velocity (24 hours, 7-day average, 30 days) per key to guide quota sizing with 1-click preset buttons (1.5x / 2x average) matching the selected reset period (daily, weekly, monthly). |
+| **Plugin Pipeline & Token Savers** | Trim tokens and modify requests automatically via built-in plugins (Headroom, Ponytail, Caveman) or external HTTP webhooks with global pipeline ordering and hierarchical overrides (Global $\rightarrow$ Model Group $\rightarrow$ API Key). |
+| **Secret Leak Guardrail (SecretGuard)** | Prevent leakage of API tokens (`sk-`, `ghp-`, `AKIA`), private keys, and environment secrets into upstream LLM prompts with regex inspection (Block HTTP 403, Redact in-flight, or Audit mode). |
+| **Traffic Spike Alerts** | Flag oversized requests exceeding thresholds (`heavy_token_threshold`) with ⚠️ warning badges in Traffic Explorer and audit logs without dropping the connection. |
+| **Multimodal Image Logging** | Detect and track requests containing image/vision payloads in chat history with `🖼️ N img` badges and search filters. |
+| **Payload Inspector & Request Replay** | Inspect request and response bodies (512KB limit, 7-day auto-purge), copy 1-click cURL commands, and replay requests directly from the dashboard. |
+| **Auto & Manual Model Fetch** | Pull live model catalogs from all active upstream providers and aggregate them into a centralized view. |
+| **Interactive Trend Charts** | Visualize request throughput, token volume, and response latencies with interactive time-series charts. |
+| **Usage Reports & Breakdown** | Audit "who is consuming what" with preset timeframes (Today, 7D, 30D, Month, Last Month) and Custom Date Ranges. |
+| **Traffic Explorer** | High-density real-time request logs with key name, model ID, HTTP status filters, and live tail mode. |
+| **System Log & Audit Explorer** | Monitor internal gateway runtime logs, SQLite rotation, component source filters, and security RBAC audits. |
+| **Interactive TUI & System Tray** | Terminal user interface with live logs and background controls, plus system tray support on Windows/macOS/Linux. |
+| **Agent Setup Guides** | Ready-to-copy setup instructions for Cursor IDE, Cline, Continue.dev, Pi Agent, Python, Node.js, and cURL. |
 
 ---
 
-## Instalasi & Menjalankan
+## Installation & Running
 
-### Cara 1: Menggunakan Binary Go (Linux & macOS)
+### Option 1: Using Go Binary (Linux & macOS)
 
-NineGuard mendukung 2 kondisi arsitektur target:
+NineGuard supports 2 target deployment profiles:
 1. **Desktop Environment / Window Manager (Linux GUI, macOS):**
-   - Mendukung integrasi **System Tray** di area notifikasi desktop (KDE Plasma, GNOME, XFCE, i3, Sway, Hyprland, dll.).
-   - Menu TUI menampilkan opsi: **`Hide to Tray (Background)`**.
-   - Menggunakan CGO untuk berinteraksi dengan display server / StatusNotifierItem.
+   - Integrates with the **System Tray** notification area (KDE Plasma, GNOME, XFCE, i3, Sway, Hyprland, etc.).
+   - TUI menu includes: **`Hide to Tray (Background)`**.
+   - Uses CGO to communicate with display servers and StatusNotifierItem.
 2. **Linux Server / Headless Environment:**
-   - Single binary **Pure Go** tanpa dependensi library GUI / CGO (`CGO_ENABLED=0`, `-tags server`).
-   - Tidak memerlukan system tray; berfokus pada **Background Daemon Process** yang terpisah dari sesi terminal/SSH.
-   - Menu TUI otomatis beradaptasi menampilkan opsi: **`Run in Background (Daemon)`**.
-   - Jika dijalankan dengan flag `-t / --tray` di server, NineGuard otomatis *fallback* aman ke mode background daemon tanpa crash.
+   - Pure Go single binary without GUI or CGO dependencies (`CGO_ENABLED=0`, `-tags server`).
+   - No tray needed; operates as a **Background Daemon Process** detached from terminal/SSH sessions.
+   - TUI menu automatically adapts to show: **`Run in Background (Daemon)`**.
+   - If invoked with `-t / --tray` on headless servers, NineGuard safely falls back to background daemon mode without crashing.
 
 ```bash
-# 1. Masuk ke direktori NineGuard
+# 1. Enter NineGuard project directory
 cd nineguard
 
-# 2. Build sesuai kebutuhan:
-# Opsi A: Deteksi otomatis (jika ada Desktop Environment/WM -> Desktop, jika server -> Server)
+# 2. Build according to your environment:
+# Option A: Automatic detection (Desktop GUI if display manager found, otherwise Server)
 make build
 
-# Opsi B: Build khusus Desktop (dengan System Tray)
+# Option B: Explicit Desktop build (with System Tray support)
 make build-desktop
 
-# Opsi C: Build khusus Linux Server (Headless Daemon, pure Go tanpa CGO/GTK)
+# Option C: Explicit Linux Server build (Headless Daemon, pure Go without CGO/GTK)
 make build-server
 
-# Opsi D: Build semua target sekaligus (nineguard, nineguard-server, nineguard.exe)
+# Option D: Build all deployment targets at once (nineguard, nineguard-server, nineguard.exe)
 make build-all
 
-# 3. Jalankan NineGuard
+# 3. Start NineGuard
 ./nineguard
 ```
 
-#### Mode Eksekusi CLI & Background (Linux / Server)
+#### CLI & Background Execution Modes (Linux / Server)
 
-| Perintah | Mode | Keterangan |
+| Command | Mode | Description |
 |---|---|---|
-| `./nineguard` | **Interactive TUI** | Menampilkan antarmuka interaktif: browser shortcut, live log, dan background process. Menu otomatis menyesuaikan: `Hide to Tray (Background)` di Desktop GUI atau `Run in Background (Daemon)` di Server. |
-| `./nineguard -d` / `--daemon` | **Headless Daemon** | Berjalan di latar belakang tanpa TUI (cocok untuk systemd, Docker, atau server background). |
-| `./nineguard -t` / `--tray` | **System Tray / Daemon** | Berjalan di system tray jika ada GUI session; otomatis *fallback* ke daemon mode yang stabil jika di server. |
-| `./nineguard -l` / `--logs` | **Live Stream Logs** | Menjalankan server dan langsung menampilkan live log request HTTP di terminal. |
-| `./nineguard -p 9090` | **Custom Port** | Menjalankan server pada port tertentu (default: `8080`). |
+| `./nineguard` | **Interactive TUI** | Launches interactive terminal interface with status summaries, browser shortcuts, and background actions. Automatically adapts between Desktop tray and Server daemon modes. |
+| `./nineguard -d` / `--daemon` | **Headless Daemon** | Runs in the background without terminal UI (suitable for systemd, Docker, or background server tasks). |
+| `./nineguard -t` / `--tray` | **System Tray / Daemon** | Minimizes to system tray if GUI session exists; safely falls back to background daemon on headless servers. |
+| `./nineguard -l` / `--logs` | **Live Stream Logs** | Starts server and streams HTTP request logs directly to the terminal. |
+| `./nineguard -p 9090` | **Custom Port** | Overrides HTTP server listening port (default: `8080`). |
 
-Buka browser di **`http://localhost:8080/`**. Pada kunjungan pertama, buat akun administrator Anda.
+Open your browser at **`http://localhost:8080/`**. On your first visit, set up your administrator credentials.
 
-### Cara 2: Build & Menjalankan di Windows
+---
 
-NineGuard dirancang sebagai single-binary mandiri dengan SQLite murni (`modernc.org/sqlite`). Anda **tidak memerlukan compiler C (CGO / MinGW / GCC)** untuk mengompilasinya di Windows.
+### Option 2: Build & Run on Windows
 
-#### 1. Build Langsung di Windows (PowerShell / Command Prompt)
+NineGuard is engineered as a standalone single binary with pure Go SQLite (`modernc.org/sqlite`). You **do not need a C compiler (CGO / MinGW / GCC)** to compile on Windows.
 
-Pastikan Go 1.22+ sudah terpasang di sistem Windows Anda:
+#### 1. Native Windows Build (PowerShell / Command Prompt)
+
+Ensure Go 1.22+ is installed on your Windows machine:
 
 ```powershell
-# 1. Masuk ke direktori NineGuard
+# 1. Enter NineGuard directory
 cd nineguard
 
-# 2. Build binary executable
+# 2. Build executable binary
 go build -o nineguard.exe cmd/nineguard/main.go
 
-# 3. Jalankan NineGuard (Interactive TUI Menu)
+# 3. Run NineGuard (Interactive TUI Menu)
 .\nineguard.exe
 ```
 
-> **Tip (Background / System Tray Mode Tanpa Jendela Terminal):**
-> Jika Anda ingin menjalankan NineGuard di latar belakang dan langsung masuk ke System Tray tanpa memunculkan jendela console (Command Prompt) hitam, gunakan flag linker `-H=windowsgui`:
+> **Tip (Background / System Tray Mode Without Terminal Window):**
+> To run NineGuard in the background directly inside the System Tray without keeping a black Command Prompt window open, pass the `-H=windowsgui` linker flag:
 > ```powershell
 > go build -ldflags="-H=windowsgui" -o nineguard.exe cmd/nineguard/main.go
 > .\nineguard.exe -t
 > ```
 
-#### 2. Cross-Compile untuk Windows dari Linux / macOS
+#### 2. Cross-Compile for Windows from Linux / macOS
 
-Anda dapat mengompilasi binary `.exe` untuk Windows langsung dari Linux atau macOS:
+You can cross-compile the Windows `.exe` directly from Linux or macOS:
 
 ```bash
 # Console / Interactive TUI mode
 GOOS=windows GOARCH=amd64 go build -o nineguard.exe cmd/nineguard/main.go
 
-# GUI / System Tray mode (tanpa popup jendela console)
+# GUI / System Tray mode (no console window popup)
 GOOS=windows GOARCH=amd64 go build -ldflags="-H=windowsgui" -o nineguard.exe cmd/nineguard/main.go
 ```
 
-#### 3. Mode Eksekusi CLI di Windows
+#### 3. CLI Execution Modes on Windows
 
-| Perintah | Mode | Keterangan |
+| Command | Mode | Description |
 |---|---|---|
-| `.\nineguard.exe` | **Interactive TUI** | Menampilkan antarmuka terminal interaktif dengan ringkasan status, pintasan browser, dan live log. |
-| `.\nineguard.exe -t` / `--tray` | **System Tray** | Berjalan di tray taskbar Windows. Klik ikon NineGuard untuk membuka dashboard atau keluar. |
-| `.\nineguard.exe -l` / `--logs` | **Live Logs** | Menjalankan server dan langsung streaming log HTTP/traffic di terminal. |
-| `.\nineguard.exe -d` / `--daemon` | **Headless / Service** | Mode daemon tanpa UI terminal (cocok untuk Task Scheduler atau Windows Service). |
-| `.\nineguard.exe -p 9090` | **Custom Port** | Mengubah port listen server HTTP (default: `8080`). |
+| `.\nineguard.exe` | **Interactive TUI** | Terminal user interface with status cards, browser launcher, and live request log viewer. |
+| `.\nineguard.exe -t` / `--tray` | **System Tray** | Runs in Windows system tray. Click the NineGuard icon to open dashboard or exit. |
+| `.\nineguard.exe -l` / `--logs` | **Live Logs** | Starts server and streams HTTP/traffic logs directly in console. |
+| `.\nineguard.exe -d` / `--daemon` | **Headless / Service** | Background mode without terminal UI (suitable for Task Scheduler or Windows Service). |
+| `.\nineguard.exe -p 9090` | **Custom Port** | Overrides HTTP listen port (default: `8080`). |
 
-### Cara 3: Menggunakan Docker
+---
 
-#### Opsi A: Menggunakan Image Resmi (GHCR)
+### Option 3: Using Docker
+
+#### Option A: Using Official GHCR Image
 ```bash
-# Tarik image terbaru atau versi spesifik
+# Pull latest or specific tag
 docker pull ghcr.io/darktama/nineguard:latest
 
-# Jalankan container
+# Run container
 docker run -d \
   --name nineguard \
   --restart unless-stopped \
@@ -234,17 +243,17 @@ docker run -d \
   -v nineguard-data:/data \
   ghcr.io/darktama/nineguard:latest
 
-# Cek versi yang terpasang
+# Check installed version
 docker exec nineguard /app/nineguard --version
 ```
 
-#### Opsi B: Build Sendiri dengan Versioning
+#### Option B: Build Local Docker Image
 ```bash
-# 1. Build image Docker dengan git tag & commit otomatis
+# 1. Build Docker image with git metadata
 make build-docker
-# atau via script: ./scripts/build.sh docker
+# or via script: ./scripts/build.sh docker
 
-# 2. Jalankan container (bind ke localhost saja)
+# 2. Run container (bound to localhost only)
 docker run -d \
   --name nineguard \
   --restart unless-stopped \
@@ -253,152 +262,148 @@ docker run -d \
   nineguard:latest
 ```
 
-#### Docker Compose (NineGuard + 9router)
+#### Docker Compose (NineGuard + 9router Stack)
 
 ```bash
-# 1. Siapkan secret 9router
+# 1. Prepare environment variables
 cp .env.example .env
-# isi NINEROUTER_* di .env (generate: openssl rand -hex 32)
+# Fill in NINEROUTER_* secrets (generate: openssl rand -hex 32)
 
-# 2. Jalankan stack
+# 2. Start stack
 docker compose up -d --build
 
-# 3. Akses dari mesin lokal via SSH tunnel
+# 3. Access from local machine via SSH tunnel
 ssh -L 8080:localhost:8080 -L 20128:localhost:20128 user@VM_IP
 ```
 
-* NineGuard: `http://localhost:8080/` (buat akun admin pada kunjungan pertama).
-* 9router: `http://localhost:20128/dashboard` — buat API key di sini.
-* Daftarkan 9router di NineGuard (**Gateway → Providers**) dengan URL `http://9router:20128/v1` dan API key 9router.
-* Kedua port hanya bind ke `127.0.0.1`. Untuk akses publik, gunakan reverse proxy dengan TLS (Caddy/nginx).
+* NineGuard: `http://localhost:8080/` (set up admin account on first visit).
+* 9router: `http://localhost:20128/dashboard` — issue your API keys here.
+* Register 9router in NineGuard (**Gateway → Providers**) using `http://9router:20128/v1` and the 9router API key.
+* Both services bind strictly to `127.0.0.1`. For remote public access, place them behind a TLS reverse proxy (Caddy/Nginx).
 
 ---
 
-## Konfigurasi Lingkungan (Environment Variables)
+## Environment Variables
 
-File `.env` otomatis dibaca saat startup (hanya port, auth, dan path database yang dibutuhkan di env):
+The `.env` file is loaded automatically on startup. Only ports, authentication toggles, and data paths are configured via environment:
 
-| Variabel Lingkungan | Nilai Bawaan | Keterangan |
+| Variable | Default | Description |
 |---|---|---|
-| `NINEGUARD_PORT` | `8080` | Port listen server NineGuard |
-| `NINEGUARD_AUTH_ENABLED` | `true` | Proteksi login dashboard (`true`/`false`) |
-| `NINEGUARD_DB_FILE` | `./data/nineguard.db` | Lokasi file database SQLite lokal NineGuard |
-| `NINEGUARD_AUTH_FILE` | `./data/auth.json` | Lokasi file fallback autentikasi (opsional) |
-| `NINEGUARD_ENCRYPTION_KEY` | *(Auto-generated)* | Kunci master AES-256 (32 byte / 64 hex) untuk Secret Vault. Jika kosong, NineGuard otomatis membuat dan menyimpan kunci di `data/.master.key` (mode 0600). |
+| `NINEGUARD_PORT` | `8080` | HTTP server listening port |
+| `NINEGUARD_AUTH_ENABLED` | `true` | Dashboard authentication requirement (`true`/`false`) |
+| `NINEGUARD_DB_FILE` | `./data/nineguard.db` | Local SQLite database file path |
+| `NINEGUARD_AUTH_FILE` | `./data/auth.json` | Fallback authentication file path (optional) |
+| `NINEGUARD_ENCRYPTION_KEY` | *(Auto-generated)* | AES-256 master key (32 bytes / 64 hex characters) for Secret Vault. If empty, NineGuard generates and persists a key at `data/.master.key` (mode 0600). |
 
-*Catatan: Upstream provider dikelola langsung secara dinamis melalui UI Dashboard (menu Providers) dan tersimpan di database lokal, sehingga tidak perlu mengatur target upstream di `.env`.*
-
----
-
-## Panduan Pengaturan Cepat
-
-> **Penting Mengenai Navigasi Dashboard & Gateway:**
-> Tombol untuk membuat API key, mendaftarkan provider, maupun mengelola model **tidak berada di halaman Dashboard (`#/dashboard`)**. Halaman **Dashboard** difungsikan murni untuk observabilitas dan monitoring (metrik KPI, grafik volume request, breakdown token, dan inspeksi error). Seluruh konfigurasi sistem berada di menu kelompok **Gateway** pada sidebar:
-> * Registrasi Provider: **Gateway $\rightarrow$ Providers**
-> * Generate & Kelola API Key: **Gateway $\rightarrow$ Endpoints & Keys**
-> * Firewall & Sinkronisasi Model: **Gateway $\rightarrow$ Models**
-> * Telemetri & Laporan: **Gateway $\rightarrow$ Traffic Explorer**, **Log Explorer**, & **Usage Reports**
+*Note: Upstream providers are managed dynamically through the Web UI (Providers view) and persisted in SQLite; target URLs do not need to be hardcoded in `.env`.*
 
 ---
 
-### 1. Daftarkan Upstream Provider
-Masuk ke menu **Gateway $\rightarrow$ Providers**:
-1. Klik tombol **`+ Add Provider`** (terletak di kanan atas halaman atau pada kartu kosong jika belum ada provider).
-2. Isi formulir modal dialog:
-   * **Provider Name:** Nama penyedia (contoh: `OpenRouter Cloud` atau `Local Ollama`).
-   * **Model Routing Prefix:** Prefix rute model (contoh: `openrouter` atau `local`). Kosongkan jika ingin dijadikan root tanpa prefix.
-   * **Route / Target URL:** Endpoint URL OpenAI-compatible (contoh: `https://openrouter.ai/api/v1` atau `http://localhost:11434`).
-   * **Upstream API Key:** Master API key upstream (kosongkan jika provider lokal tidak membutuhkan key).
-   * **Set as Default Provider:** Centang opsi ini jika ingin menjadikannya rute fallback untuk request model tanpa prefix.
-3. Klik tombol **`Add Provider`** di pojok kanan bawah modal untuk menyimpan.
-4. Setelah provider berhasil ditambahkan dan kartu provider muncul di daftar, klik tombol **`Test Probe`** pada kartu tersebut untuk memverifikasi koneksi. Jika berhasil, status akan menampilkan tanda centang hijau *Connected (HTTP 200 OK)* beserta latensi dan jumlah model.
+## Quick Setup Guide
+
+> **Important Note on Dashboard Navigation:**
+> Action buttons for generating API keys, registering providers, and toggling models are **not located on the Dashboard overview page (`#/dashboard`)**. The **Dashboard** is strictly reserved for observability (KPI metric cards, request volume charts, token breakdown, and error inspection). System configuration resides under the **Gateway** menu section in the sidebar:
+> * Provider Registration: **Gateway $\rightarrow$ Providers**
+> * API Key Generation & Scopes: **Gateway $\rightarrow$ Endpoints & Keys**
+> * Model Firewall & Sync: **Gateway $\rightarrow$ Models**
+> * Telemetry & Logs: **Gateway $\rightarrow$ Traffic Explorer**, **Log Explorer**, & **Usage Reports**
 
 ---
 
-### 2. Generate NineGuard API Key untuk Agent
-Masuk ke menu **Gateway $\rightarrow$ Endpoints & Keys** *(bukan di halaman Dashboard)*:
-1. Pada kartu **NineGuard Client API Keys**, klik tombol **`+ Generate New Key`** di kanan atas kartu.
-2. Pada modal **Generate New NineGuard API Key**:
-   * **Key Name / Description:** Beri nama identifikasi agent/developer (misal: `Cursor IDE`, `Cline Mac`, atau `Pi Agent`). Nama ini akan dicatat di log traffic dan laporan penggunaan token.
-   * **Allowed Models (Access Control):** Tentukan hak akses model dengan memilih salah satu dari 3 mode:
-     * **All Models (Global):** Memberikan akses ke semua model yang aktif di firewall global. Model baru yang ditambahkan di masa depan otomatis langsung bisa diakses.
-     * **Model Groups:** Menautkan API key ke satu atau beberapa grup model (misal: grup *OpenAI Models* atau *Claude*). Bersifat *dynamic sync* sehingga pembaruan isi grup langsung berlaku ke key ini.
-     * **Custom Selection:** Memilih model secara spesifik dari checklist yang tersedia, atau mengetik wildcard/ID model kustom (contoh: `openrouter/*`).
-3. Klik tombol **`Generate Key`** di pojok kanan bawah modal.
-4. Pop-up dialog **NineGuard API Key Generated** akan muncul menampilkan key baru (`sk-ng-...`).
-5. Klik tombol **`Copy Key`** untuk menyalin token ke clipboard.
-   > **Catatan Keamanan:** Token lengkap hanya ditampilkan sekali saat dibuat. Simpan key ini di tempat aman karena NineGuard hanya menyimpan hash key di database.
+### 1. Register an Upstream Provider
+Navigate to **Gateway $\rightarrow$ Providers**:
+1. Click **`+ Add Provider`** (located at top-right or inside the empty state card).
+2. Complete the dialog form:
+   * **Provider Name:** Provider display name (e.g. `OpenRouter Cloud` or `Local Ollama`).
+   * **Model Routing Prefix:** Routing prefix (e.g. `openrouter` or `local`). Leave blank to use as root provider.
+   * **Route / Target URL:** OpenAI-compatible base URL (e.g. `https://openrouter.ai/api/v1` or `http://localhost:11434`).
+   * **Upstream API Key:** Master API key for the provider (leave empty for local unauthenticated models).
+   * **Set as Default Provider:** Check this box if you want this provider to act as fallback for unprefixed model requests.
+3. Click **`Add Provider`** to save.
+4. Click **`Test Probe`** on the new provider card to verify connectivity. A green checkmark with response latency confirms success.
 
 ---
 
-### 3. Sinkronisasi Model & Pengujian (Opsional tapi Direkomendasikan)
-* **Ambil Daftar Model Terbaru:**
-  Masuk ke menu **Gateway $\rightarrow$ Models**, lalu klik tombol **`Fetch from Providers`** di kanan atas untuk menyinkronkan seluruh model dari upstream provider yang aktif. Anda juga bisa mengelompokkan model di tab **Model Groups** dengan tombol **`+ Create Model Group`**.
-* **Live Endpoint Tester di Browser:**
-  Masuk ke menu **Gateway $\rightarrow$ Endpoints & Keys**, lalu gulir ke bagian **Live Endpoint Tester** di bawah. Pilih model target, pilih API key NineGuard yang baru dibuat, ketik prompt uji coba, dan klik **Send Test Request** untuk memastikan respons mengalir lancar sebelum diterapkan ke IDE / AI Agent.
+### 2. Generate a NineGuard API Key for Agents
+Navigate to **Gateway $\rightarrow$ Endpoints & Keys**:
+1. On the **NineGuard Client API Keys** card, click **`+ Generate New Key`**.
+2. Complete the modal form:
+   * **Key Name / Description:** Agent or developer identifier (e.g. `Cursor IDE`, `Cline Mac`, or `Pi Agent`). This label is tagged across all logs and reports.
+   * **Allowed Models (Access Control):** Choose one of three access modes:
+     * **All Models (Global):** Grants access to all models permitted by the global firewall. New models added later are available immediately.
+     * **Model Groups:** Links key to one or more dynamic Model Groups (e.g. *OpenAI Models* or *Claude*). Automatically synchronizes when group members change.
+     * **Custom Selection:** Explicit checklist selection or custom model patterns/wildcards (e.g. `openrouter/*`).
+3. Click **`Generate Key`**.
+4. The **NineGuard API Key Generated** dialog displays the new token (`sk-ng-...`).
+5. Click **`Copy Key`** to copy to clipboard.
+   > **Security Note:** The full token is only shown once at creation time. Store it securely; NineGuard only stores a cryptographic hash in SQLite.
 
 ---
 
-### 4. Konfigurasikan pada AI Agent / IDE
-Atur pengaturan OpenAI-compatible pada agent atau IDE Anda:
+### 3. Model Synchronization & Testing (Recommended)
+* **Fetch Live Models:**
+  Go to **Gateway $\rightarrow$ Models**, then click **`Fetch from Providers`** at the top right to query and synchronize model catalogs from all active providers.
+* **In-Browser Endpoint Tester:**
+  Go to **Gateway $\rightarrow$ Endpoints & Keys**, scroll down to the **Live Endpoint Tester**, select your model and key, enter a test prompt, and click **Send Test Request** to verify streaming before configuring external agents.
+
+---
+
+### 4. Configure Your AI Agent / IDE
+Set OpenAI-compatible options in your editor or tool:
 * **Base URL:** `http://localhost:8080/v1`
-* **API Key:** `sk-ng-...` (NineGuard Client API Key yang baru disalin pada Langkah 2)
-* **Model ID:** Pilih model yang telah diberi prefix provider (misal: `openrouter/anthropic/claude-3.5-sonnet` atau model lokal `local/llama3:8b`).
+* **API Key:** `sk-ng-...` (The key generated in Step 2)
+* **Model ID:** Prefixed model identifier (e.g. `openrouter/anthropic/claude-3.5-sonnet` or local `local/llama3:8b`).
 
 ---
 
-## Model Groups (Template Akses Model)
+## Model Groups (Access Control Templates)
 
-**Model Group** adalah template daftar model yang diizinkan. Alih-alih mengatur whitelist model satu per satu di setiap API key, buat satu grup (misal *Claude*, *Model Murah*, *Tim Frontend*) lalu tautkan ke banyak key sekaligus. Setiap agent/pengguna yang memakai key tersebut hanya bisa mengakses model di dalam grupnya.
+A **Model Group** is a reusable template of permitted models. Instead of manually configuring whitelists across dozens of individual API keys, create a group (e.g. *Claude Only*, *Budget Models*, *Frontend Team*) and assign it to multiple keys.
 
-### Mode Akses API Key
+### Key Access Modes
 
-Setiap API key memiliki tepat **satu** mode akses (`model_access_mode`):
+Every API key has exactly **one** access mode (`model_access_mode`):
 
-| Mode | Sumber Daftar Model | Kegunaan |
+| Mode | Allowed Model Source | Use Case |
 |---|---|---|
-| `all` | Semua model aktif di firewall global | Admin / key internal tepercaya |
-| `group` | Gabungan (*union*) model dari grup yang ditautkan | Template akses yang dipakai bersama banyak key |
-| `custom` | Whitelist manual pada key itu sendiri | Pengecualian khusus satu key |
+| `all` | All active models in global firewall | Administrators / trusted internal keys |
+| `group` | Union of all models in assigned Model Groups | Standard team access templates |
+| `custom` | Explicit per-key manual whitelist | One-off exceptions or individual testing |
 
-Mode `group` dan `custom` tidak bisa dicampur dalam satu key.
+`group` and `custom` modes cannot be mixed on a single key.
 
-### Contoh Alur via Dashboard
+### Dashboard Configuration Workflow
 
-1. Masuk ke **Gateway $\rightarrow$ Models**, klik **`Fetch from Providers`** agar daftar model tersedia.
-2. Buka tab **Model Groups**, klik **`+ Create Model Group`**.
-3. Isi nama (misal `Claude`), deskripsi, lalu pilih model dari daftar atau ketik ID/pola model (misal `9router/*`). Lihat **Aturan Pola Model** di bawah.
-4. Masuk ke **Gateway $\rightarrow$ Endpoints & Keys**, klik **`+ Generate New Key`** (atau edit key yang sudah ada).
-5. Pada **Allowed Models**, pilih mode **Model Groups** dan centang satu atau beberapa grup.
-6. Simpan. Key langsung terbatas pada model di grup tersebut.
+1. Navigate to **Gateway $\rightarrow$ Models** and click **`Fetch from Providers`**.
+2. Open the **Model Groups** tab and click **`+ Create Model Group`**.
+3. Set name (e.g. `Claude`), description, and select models or enter pattern wildcards (e.g. `9router/*`).
+4. Navigate to **Gateway $\rightarrow$ Endpoints & Keys**, click **`+ Generate New Key`** (or edit an existing key).
+5. Under **Allowed Models**, choose **Model Groups** and check one or more groups.
+6. Save. The key is instantly restricted to models within those groups.
 
-### Perilaku Penting
+### Key Behaviors
 
-* **Multi-grup = gabungan.** Key yang ditautkan ke grup `Claude` dan `GPT` mendapat semua model dari kedua grup (duplikat otomatis dihapus).
-* **Sinkronisasi langsung.** Mengubah isi grup langsung berlaku ke semua key yang tertaut — tanpa generate ulang key dan tanpa restart server.
-* **Grup kosong = tolak semua.** Key mode `group` yang grupnya tidak berisi model akan ditolak (HTTP 403) untuk setiap model. (Berbeda dengan mode `custom` kosong, yang dianggap mengizinkan semua.)
-* **Grup terlindungi dari penghapusan.** Grup yang masih ditautkan ke API key tidak bisa dihapus; pesan error menyebutkan key yang memakainya. Lepaskan tautan dari key terlebih dahulu.
-* **`GET /v1/models` ikut terfilter.** Agent hanya melihat model yang diizinkan untuk key-nya, sehingga dropdown model di IDE otomatis sesuai grup.
-* **Firewall global tetap berlaku.** Model yang ada di grup tetapi di-disable di **Gateway $\rightarrow$ Models** tetap ditolak (`model_disabled`).
+* **Multi-group union:** A key linked to both `Claude` and `GPT` groups receives access to models in both (duplicates removed automatically).
+* **Live dynamic sync:** Modifying group membership takes effect immediately for all linked keys—no key regeneration or server reboot required.
+* **Empty group fails closed:** A key in `group` mode whose assigned groups contain no models is blocked (HTTP 403) from all models.
+* **Deletion protection:** Groups actively linked to keys cannot be deleted until unlinked.
+* **Filtered `GET /v1/models`:** Clients only see models their key is allowed to reach in model listing endpoints.
+* **Global firewall precedence:** A model disabled in the global firewall remains blocked even if included in a group.
 
-### Aturan Pola Model
+### Model Pattern Matching Rules
 
-Anggota grup bisa berupa ID model persis atau pola:
-
-| Pola | Cocok Dengan | Contoh |
+| Pattern | Matches | Example |
 |---|---|---|
-| `*` atau `all` | Semua model | — |
-| `prefix/*` | Semua model dari satu provider/prefix | `openrouter/*` |
-| `*.suffix` | Model dengan akhiran tertentu | `*.flash` |
-| ID persis | Model itu saja (tidak case-sensitive) | `openrouter/anthropic/claude-3.5-sonnet` |
+| `*` or `all` | All available models | — |
+| `prefix/*` | All models under a specific provider prefix | `openrouter/*` |
+| `*.suffix` | Models matching a specific suffix | `*.flash` |
+| Exact ID | Exact model identifier (case-insensitive) | `openrouter/anthropic/claude-3.5-sonnet` |
 
-Pola di tengah nama seperti `9router/claude-*` **tidak didukung**. Gunakan `prefix/*` atau daftar ID model lengkap.
+Mid-string patterns such as `9router/claude-*` are **not supported**; use `prefix/*` or list exact IDs. Provider prefixes are flexible: a group member `gpt-4o` matches `openrouter/gpt-4o`, and vice-versa.
 
-Prefix provider bersifat fleksibel: anggota `gpt-4o` juga cocok dengan request `openrouter/gpt-4o`, dan sebaliknya anggota `openrouter/gpt-4o` cocok dengan request `gpt-4o`.
+### Rejection Response Format
 
-### Respons Saat Ditolak
-
-Request ke model di luar grup mendapat HTTP 403 dengan format kompatibel OpenAI:
+Requests targeting unauthorized models receive HTTP 403 matching OpenAI schema:
 
 ```json
 {
@@ -411,151 +416,147 @@ Request ke model di luar grup mendapat HTTP 403 dengan format kompatibel OpenAI:
 }
 ```
 
-Penolakan ini juga tercatat di **Traffic Explorer** dengan status 403.
+---
 
-### Contoh via REST API
+### Management via REST API
 
-Management API memakai sesi cookie dashboard. Login terlebih dahulu dan simpan cookie:
+The management API uses session cookies. Authenticate first:
 
 ```bash
 # 1. Login
 curl -c cookies.txt -X POST http://localhost:8080/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"PASSWORD_ANDA"}'
+  -d '{"username":"admin","password":"YOUR_PASSWORD"}'
 
-# 2. Buat model group
+# 2. Create model group
 curl -b cookies.txt -X POST http://localhost:8080/api/v1/model-groups \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Claude",
-    "description": "Akses model Claude via 9router",
+    "description": "Claude model access via 9router",
     "models": ["9router/*", "openrouter/anthropic/claude-3.5-sonnet"]
   }'
-# Respons berisi "id" grup — gunakan pada langkah berikutnya.
 
-# 3. Buat API key yang ditautkan ke grup
+# 3. Create key bound to group
 curl -b cookies.txt -X POST http://localhost:8080/api/v1/keys \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Cursor IDE",
     "model_access_mode": "group",
-    "model_group_ids": ["ID_GRUP"]
+    "model_group_ids": ["GROUP_ID"]
   }'
-# Respons berisi key sk-ng-... (hanya ditampilkan sekali).
 
-# 4. Perbarui isi grup (langsung berlaku ke semua key tertaut)
-curl -b cookies.txt -X PUT http://localhost:8080/api/v1/model-groups/ID_GRUP \
+# 4. Update group members
+curl -b cookies.txt -X PUT http://localhost:8080/api/v1/model-groups/GROUP_ID \
   -H "Content-Type: application/json" \
   -d '{"name":"Claude","description":"","models":["9router/*"]}'
 ```
 
-> **Catatan:** `PUT /api/v1/model-groups/{id}` mengganti seluruh daftar model (bukan menambahkan). Kirim daftar lengkap setiap kali memperbarui.
-
 ---
 
-## REST API Endpoint
+## REST API Endpoints
 
-### OpenAI-Compatible Proxy (Memerlukan NineGuard API Key)
-* `GET /v1/models` — Daftar agregat seluruh model dari semua provider aktif.
-* `GET /v1/quota` — Mengambil ringkasan dua-tingkat kuota token key pemanggil dan kapasitas shared pool upstream.
-* `POST /v1/chat/completions` — Chat completions (mendukung SSE streaming & tracking token, serta intersepsi `/quota`, `/limits`, `/usage` instan 0 token).
-* `POST /v1/*` — Proxy transparan untuk endpoint OpenAI standar lainnya.
+### OpenAI-Compatible Proxy (Requires NineGuard API Key)
+* `GET /v1/models` — Aggregated list of permitted models across active providers.
+* `GET /v1/quota` — Two-tier summary of key token allowance and upstream shared capacity.
+* `POST /v1/chat/completions` — Chat completions (SSE streaming, token telemetry, and instant 0-token `/quota` interception).
+* `POST /v1/*` — Transparent pass-through for additional standard OpenAI endpoints.
 
 ### NineGuard Management API (Dashboard & Admin)
-* `GET /healthz` — Health check status probe.
-* `GET /api/v1/upstream-quotas` — Mengambil data telemetri kuota live dari seluruh provider upstream aktif (mendukung `?force=1` dengan cooldown 30 detik).
-* `POST /api/v1/upstream-quotas/{id}/connections/{connId}/reset` — Membelanjakan 1 jatah reset kuota (Claude limit grant / Codex reset credit) pada provider upstream.
-* `GET /api/v1/providers` — Daftar provider upstream yang terdaftar.
-* `POST /api/v1/providers` — Menambahkan provider baru dengan prefix kustom.
-* `PUT /api/v1/providers/{id}` — Memperbarui data provider.
-* `POST /api/v1/providers/{id}/toggle` — Mengaktifkan / menonaktifkan provider.
-* `POST /api/v1/providers/{id}/default` — Menjadikan provider sebagai fallback default.
-* `DELETE /api/v1/providers/{id}` — Menghapus provider (otomatis menghapus model terkait di NineGuard).
-* `POST /api/v1/providers/test` — Menguji koneksi probe ke provider upstream.
-* `GET /api/v1/keys` — Daftar NineGuard API key yang aktif beserta allowed models, kuota, dan ringkasan Model Quota.
-* `GET /api/v1/keys/{id}` — Detail satu key, termasuk seluruh baris Model Quota (`quota_mode`, `model_quotas`).
-* `POST /api/v1/keys` — Menerbitkan NineGuard API key baru dengan konfigurasi allowed models dan batas kuota.
-* `PUT /api/v1/keys/{id}` — Mengubah nama, daftar model yang diizinkan, Key Quota, mode kuota (`quota_mode`: `key` atau `model`), dan baris Model Quota (`model_quotas`) dalam satu transaksi.
-* `POST /api/v1/keys/{id}/toggle` — Mengaktifkan / menonaktifkan key.
-* `DELETE /api/v1/keys/{id}` — Mencabut / menghapus key.
-* `GET /api/v1/keys/{id}/velocity` — Mengambil metrik laju konsumsi token historis per key (24 jam, rata-rata 7 hari, 30 hari).
-* `GET /api/v1/keys/{id}/model-velocity?model=<id>` — Metrik laju konsumsi yang sama untuk satu model pada key tersebut (perkiraan).
-* `GET /api/v1/quotas` — Ringkasan pemakaian Key Quota dan Model Quota semua key beserta statusnya (`ok`, `near`, `exhausted`, `unlimited`).
-* `GET /api/v1/models` — Daftar model terdaftar dan status firewall.
-* `POST /api/v1/models/toggle` — Mengubah status aktif/blokir model.
-* `POST /api/v1/models/sync` — Mengambil model terbaru dari semua provider aktif.
-* `DELETE /api/v1/models/{id...}` — Menghapus model tertentu dari database NineGuard.
-* `GET /api/v1/model-groups` — Daftar model groups yang tersedia.
-* `POST /api/v1/model-groups` — Membuat model group baru.
-* `GET /api/v1/model-groups/{id}` — Detail anggota model dalam suatu group.
-* `PUT /api/v1/model-groups/{id}` — Memperbarui nama, deskripsi, dan anggota model group.
-* `DELETE /api/v1/model-groups/{id}` — Menghapus model group.
-* `GET /api/v1/traffic` — Log traffic riwayat per request (mendukung filter key, model, IP, status, has_images).
-* `GET /api/v1/traffic/volume` — Data time-series histogram volume request & token.
-* `GET /api/v1/traffic/stats` — Metrik statistik ringkas & volume series untuk Dashboard.
-* `GET /api/v1/traffic/report` — Laporan breakdown penggunaan token per key & model dengan custom date range.
-* `GET /api/v1/traffic/export` — Ekspor log traffic ke CSV/JSON.
-* `GET /api/v1/traffic/{id}/payload` — Mengambil body payload request & response untuk inspeksi dan replay cURL.
-* `GET /api/v1/settings/traffic` — Mengambil pengaturan threshold lonjakan token dan status perekaman payload.
-* `POST /api/v1/settings/traffic` — Memperbarui threshold lonjakan token (`heavy_token_threshold`), mode perekaman payload, dan ambang peringatan kuota (`quota_warn_percent`, 1–100).
-* `GET /api/v1/plugins` — Daftar seluruh plugin terdaftar (built-in & HTTP) beserta urutan pipeline.
-* `POST /api/v1/plugins` — Mendaftarkan plugin HTTP baru.
-* `PUT /api/v1/plugins/{id}` — Memperbarui konfigurasi default plugin.
-* `DELETE /api/v1/plugins/{id}` — Menghapus plugin HTTP.
-* `POST /api/v1/plugins/{id}/test` — Menguji koneksi probe ke endpoint plugin HTTP.
-* `PUT /api/v1/plugins/order` — Mengatur ulang urutan eksekusi pipeline plugin.
-* `GET /api/v1/plugins/bindings` — Mengambil seluruh binding plugin pada scope tertentu (global, group, key).
-* `PUT /api/v1/plugins/{id}/bindings` — Menyimpan atau menghapus override binding plugin (on, off, inherit).
-* `GET /api/v1/plugins/resolve` — Pratinjau plugin efektif dan hierarki penentu untuk kombinasi key dan model.
-* `GET /api/v1/plugins/warnings` — Mengambil peringatan tumpang-tindih plugin token saving.
-* `GET /api/v1/logs` — Log sistem internal & security audit log.
-* `GET /api/v1/logs/volume` — Volume histogram log sistem per severity.
-* `GET /api/v1/logs/sources` — Daftar sumber log sistem yang aktif.
-* `GET /api/v1/logs/export` — Ekspor log sistem ke format JSON/NDJSON.
-* `GET /api/v1/auth/status` — Status autentikasi dan ketersediaan setup awal.
-* `POST /api/v1/auth/setup` — Inisialisasi akun administrator pertama.
-* `POST /api/v1/auth/login` — Autentikasi sesi dashboard.
-* `POST /api/v1/auth/logout` — Mengakhiri sesi dashboard.
-* `GET /api/v1/profile` — Profil pengguna saat ini.
-* `PATCH /api/v1/profile` — Memperbarui profil pengguna.
-* `POST /api/v1/profile/password` — Mengubah password akun saat ini.
-* `POST /api/v1/profile/recovery` — Mengatur pertanyaan keamanan password recovery.
-* `GET /api/v1/users` — Daftar akun pengguna dashboard (khusus admin).
-* `POST /api/v1/users` — Membuat akun pengguna operator/admin baru.
-* `DELETE /api/v1/users/{id}` — Menghapus akun pengguna dashboard.
+* `GET /healthz` — Health check and readiness probe.
+* `GET /api/v1/upstream-quotas` — Live quota telemetry from all active upstream providers (supports `?force=1` with 30s cooldown).
+* `POST /api/v1/upstream-quotas/{id}/connections/{connId}/reset` — Spend 1 upstream reset credit (Claude limit grant / Codex reset).
+* `GET /api/v1/providers` — List registered upstream providers.
+* `POST /api/v1/providers` — Register provider with custom routing prefix.
+* `PUT /api/v1/providers/{id}` — Update provider settings.
+* `POST /api/v1/providers/{id}/toggle` — Enable / disable provider.
+* `POST /api/v1/providers/{id}/default` — Set provider as default fallback.
+* `DELETE /api/v1/providers/{id}` — Remove provider and associated models.
+* `POST /api/v1/providers/test` — Probe connectivity to upstream provider.
+* `GET /api/v1/keys` — List API keys with permissions, quotas, and model limits.
+* `GET /api/v1/keys/{id}` — Retrieve single key details and quota configs.
+* `POST /api/v1/keys` — Generate new API key with model permissions and quota limits.
+* `PUT /api/v1/keys/{id}` — Update key name, permissions, and quota configuration.
+* `POST /api/v1/keys/{id}/toggle` — Enable / disable API key.
+* `DELETE /api/v1/keys/{id}` — Revoke / delete API key.
+* `GET /api/v1/keys/{id}/velocity` — Historical token consumption velocity (24h, 7d avg, 30d).
+* `GET /api/v1/keys/{id}/model-velocity?model=<id>` — Historical velocity for specific model under key.
+* `GET /api/v1/quotas` — Summary of Key Quota and Model Quota usage across keys (`ok`, `near`, `exhausted`, `unlimited`).
+* `GET /api/v1/models` — List catalog models and firewall states.
+* `POST /api/v1/models/toggle` — Toggle model active/blocked state.
+* `POST /api/v1/models/sync` — Refresh model lists from active upstream providers.
+* `DELETE /api/v1/models/{id...}` — Delete specific models from local database.
+* `GET /api/v1/model-groups` — List model groups.
+* `POST /api/v1/model-groups` — Create new model group.
+* `GET /api/v1/model-groups/{id}` — View model group details.
+* `PUT /api/v1/model-groups/{id}` — Update model group name, description, and members.
+* `DELETE /api/v1/model-groups/{id}` — Delete model group.
+* `GET /api/v1/traffic` — Request traffic logs (filterable by key, model, IP, status, has_images).
+* `GET /api/v1/traffic/volume` — Time-series request and token volume histograms.
+* `GET /api/v1/traffic/stats` — High-level KPI metrics for dashboard.
+* `GET /api/v1/traffic/report` — Token consumption breakdown by key and model across date ranges.
+* `GET /api/v1/traffic/export` — Export traffic logs to CSV/JSON.
+* `GET /api/v1/traffic/{id}/payload` — Retrieve request & response bodies for inspection and cURL replay.
+* `GET /api/v1/settings/traffic` — Retrieve token spike thresholds and payload capture settings.
+* `POST /api/v1/settings/traffic` — Update spike thresholds (`heavy_token_threshold`), payload modes, and quota warning percentages (`quota_warn_percent`).
+* `GET /api/v1/plugins` — List registered plugins and pipeline order.
+* `POST /api/v1/plugins` — Register external HTTP webhook plugin.
+* `PUT /api/v1/plugins/{id}` — Update plugin default configuration.
+* `DELETE /api/v1/plugins/{id}` — Remove plugin.
+* `POST /api/v1/plugins/{id}/test` — Test connection to plugin webhook.
+* `PUT /api/v1/plugins/order` — Reorder execution pipeline.
+* `GET /api/v1/plugins/bindings` — Retrieve plugin bindings across scopes (global, group, key).
+* `PUT /api/v1/plugins/{id}/bindings` — Set or remove plugin binding overrides.
+* `GET /api/v1/plugins/resolve` — Preview effective plugins for specific key and model combination.
+* `GET /api/v1/plugins/warnings` — Retrieve token saving overlap warnings.
+* `GET /api/v1/logs` — Internal gateway logs and security audit trails.
+* `GET /api/v1/logs/volume` — Log volume histogram by severity level.
+* `GET /api/v1/logs/sources` — Active log source subsystems.
+* `GET /api/v1/logs/export` — Export system logs to JSON/NDJSON.
+* `GET /api/v1/auth/status` — Authentication and onboarding status.
+* `POST /api/v1/auth/setup` — Initialize primary administrator account.
+* `POST /api/v1/auth/login` — Dashboard session authentication.
+* `POST /api/v1/auth/logout` — Terminate dashboard session.
+* `GET /api/v1/profile` — Current user profile.
+* `PATCH /api/v1/profile` — Update user profile.
+* `POST /api/v1/profile/password` — Change current password.
+* `POST /api/v1/profile/recovery` — Configure password recovery security questions.
+* `GET /api/v1/users` — List dashboard users (admin only).
+* `POST /api/v1/users` — Create operator or administrator account.
+* `DELETE /api/v1/users/{id}` — Delete user account.
 
 ---
 
-## Dokumentasi Terkait
-* [Arsitektur & Alur Request](docs/ARCHITECTURE.md)
-* [Panduan Multi-Provider & Prefix Routing](docs/PROVIDERS.md)
-* [Panduan Menghubungkan Agent & IDE](docs/AGENTS_SETUP.md)
-* [Glossary & Istilah Domain](GLOSSARY.md)
-* [Architecture Decision Records (ADR)](docs/adr/)
+## Related Documentation
+* [Architecture & Request Flow](docs/ARCHITECTURE.md)
+* [Multi-Provider & Prefix Routing Guide](docs/PROVIDERS.md)
+* [Connecting Agents & IDEs Guide](docs/AGENTS_SETUP.md)
+* [Domain Glossary](GLOSSARY.md)
+* [Architecture Decision Records (ADRs)](docs/adr/)
 
 ---
 
 ## Reporting Issues & Feedback
 
-Menemukan kendala atau punya ide untuk menyempurnakan NineGuard? Kami menyambut laporan bug, ide fitur, serta masukan!
+Encountered an issue or have an idea to improve NineGuard? We welcome bug reports and feature suggestions!
 
-* **[Report a Bug](https://github.com/DarkTama/nineguard/issues/new?template=bug_report.yml)**: Gunakan form ini jika menemukan bug, error, atau anomali gateway.
-* **[Request a Feature](https://github.com/DarkTama/nineguard/issues/new?template=feature_request.yml)**: Usulkan ide baru, optimasi routing, atau peningkatan UI/UX.
-* **[Submit Feedback](https://github.com/DarkTama/nineguard/issues/new?template=feedback.yml)**: Berikan saran, kesan, atau kritik seputar pengalaman penggunaan NineGuard.
-* **[GitHub Discussions](https://github.com/DarkTama/nineguard/discussions)**: Diskusi umum, tanya-jawab konfigurasi, dan interaksi komunitas.
+* **[Report a Bug](https://github.com/DarkTama/nineguard/issues/new?template=bug_report.yml)**: Use this form to report bugs or unexpected proxy behaviors.
+* **[Request a Feature](https://github.com/DarkTama/nineguard/issues/new?template=feature_request.yml)**: Propose new routing features, optimizations, or UI/UX enhancements.
+* **[Submit Feedback](https://github.com/DarkTama/nineguard/issues/new?template=feedback.yml)**: Share feedback or suggestions regarding your experience.
+* **[GitHub Discussions](https://github.com/DarkTama/nineguard/discussions)**: General discussions, Q&A, and community exchanges.
 
-> **Privacy Notice**: Saat melaporkan masalah atau melampirkan log server / screenshot, **jangan pernah mencantumkan master API key provider, NineGuard API key, password, atau credential sensitif**.
+> **Privacy Notice**: When reporting issues or sharing server logs/screenshots, **never include master upstream API keys, NineGuard client API keys, passwords, or sensitive credentials**.
 
 ---
 
-## Author & Kontributor
+## Authors & Contributors
 
 ### Author
 * **Ari Ardiansyah**
   * GitHub: [@aribrilliantsyah](https://github.com/aribrilliantsyah)
   * Email: [ariadiansyah.study@gmail.com](mailto:ariadiansyah.study@gmail.com)
 
-### Kontributor
+### Contributors
 * **Ekatama Ilham Prayoga**
   * GitHub: [@DarkTama](https://github.com/DarkTama)
   * Email: [ekatamailhamprayoga@gmail.com](mailto:ekatamailhamprayoga@gmail.com)
@@ -568,6 +569,6 @@ Menemukan kendala atau punya ide untuk menyempurnakan NineGuard? Kami menyambut 
 
 ---
 
-## Lisensi
+## License
 
-Didistribusikan di bawah lisensi [MIT](LICENSE).
+Distributed under the [MIT](LICENSE) License.
