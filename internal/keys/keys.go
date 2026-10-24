@@ -31,10 +31,24 @@ type KeyInfo struct {
 	QuotaLimit      int64     `json:"quota_limit"`
 	QuotaPeriod     string    `json:"quota_period"`
 	QuotaUsage      int64     `json:"quota_usage"`
+	// QuotaResetAt is when the Key Quota's current window ends (absolute UTC instant, ADR 0010);
+	// nil when the key has no resetting Key Quota (none or total).
+	QuotaResetAt *string `json:"quota_reset_at"`
 	QuotaMode       string    `json:"quota_mode"` // "key" (Key Quota) or "model" (Model Quotas), ADR 0007
 	// ModelQuotas is filled on single-key reads; list responses carry ModelQuotaSummary only.
 	ModelQuotas       []ModelQuota       `json:"model_quotas,omitempty"`
 	ModelQuotaSummary *ModelQuotaSummary `json:"model_quota_summary,omitempty"`
+
+	// Quota Reset Schedule (ADR 0010). ResetSchedule is the key's own (nil = follows the global
+	// schedule); EffectiveResetSchedule is what applies (nil = the UTC default). ResetRule is the
+	// effective schedule plus Transitional Windows, ready for traffic.CalcQuotaWindow.
+	ResetSchedule          *traffic.ResetSchedule `json:"quota_reset_schedule"`
+	EffectiveResetSchedule *traffic.ResetSchedule `json:"effective_quota_reset_schedule"`
+	ResetScheduleSource    string                 `json:"quota_reset_schedule_source"` // key | global | default
+	ResetRule              traffic.ResetRule      `json:"-"`
+
+	CostVisibility *string `json:"cost_visibility"` // "show", "hide", or nil (follows global setting)
+
 	TotalRequests   int       `json:"total_requests"`
 	TotalTokens     int       `json:"total_tokens"`
 	LastUsedAt      *string   `json:"last_used_at,omitempty"`
@@ -234,6 +248,7 @@ type Manager struct {
 	cache       map[string]*KeyInfo // rawKey -> KeyInfo
 	groupCache  map[string][]string // groupID -> []models
 	avail       *models.Availability // which model ids are Removed Models (ADR 0006)
+	globalSched *traffic.ResetSchedule // Global Reset Schedule (ADR 0010); nil = unset
 }
 
 // availableOnly drops entries that name a Removed Model.
@@ -260,8 +275,9 @@ func NewManager(database *db.DB, defaultRouterAPIKey string) *Manager {
 		m.upstreamKey = dec
 	}
 
-	// 2. Load Model Groups cache
+	// 2. Load Model Groups cache and the Global Reset Schedule
 	m.ReloadGroupCache()
+	m.ReloadGlobalSchedule()
 
 	// 3. Load NineGuard API keys from database into cache
 	m.loadLocalCache()
@@ -425,7 +441,10 @@ func (m *Manager) loadLocalCache() {
 		       COALESCE(allowed_models, ''),
 		       COALESCE(quota_limit, 0),
 		       COALESCE(quota_period, 'none'),
-		       COALESCE(quota_mode, 'key')
+		       COALESCE(quota_mode, 'key'),
+		       COALESCE(quota_reset_schedule, ''),
+		       COALESCE(quota_window_pins, ''),
+		       cost_visibility
 		FROM api_keys
 	`)
 	if err != nil {
@@ -439,9 +458,12 @@ func (m *Manager) loadLocalCache() {
 	for rows.Next() {
 		var ki KeyInfo
 		var isAct int
-		var mode, rawGroupIDs, rawModels string
-		if err := rows.Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct, &mode, &rawGroupIDs, &rawModels, &ki.QuotaLimit, &ki.QuotaPeriod, &ki.QuotaMode); err == nil {
+		var mode, rawGroupIDs, rawModels, ownSched, rawPins string
+		var costVis *string
+		if err := rows.Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct, &mode, &rawGroupIDs, &rawModels, &ki.QuotaLimit, &ki.QuotaPeriod, &ki.QuotaMode, &ownSched, &rawPins, &costVis); err == nil {
+			ki.CostVisibility = costVis
 			ki.ModelQuotas = quotaRows[ki.ID]
+			applyResetSchedule(&ki, ownSched, rawPins, m.globalSched)
 			ki.IsActive = (isAct == 1)
 			ki.Key = MaskKey(ki.RawKey)
 			ki.ModelAccessMode = mode
@@ -477,6 +499,12 @@ type CreateKeyOptions struct {
 	QuotaPeriod     string
 	QuotaMode       string       // "" means "key"
 	ModelQuotas     []ModelQuota // only model_id, quota_limit, quota_period are used
+
+	// ResetSchedule is the key's own Quota Reset Schedule; nil means it follows the global
+	// one. A new key has no usage history, so no Transitional Window is written.
+	ResetSchedule *traffic.ResetSchedule
+
+	CostVisibility *string // "show", "hide", or nil
 }
 
 // CreateKey issues a new NineGuard API key with customizable model access mode, groups, and allowed models
@@ -537,6 +565,14 @@ func (m *Manager) CreateKeyWithOptions(name string, opts CreateKeyOptions) (*Key
 		return nil, fmt.Errorf("invalid quota_mode")
 	}
 
+	var costVis *string
+	if opts.CostVisibility != nil {
+		cv := strings.ToLower(strings.TrimSpace(*opts.CostVisibility))
+		if cv == "show" || cv == "hide" {
+			costVis = &cv
+		}
+	}
+
 	now := time.Now()
 	// Key row and Model Quota rows in one transaction (only tx inside: single connection).
 	tx, err := m.db.Begin()
@@ -545,9 +581,9 @@ func (m *Manager) CreateKeyWithOptions(name string, opts CreateKeyOptions) (*Key
 	}
 	defer tx.Rollback()
 	if _, err = tx.Exec(`
-		INSERT INTO api_keys (id, key, prefix, name, is_active, model_access_mode, model_group_ids, allowed_models, quota_limit, quota_period, quota_mode, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-	`, id, rawKey, prefix, name, modelAccessMode, serializedGroups, serializedModels, quotaLimit, quotaPeriod, quotaMode); err != nil {
+		INSERT INTO api_keys (id, key, prefix, name, is_active, model_access_mode, model_group_ids, allowed_models, quota_limit, quota_period, quota_mode, quota_reset_schedule, cost_visibility, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`, id, rawKey, prefix, name, modelAccessMode, serializedGroups, serializedModels, quotaLimit, quotaPeriod, quotaMode, encodeSchedule(opts.ResetSchedule), costVis); err != nil {
 		return nil, fmt.Errorf("failed to save new key: %w", err)
 	}
 	if err := replaceModelQuotas(tx, id, opts.ModelQuotas); err != nil {
@@ -571,12 +607,17 @@ func (m *Manager) CreateKeyWithOptions(name string, opts CreateKeyOptions) (*Key
 		QuotaPeriod:     quotaPeriod,
 		QuotaMode:       quotaMode,
 		ModelQuotas:     append([]ModelQuota(nil), opts.ModelQuotas...),
+		ResetSchedule:   opts.ResetSchedule,
+		CostVisibility:  costVis,
 		TotalRequests:   0,
 		TotalTokens:     0,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		manager:         m,
 	}
+
+	ki.EffectiveResetSchedule, ki.ResetScheduleSource = effectiveSchedule(ki.ResetSchedule, m.globalSchedule())
+	ki.ResetRule = traffic.ResetRule{Schedule: ki.EffectiveResetSchedule}
 
 	m.mu.Lock()
 	m.cache[rawKey] = ki
@@ -652,21 +693,27 @@ func (m *Manager) GetKey(id string) (*KeyInfo, error) {
 	var ki KeyInfo
 	var rawKey string
 	var isActiveInt int
-	var mode, rawGroupIDs, rawModels string
+	var mode, rawGroupIDs, rawModels, ownSched, rawPins string
+	var costVis *string
 	err := m.db.QueryRow(`
 		SELECT id, key, prefix, name, is_active, 
 		       COALESCE(model_access_mode, 'all'), 
 		       COALESCE(model_group_ids, '[]'), 
 		       COALESCE(allowed_models, ''), 
-		       COALESCE(quota_limit, 0),
-		       COALESCE(quota_period, 'none'),
-		       COALESCE(quota_mode, 'key'),
+		       COALESCE(quota_limit, 0), 
+		       COALESCE(quota_period, 'none'), 
+		       COALESCE(quota_mode, 'key'), 
+		       COALESCE(quota_reset_schedule, ''), 
+		       COALESCE(quota_window_pins, ''),
+		       cost_visibility,
 		       created_at, updated_at
 		FROM api_keys WHERE id = ?
-	`, id).Scan(&ki.ID, &rawKey, &ki.Prefix, &ki.Name, &isActiveInt, &mode, &rawGroupIDs, &rawModels, &ki.QuotaLimit, &ki.QuotaPeriod, &ki.QuotaMode, &ki.CreatedAt, &ki.UpdatedAt)
+	`, id).Scan(&ki.ID, &rawKey, &ki.Prefix, &ki.Name, &isActiveInt, &mode, &rawGroupIDs, &rawModels, &ki.QuotaLimit, &ki.QuotaPeriod, &ki.QuotaMode, &ownSched, &rawPins, &costVis, &ki.CreatedAt, &ki.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
+	ki.CostVisibility = costVis
+	applyResetSchedule(&ki, ownSched, rawPins, m.globalSchedule())
 	ki.ModelQuotas, _ = m.GetModelQuotas(id) // after QueryRow has released the connection
 	ki.IsActive = (isActiveInt == 1)
 	ki.Key = MaskKey(rawKey)
@@ -676,8 +723,9 @@ func (m *Manager) GetKey(id string) (*KeyInfo, error) {
 	ki.AllowedModels = ParseAllowedModels(rawModels)
 	ki.manager = m
 	if ki.QuotaLimit > 0 && ki.QuotaPeriod != "" && ki.QuotaPeriod != "none" {
-		usage, _, _ := traffic.GetQuotaUsage(m.db, ki.ID, ki.QuotaPeriod, time.Now())
+		usage, resetAt, _ := traffic.GetQuotaUsage(m.db, ki.ID, ki.QuotaPeriod, ki.ResetRule, time.Now())
 		ki.QuotaUsage = usage
+		ki.QuotaResetAt = resetAtString(ki.QuotaPeriod, resetAt)
 	}
 	if len(ki.ModelQuotas) > 0 {
 		m.AnnotateModelQuotas(&ki, traffic.GetQuotaWarnPercent(m.db), time.Now())
@@ -710,6 +758,8 @@ const keyStatsColumns = `
 	COALESCE(k.quota_limit, 0),
 	COALESCE(k.quota_period, 'none'),
 	COALESCE(k.quota_mode, 'key'),
+	COALESCE(k.quota_reset_schedule, ''),
+	COALESCE(k.quota_window_pins, ''),
 	k.created_at, k.updated_at,
 	COALESCE(s.total_requests, 0),
 	COALESCE(s.total_tokens, 0),
@@ -721,17 +771,19 @@ func (m *Manager) scanKeyRows(rows *sql.Rows) ([]KeyInfo, error) {
 		var ki KeyInfo
 		var rawKey string
 		var isActiveInt int
-		var mode, rawGroupIDs, rawModels string
+		var mode, rawGroupIDs, rawModels, ownSched, rawPins string
 		var lastUsed sql.NullString
 		if err := rows.Scan(
 			&ki.ID, &rawKey, &ki.Prefix, &ki.Name, &isActiveInt,
 			&mode, &rawGroupIDs, &rawModels,
 			&ki.QuotaLimit, &ki.QuotaPeriod, &ki.QuotaMode,
+			&ownSched, &rawPins,
 			&ki.CreatedAt, &ki.UpdatedAt,
 			&ki.TotalRequests, &ki.TotalTokens, &lastUsed,
 		); err != nil {
 			return nil, err
 		}
+		applyResetSchedule(&ki, ownSched, rawPins, m.globalSchedule())
 		ki.IsActive = (isActiveInt == 1)
 		ki.Key = MaskKey(rawKey)
 		ki.RawKey = rawKey
@@ -751,8 +803,9 @@ func (m *Manager) enrichQuotaUsage(list []KeyInfo) {
 	var warn int
 	for i := range list {
 		if list[i].QuotaLimit > 0 && list[i].QuotaPeriod != "" && list[i].QuotaPeriod != "none" {
-			usage, _, _ := traffic.GetQuotaUsage(m.db, list[i].ID, list[i].QuotaPeriod, now)
+			usage, resetAt, _ := traffic.GetQuotaUsage(m.db, list[i].ID, list[i].QuotaPeriod, list[i].ResetRule, now)
 			list[i].QuotaUsage = usage
+			list[i].QuotaResetAt = resetAtString(list[i].QuotaPeriod, resetAt)
 		}
 		if list[i].QuotaMode == QuotaModeModel {
 			if quotaRows == nil {
@@ -855,13 +908,16 @@ func (m *Manager) ValidateClientKey(rawKey string) (*KeyInfo, bool) {
 	// Fallback to checking SQLite
 	var ki KeyInfo
 	var isAct int
-	var mode, rawGroupIDs, rawModels string
-	err := m.db.QueryRow("SELECT id, key, prefix, name, is_active, COALESCE(model_access_mode, 'all'), COALESCE(model_group_ids, '[]'), COALESCE(allowed_models, ''), COALESCE(quota_limit, 0), COALESCE(quota_period, 'none'), COALESCE(quota_mode, 'key') FROM api_keys WHERE key = ? LIMIT 1", rawKey).
-		Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct, &mode, &rawGroupIDs, &rawModels, &ki.QuotaLimit, &ki.QuotaPeriod, &ki.QuotaMode)
+	var mode, rawGroupIDs, rawModels, ownSched, rawPins string
+	var costVis *string
+	err := m.db.QueryRow("SELECT id, key, prefix, name, is_active, COALESCE(model_access_mode, 'all'), COALESCE(model_group_ids, '[]'), COALESCE(allowed_models, ''), COALESCE(quota_limit, 0), COALESCE(quota_period, 'none'), COALESCE(quota_mode, 'key'), COALESCE(quota_reset_schedule, ''), COALESCE(quota_window_pins, ''), cost_visibility FROM api_keys WHERE key = ? LIMIT 1", rawKey).
+		Scan(&ki.ID, &ki.RawKey, &ki.Prefix, &ki.Name, &isAct, &mode, &rawGroupIDs, &rawModels, &ki.QuotaLimit, &ki.QuotaPeriod, &ki.QuotaMode, &ownSched, &rawPins, &costVis)
 	if err != nil {
 		return nil, false
 	}
+	ki.CostVisibility = costVis
 	ki.ModelQuotas, _ = m.GetModelQuotas(ki.ID)
+	applyResetSchedule(&ki, ownSched, rawPins, m.globalSchedule())
 
 	ki.IsActive = (isAct == 1)
 	ki.Key = MaskKey(ki.RawKey)

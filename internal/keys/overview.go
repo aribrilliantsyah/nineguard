@@ -26,6 +26,11 @@ type OverviewKey struct {
 	Status      string       `json:"status"`
 	KeyQuota    *ModelQuota  `json:"key_quota"`
 	ModelQuotas []ModelQuota `json:"model_quotas"`
+
+	// The schedule in effect for this key (ADR 0010), also for model-mode keys that have no
+	// key_quota object. A nil effective schedule is the UTC default.
+	EffectiveResetSchedule *traffic.ResetSchedule `json:"effective_quota_reset_schedule"`
+	ResetScheduleSource    string                 `json:"quota_reset_schedule_source"`
 }
 
 type QuotaOverview struct {
@@ -57,7 +62,8 @@ func (m *Manager) QuotaOverview(warn int, now time.Time) (*QuotaOverview, error)
 	out := &QuotaOverview{WarnPercent: warn, Keys: make([]OverviewKey, 0, len(snap))}
 	for i := range snap {
 		ki := &snap[i]
-		ok := OverviewKey{ID: ki.ID, Name: ki.Name, IsActive: ki.IsActive, QuotaMode: ki.QuotaMode, Status: "unlimited", ModelQuotas: []ModelQuota{}}
+		ok := OverviewKey{ID: ki.ID, Name: ki.Name, IsActive: ki.IsActive, QuotaMode: ki.QuotaMode, Status: "unlimited", ModelQuotas: []ModelQuota{},
+			EffectiveResetSchedule: ki.EffectiveResetSchedule, ResetScheduleSource: ki.ResetScheduleSource}
 
 		if ki.QuotaMode == QuotaModeModel {
 			m.AnnotateModelQuotas(ki, warn, now)
@@ -89,11 +95,13 @@ func (m *Manager) QuotaOverview(warn int, now time.Time) (*QuotaOverview, error)
 				return strings.ToLower(x.ModelID) < strings.ToLower(y.ModelID)
 			})
 		} else if ki.QuotaLimit > 0 && ki.QuotaPeriod != "" && ki.QuotaPeriod != "none" {
-			usage, resetAt, _ := traffic.GetQuotaUsage(m.db, ki.ID, ki.QuotaPeriod, now)
+			usage, resetAt, _ := traffic.GetQuotaUsage(m.db, ki.ID, ki.QuotaPeriod, ki.ResetRule, now)
 			kq := ModelQuota{
 				QuotaLimit: ki.QuotaLimit, QuotaPeriod: ki.QuotaPeriod, Usage: usage,
 				Percent: QuotaPercent(usage, ki.QuotaLimit), Status: QuotaStatus(usage, ki.QuotaLimit, warn),
 				ResetAt: resetAtString(ki.QuotaPeriod, resetAt),
+
+				ResetSchedule: ki.ResetSchedule, EffectiveResetSchedule: ki.EffectiveResetSchedule, ResetScheduleSource: ki.ResetScheduleSource,
 			}
 			ok.KeyQuota, ok.Status, ok.TopPercent = &kq, kq.Status, kq.Percent
 			switch kq.Status {

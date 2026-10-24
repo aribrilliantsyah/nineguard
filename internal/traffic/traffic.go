@@ -41,6 +41,17 @@ type LogEntry struct {
 	ModelID string `json:"model_id,omitempty"`
 	// ModelRemoved is true when the model of this row is a Removed Model (ADR 0006).
 	ModelRemoved bool `json:"model_removed"`
+	// Usage Diagnostics (spec 2026-10-19)
+	ApiFormat         string `json:"api_format"`
+	CacheReadTokens   int    `json:"cache_read_tokens"`
+	CacheWriteTokens  int    `json:"cache_write_tokens"`
+	ReasoningTokens   int    `json:"reasoning_tokens"`
+	ThinkingRequested bool   `json:"thinking_requested"`
+	ThinkingDelivered bool   `json:"thinking_delivered"`
+	ServedModel       string `json:"served_model"`
+	ModelFallback     bool   `json:"model_fallback"`
+	UsageEstimated    bool   `json:"usage_estimated"`
+	CostUSD           *float64 `json:"cost_usd"` // Estimated cost in USD, NULL if unpriced or estimated
 }
 
 type FilterParams struct {
@@ -62,6 +73,10 @@ type FilterParams struct {
 	APIKeyID  string         // exact traffic_logs.api_key_id match
 	Loc       *time.Location // viewer timezone for Period/StartDate/EndDate; nil = UTC
 	HasImages *bool          // filter multimodal requests
+	ApiFormat string         // "chat", "messages", "responses", "other"
+	Thinking  string         // "requested", "delivered", "lost"
+	Fallback  *bool
+	Estimated *bool
 }
 
 type VolumeBucket struct {
@@ -78,22 +93,26 @@ type VolumeResult struct {
 }
 
 type ModelStat struct {
-	Model    string  `json:"model"`
-	Requests int     `json:"requests"`
-	Tokens   int     `json:"tokens"`
-	Share    float64 `json:"share"` // percentage
-	Trend    []int   `json:"trend,omitempty"`
+	Model            string  `json:"model"`
+	Requests         int     `json:"requests"`
+	Tokens           int     `json:"tokens"`
+	Share            float64 `json:"share"` // percentage
+	Trend            []int   `json:"trend,omitempty"`
+	EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+	UnpricedRequests int64   `json:"unpriced_requests"`
 }
 
 type KeyStat struct {
-	KeyID    string  `json:"key_id,omitempty"` // empty for unlinked / deleted keys
-	Unlinked bool    `json:"unlinked"`
-	Name     string  `json:"name"`
-	Key      string  `json:"key"`
-	Requests int     `json:"requests"`
-	Tokens   int     `json:"tokens"`
-	Share    float64 `json:"share"`
-	Trend    []int   `json:"trend,omitempty"`
+	KeyID            string  `json:"key_id,omitempty"` // empty for unlinked / deleted keys
+	Unlinked         bool    `json:"unlinked"`
+	Name             string  `json:"name"`
+	Key              string  `json:"key"`
+	Requests         int     `json:"requests"`
+	Tokens           int     `json:"tokens"`
+	Share            float64 `json:"share"`
+	Trend            []int   `json:"trend,omitempty"`
+	EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+	UnpricedRequests int64   `json:"unpriced_requests"`
 }
 
 type KeyUsageTrendPoint struct {
@@ -119,15 +138,17 @@ type TimeSeriesPoint struct {
 }
 
 type PeriodComparison struct {
-	PrevRequests     int     `json:"prev_requests"`
-	PrevErrors       int     `json:"prev_errors"`
-	PrevBlocked      int     `json:"prev_blocked"`
-	PrevTokens       int     `json:"prev_tokens"`
-	PrevSuccess      int     `json:"prev_success"`
-	PrevErrorRate    float64 `json:"prev_error_rate"`
-	ReqDeltaPct      float64 `json:"req_delta_pct"`
-	ErrDeltaPct      float64 `json:"err_delta_pct"`
-	ErrorRateDeltaPt float64 `json:"error_rate_delta_pt"`
+	PrevRequests      int     `json:"prev_requests"`
+	PrevErrors        int     `json:"prev_errors"`
+	PrevBlocked       int     `json:"prev_blocked"`
+	PrevTokens        int     `json:"prev_tokens"`
+	PrevSuccess       int     `json:"prev_success"`
+	PrevErrorRate     float64 `json:"prev_error_rate"`
+	ReqDeltaPct       float64 `json:"req_delta_pct"`
+	ErrDeltaPct       float64 `json:"err_delta_pct"`
+	ErrorRateDeltaPt  float64 `json:"error_rate_delta_pt"`
+	PrevEstimatedCost float64 `json:"prev_estimated_cost"`
+	CostDeltaPct      float64 `json:"cost_delta_pct"`
 }
 
 type ErrorSourceStat struct {
@@ -167,6 +188,8 @@ type DashboardStats struct {
 	ActiveModels     int                  `json:"active_models"`
 	ActiveKeys       int                  `json:"active_keys"`
 	ActiveProviders  int                  `json:"active_providers"`
+	EstimatedCostUSD float64              `json:"estimated_cost_usd"`
+	UnpricedRequests int64                `json:"unpriced_requests"`
 	TopModels        []ModelStat          `json:"top_models"`
 	TopKeys          []KeyStat            `json:"top_keys"`
 	VolumeSeries     []TimeSeriesPoint    `json:"volume_series"`
@@ -178,24 +201,28 @@ type DashboardStats struct {
 }
 
 type ModelUsageSummary struct {
-	Model        string  `json:"model"`
-	TotalTokens  int     `json:"total_tokens"`
-	PromptTokens int     `json:"prompt_tokens"`
-	CompTokens   int     `json:"comp_tokens"`
-	Requests     int     `json:"requests"`
-	Share        float64 `json:"share"`
+	Model            string  `json:"model"`
+	TotalTokens      int     `json:"total_tokens"`
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompTokens       int     `json:"comp_tokens"`
+	Requests         int     `json:"requests"`
+	Share            float64 `json:"share"`
+	EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+	UnpricedRequests int64   `json:"unpriced_requests"`
 }
 
 type KeyUsageSummary struct {
-	KeyID        string  `json:"key_id,omitempty"`
-	Unlinked     bool    `json:"unlinked"`
-	KeyName      string  `json:"key_name"`
-	Key          string  `json:"key"`
-	TotalTokens  int     `json:"total_tokens"`
-	PromptTokens int     `json:"prompt_tokens"`
-	CompTokens   int     `json:"comp_tokens"`
-	Requests     int     `json:"requests"`
-	Share        float64 `json:"share"`
+	KeyID            string  `json:"key_id,omitempty"`
+	Unlinked         bool    `json:"unlinked"`
+	KeyName          string  `json:"key_name"`
+	Key              string  `json:"key"`
+	TotalTokens      int     `json:"total_tokens"`
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompTokens       int     `json:"comp_tokens"`
+	Requests         int     `json:"requests"`
+	Share            float64 `json:"share"`
+	EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+	UnpricedRequests int64   `json:"unpriced_requests"`
 }
 
 type KeyUsageBreakdown struct {
@@ -214,6 +241,8 @@ type KeyUsageBreakdown struct {
 	TokenShare       float64             `json:"token_share"`
 	LastActiveAt     *string             `json:"last_active_at,omitempty"`
 	TokensSaved      int                 `json:"tokens_saved"`
+	EstimatedCostUSD float64             `json:"estimated_cost_usd"`
+	UnpricedRequests int64               `json:"unpriced_requests"`
 	ModelUsage       []ModelUsageSummary `json:"model_usage"`
 }
 
@@ -231,6 +260,8 @@ type ModelUsageBreakdown struct {
 	AvgDurationMs    int               `json:"avg_duration_ms"`
 	TokenShare       float64           `json:"token_share"`
 	LastActiveAt     *string           `json:"last_active_at,omitempty"`
+	EstimatedCostUSD float64           `json:"estimated_cost_usd"`
+	UnpricedRequests int64             `json:"unpriced_requests"`
 	KeyConsumers     []KeyUsageSummary `json:"key_consumers"`
 }
 
@@ -251,6 +282,8 @@ type UsageReport struct {
 	TotalRequests    int                    `json:"total_requests"`
 	TopConsumerKey   string                 `json:"top_consumer_key"`
 	TopModel         string                 `json:"top_model"`
+	EstimatedCostUSD float64                `json:"estimated_cost_usd"`
+	UnpricedRequests int64                  `json:"unpriced_requests"`
 	KeysBreakdown    []KeyUsageBreakdown    `json:"keys_breakdown"`
 	ModelsBreakdown  []ModelUsageBreakdown  `json:"models_breakdown"`
 	PluginsBreakdown []PluginUsageBreakdown `json:"plugins_breakdown"`
@@ -375,16 +408,23 @@ func (e *LogEntry) ComputeLevelAndMessage() {
 				pluginTxt = fmt.Sprintf(" [plugins: %s]", e.PluginsApplied)
 			}
 		}
+		endpoint := "POST /v1/chat/completions"
+		switch e.ApiFormat {
+		case "messages":
+			endpoint = "POST /v1/messages"
+		case "responses":
+			endpoint = "POST /v1/responses"
+		}
 		if e.StatusCode >= 400 {
 			errTxt := ""
 			if e.ErrorMessage != nil && *e.ErrorMessage != "" {
 				errTxt = " - " + *e.ErrorMessage
 			}
-			e.Message = fmt.Sprintf("POST /v1/chat/completions model=%s %d%s%s (%dms, ip=%s)",
-				e.Model, e.StatusCode, errTxt, pluginTxt, e.DurationMs, e.ClientIP)
+			e.Message = fmt.Sprintf("%s model=%s %d%s%s (%dms, ip=%s)",
+				endpoint, e.Model, e.StatusCode, errTxt, pluginTxt, e.DurationMs, e.ClientIP)
 		} else {
-			e.Message = fmt.Sprintf("POST /v1/chat/completions model=%s 200 OK%s (%dms, %s tok [p:%s, c:%s], %s, ip=%s)",
-				e.Model, pluginTxt, e.DurationMs, fmtNumStr(e.TotalTokens), fmtNumStr(e.PromptTokens), fmtNumStr(e.CompletionTokens), modeStr, e.ClientIP)
+			e.Message = fmt.Sprintf("%s model=%s 200 OK%s (%dms, %s tok [p:%s, c:%s], %s, ip=%s)",
+				endpoint, e.Model, pluginTxt, e.DurationMs, fmtNumStr(e.TotalTokens), fmtNumStr(e.PromptTokens), fmtNumStr(e.CompletionTokens), modeStr, e.ClientIP)
 		}
 	}
 }
@@ -442,18 +482,40 @@ func (m *Manager) Record(entry *LogEntry) error {
 	if entry.HasImages {
 		hasImagesInt = 1
 	}
+	thinkingReqInt := 0
+	if entry.ThinkingRequested {
+		thinkingReqInt = 1
+	}
+	thinkingDelInt := 0
+	if entry.ThinkingDelivered {
+		thinkingDelInt = 1
+	}
+	modelFallbackInt := 0
+	if entry.ModelFallback {
+		modelFallbackInt = 1
+	}
+	usageEstInt := 0
+	if entry.UsageEstimated {
+		usageEstInt = 1
+	}
 
 	res, err := m.db.Exec(`
 		INSERT INTO traffic_logs (
 			timestamp, api_key, api_key_name, api_key_id, provider_id, model, prompt_tokens, completion_tokens, total_tokens,
 			duration_ms, status_code, client_ip, stream, error_message, level,
 			plugins_skipped, plugins_applied, tokens_saved, tokens_overhead, plugin_errors, plugin_ms,
-			has_images, image_count, model_id
-		) VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			has_images, image_count, model_id,
+			api_format, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+			thinking_requested, thinking_delivered, served_model, model_fallback, usage_estimated,
+			cost_usd
+		) VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, maskedKey, entry.APIKeyName, keyID, entry.ProviderID, entry.Model, entry.PromptTokens, entry.CompletionTokens, entry.TotalTokens,
 		entry.DurationMs, entry.StatusCode, entry.ClientIP, streamInt, errMsg, entry.Level,
 		entry.PluginsSkipped, entry.PluginsApplied, entry.TokensSaved, entry.TokensOverhead, entry.PluginErrors, entry.PluginMs,
-		hasImagesInt, entry.ImageCount, sql.NullString{String: entry.ModelID, Valid: entry.ModelID != ""})
+		hasImagesInt, entry.ImageCount, sql.NullString{String: entry.ModelID, Valid: entry.ModelID != ""},
+		entry.ApiFormat, entry.CacheReadTokens, entry.CacheWriteTokens, entry.ReasoningTokens,
+		thinkingReqInt, thinkingDelInt, entry.ServedModel, modelFallbackInt, usageEstInt,
+		entry.CostUSD)
 
 	if err == nil {
 		if id, idErr := res.LastInsertId(); idErr == nil {
@@ -525,6 +587,38 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 			conditions = append(conditions, "has_images = 1")
 		} else {
 			conditions = append(conditions, "has_images = 0")
+		}
+	}
+
+	if p.ApiFormat != "" {
+		conditions = append(conditions, "api_format = ?")
+		args = append(args, strings.ToLower(strings.TrimSpace(p.ApiFormat)))
+	}
+
+	if p.Thinking != "" {
+		switch strings.ToLower(strings.TrimSpace(p.Thinking)) {
+		case "requested":
+			conditions = append(conditions, "thinking_requested = 1")
+		case "delivered":
+			conditions = append(conditions, "thinking_delivered = 1")
+		case "lost":
+			conditions = append(conditions, "(thinking_requested = 1 AND thinking_delivered = 0 AND NOT (api_format = 'chat' AND LOWER(model) LIKE '%claude%'))")
+		}
+	}
+
+	if p.Fallback != nil {
+		if *p.Fallback {
+			conditions = append(conditions, "model_fallback = 1")
+		} else {
+			conditions = append(conditions, "model_fallback = 0")
+		}
+	}
+
+	if p.Estimated != nil {
+		if *p.Estimated {
+			conditions = append(conditions, "usage_estimated = 1")
+		} else {
+			conditions = append(conditions, "usage_estimated = 0")
 		}
 	}
 
@@ -692,7 +786,10 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 		       COALESCE(plugins_skipped, ''), COALESCE(plugins_applied, ''), COALESCE(tokens_saved, 0), COALESCE(tokens_overhead, 0),
 		       COALESCE(plugin_errors, ''), COALESCE(plugin_ms, 0),
 		       COALESCE(has_images, 0), COALESCE(image_count, 0),
-		       EXISTS(SELECT 1 FROM models rm WHERE rm.id = COALESCE(NULLIF(traffic_logs.model_id, ''), traffic_logs.model) COLLATE NOCASE AND rm.removed_at IS NOT NULL)
+		       EXISTS(SELECT 1 FROM models rm WHERE rm.id = COALESCE(NULLIF(traffic_logs.model_id, ''), traffic_logs.model) COLLATE NOCASE AND rm.removed_at IS NOT NULL),
+		       COALESCE(api_format, ''), COALESCE(cache_read_tokens, 0), COALESCE(cache_write_tokens, 0), COALESCE(reasoning_tokens, 0),
+		       COALESCE(thinking_requested, 0), COALESCE(thinking_delivered, 0), COALESCE(served_model, ''), COALESCE(model_fallback, 0), COALESCE(usage_estimated, 0),
+		       cost_usd
 		FROM traffic_logs
 		%s
 		ORDER BY id DESC
@@ -714,6 +811,7 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 		var lvlStr string
 		var hasImgInt, imgCount int
 		var removedInt int
+		var thinkingReqInt, thinkingDelInt, fallbackInt, estInt int
 		if err := rows.Scan(
 			&e.ID, &e.Timestamp, &e.APIKey, &e.APIKeyName, &e.APIKeyID, &e.ProviderID, &e.Model,
 			&e.PromptTokens, &e.CompletionTokens, &e.TotalTokens,
@@ -721,6 +819,9 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 			&e.PluginsSkipped, &e.PluginsApplied, &e.TokensSaved, &e.TokensOverhead,
 			&e.PluginErrors, &e.PluginMs,
 			&hasImgInt, &imgCount, &removedInt,
+			&e.ApiFormat, &e.CacheReadTokens, &e.CacheWriteTokens, &e.ReasoningTokens,
+			&thinkingReqInt, &thinkingDelInt, &e.ServedModel, &fallbackInt, &estInt,
+			&e.CostUSD,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -732,6 +833,10 @@ func (m *Manager) QueryLogs(p FilterParams) ([]LogEntry, int, error) {
 		e.HasImages = (hasImgInt == 1)
 		e.ImageCount = imgCount
 		e.ModelRemoved = (removedInt == 1)
+		e.ThinkingRequested = (thinkingReqInt == 1)
+		e.ThinkingDelivered = (thinkingDelInt == 1)
+		e.ModelFallback = (fallbackInt == 1)
+		e.UsageEstimated = (estInt == 1)
 		e.ComputeLevelAndMessage()
 		list = append(list, e)
 	}
@@ -819,6 +924,34 @@ func (m *Manager) GetVolume(p FilterParams, buckets int) (*VolumeResult, error) 
 			conditions = append(conditions, "has_images = 1")
 		} else {
 			conditions = append(conditions, "has_images = 0")
+		}
+	}
+	if p.ApiFormat != "" {
+		conditions = append(conditions, "api_format = ?")
+		args = append(args, strings.ToLower(strings.TrimSpace(p.ApiFormat)))
+	}
+	if p.Thinking != "" {
+		switch strings.ToLower(strings.TrimSpace(p.Thinking)) {
+		case "requested":
+			conditions = append(conditions, "thinking_requested = 1")
+		case "delivered":
+			conditions = append(conditions, "thinking_delivered = 1")
+		case "lost":
+			conditions = append(conditions, "(thinking_requested = 1 AND thinking_delivered = 0 AND NOT (api_format = 'chat' AND LOWER(model) LIKE '%claude%'))")
+		}
+	}
+	if p.Fallback != nil {
+		if *p.Fallback {
+			conditions = append(conditions, "model_fallback = 1")
+		} else {
+			conditions = append(conditions, "model_fallback = 0")
+		}
+	}
+	if p.Estimated != nil {
+		if *p.Estimated {
+			conditions = append(conditions, "usage_estimated = 1")
+		} else {
+			conditions = append(conditions, "usage_estimated = 0")
 		}
 	}
 	if p.ClientIP != "" {
@@ -1032,7 +1165,9 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string, loc *time
 			COALESCE(MIN(CASE WHEN duration_ms > 0 THEN duration_ms ELSE NULL END), 0),
 			COALESCE(MAX(duration_ms), 0),
 			COALESCE(SUM(CASE WHEN stream = 1 THEN 1 ELSE 0 END), 0),
-			COUNT(DISTINCT COALESCE(NULLIF(model_id, ''), model))
+			COUNT(DISTINCT COALESCE(NULLIF(model_id, ''), model)),
+			COALESCE(SUM(cost_usd), 0),
+			COALESCE(SUM(CASE WHEN cost_usd IS NULL AND status_code < 400 THEN 1 ELSE 0 END), 0)
 		FROM traffic_logs
 		WHERE %s
 	`, dateFilter)
@@ -1051,6 +1186,8 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string, loc *time
 		&stats.MaxDurationMs,
 		&stats.StreamRequests,
 		&stats.ActiveModels,
+		&stats.EstimatedCostUSD,
+		&stats.UnpricedRequests,
 	)
 	if err != nil {
 		return nil, err
@@ -1095,13 +1232,21 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string, loc *time
 			COALESCE(SUM(total_tokens), 0),
 			COALESCE(SUM(CASE WHEN status_code = 403 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(cost_usd), 0)
 		FROM traffic_logs
 		WHERE %s
 	`, prevFilter)
 
 	var prevReqs, prevToks, prevBlk, prevSucc, prevErrs int
-	_ = m.db.QueryRow(prevAggQuery, prevFilterArgs...).Scan(&prevReqs, &prevToks, &prevBlk, &prevSucc, &prevErrs)
+	var prevCost float64
+	_ = m.db.QueryRow(prevAggQuery, prevFilterArgs...).Scan(&prevReqs, &prevToks, &prevBlk, &prevSucc, &prevErrs, &prevCost)
+	stats.Comparison.PrevEstimatedCost = prevCost
+	if prevCost > 0 {
+		stats.Comparison.CostDeltaPct = (stats.EstimatedCostUSD - prevCost) / prevCost * 100.0
+	} else if stats.EstimatedCostUSD > 0 {
+		stats.Comparison.CostDeltaPct = 100.0
+	}
 
 	var prevErrRate float64
 	if prevReqs > 0 {
@@ -1297,7 +1442,9 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string, loc *time
 
 	// Top models
 	topModelsQuery := fmt.Sprintf(`
-		SELECT COALESCE(NULLIF(model_id, ''), model) AS mdl, COUNT(*) as reqs, COALESCE(SUM(total_tokens), 0) as toks
+		SELECT COALESCE(NULLIF(model_id, ''), model) AS mdl, COUNT(*) as reqs, COALESCE(SUM(total_tokens), 0) as toks,
+		       COALESCE(SUM(cost_usd), 0) as cost,
+		       COALESCE(SUM(CASE WHEN cost_usd IS NULL AND status_code < 400 THEN 1 ELSE 0 END), 0) as unpriced
 		FROM traffic_logs
 		WHERE %s
 		GROUP BY mdl
@@ -1308,7 +1455,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string, loc *time
 	if err == nil {
 		for rows.Next() {
 			var ms ModelStat
-			if err := rows.Scan(&ms.Model, &ms.Requests, &ms.Tokens); err == nil {
+			if err := rows.Scan(&ms.Model, &ms.Requests, &ms.Tokens, &ms.EstimatedCostUSD, &ms.UnpricedRequests); err == nil {
 				if stats.TotalRequests > 0 {
 					ms.Share = float64(ms.Requests) / float64(stats.TotalRequests) * 100
 				}
@@ -1352,7 +1499,9 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string, loc *time
 	// Top API Keys, grouped by key ID (unlinked rows by historical name).
 	tSlotExpr := strings.ReplaceAll(slotExpr, "timestamp", "t.timestamp")
 	topKeysQuery := fmt.Sprintf(`
-		SELECT %s AS g, %s AS key_name, MAX(t.api_key), COUNT(*) AS reqs, COALESCE(SUM(t.total_tokens), 0) AS toks
+		SELECT %s AS g, %s AS key_name, MAX(t.api_key), COUNT(*) AS reqs, COALESCE(SUM(t.total_tokens), 0) AS toks,
+		       COALESCE(SUM(t.cost_usd), 0) AS cost,
+		       COALESCE(SUM(CASE WHEN t.cost_usd IS NULL AND t.status_code < 400 THEN 1 ELSE 0 END), 0) AS unpriced
 		FROM traffic_logs t%s
 		WHERE %s
 		GROUP BY g
@@ -1366,7 +1515,7 @@ func (m *Manager) GetDashboardStats(period, startDate, endDate string, loc *time
 			var ks KeyStat
 			var g string
 			var masked sql.NullString
-			if err := rowsKeys.Scan(&g, &ks.Name, &masked, &ks.Requests, &ks.Tokens); err == nil {
+			if err := rowsKeys.Scan(&g, &ks.Name, &masked, &ks.Requests, &ks.Tokens, &ks.EstimatedCostUSD, &ks.UnpricedRequests); err == nil {
 				ks.KeyID, ks.Unlinked = splitKeyGroup(g)
 				ks.Key = masked.String
 				if stats.TotalTokens > 0 {
@@ -1517,7 +1666,9 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 			COALESCE(SUM(total_tokens), 0),
 			COALESCE(SUM(prompt_tokens), 0),
 			COALESCE(SUM(completion_tokens), 0),
-			COALESCE(SUM(tokens_saved), 0)
+			COALESCE(SUM(tokens_saved), 0),
+			COALESCE(SUM(cost_usd), 0),
+			COALESCE(SUM(CASE WHEN cost_usd IS NULL AND status_code < 400 THEN 1 ELSE 0 END), 0)
 		FROM traffic_logs
 		WHERE %s
 	`, dateFilter)
@@ -1528,6 +1679,8 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 		&report.PromptTokens,
 		&report.CompletionTokens,
 		&report.TokensSaved,
+		&report.EstimatedCostUSD,
+		&report.UnpricedRequests,
 	)
 
 	// 2. Query Key-Model Cross Breakdown, grouped by key ID (unlinked rows by historical name).
@@ -1543,7 +1696,9 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 			COALESCE(SUM(t.total_tokens), 0) AS tot_toks,
 			COALESCE(SUM(t.prompt_tokens), 0) AS p_toks,
 			COALESCE(SUM(t.completion_tokens), 0) AS c_toks,
-			COUNT(*) AS reqs
+			COUNT(*) AS reqs,
+			COALESCE(SUM(t.cost_usd), 0) AS cost,
+			COALESCE(SUM(CASE WHEN t.cost_usd IS NULL AND t.status_code < 400 THEN 1 ELSE 0 END), 0) AS unpriced
 		FROM traffic_logs t%s
 		WHERE %s
 		GROUP BY g, mdl
@@ -1557,24 +1712,30 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 			var g, kn, mod string
 			var masked sql.NullString
 			var tot, pt, ct, reqs int
-			if err := crossRows.Scan(&g, &kn, &masked, &mod, &tot, &pt, &ct, &reqs); err == nil {
+			var cost float64
+			var unpriced int64
+			if err := crossRows.Scan(&g, &kn, &masked, &mod, &tot, &pt, &ct, &reqs, &cost, &unpriced); err == nil {
 				keyID, unlinked := splitKeyGroup(g)
 				keyModelMap[g] = append(keyModelMap[g], ModelUsageSummary{
-					Model:        mod,
-					TotalTokens:  tot,
-					PromptTokens: pt,
-					CompTokens:   ct,
-					Requests:     reqs,
+					Model:            mod,
+					TotalTokens:      tot,
+					PromptTokens:     pt,
+					CompTokens:       ct,
+					Requests:         reqs,
+					EstimatedCostUSD: cost,
+					UnpricedRequests: unpriced,
 				})
 				modelKeyMap[mod] = append(modelKeyMap[mod], KeyUsageSummary{
-					KeyID:        keyID,
-					Unlinked:     unlinked,
-					KeyName:      kn,
-					Key:          masked.String,
-					TotalTokens:  tot,
-					PromptTokens: pt,
-					CompTokens:   ct,
-					Requests:     reqs,
+					KeyID:            keyID,
+					Unlinked:         unlinked,
+					KeyName:          kn,
+					Key:              masked.String,
+					TotalTokens:      tot,
+					PromptTokens:     pt,
+					CompTokens:       ct,
+					Requests:         reqs,
+					EstimatedCostUSD: cost,
+					UnpricedRequests: unpriced,
 				})
 			}
 		}
@@ -1598,7 +1759,9 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 			COALESCE(SUM(CASE WHEN t.status_code >= 400 AND t.status_code != 403 THEN 1 ELSE 0 END), 0) AS err_reqs,
 			COALESCE(SUM(CASE WHEN t.status_code = 403 THEN 1 ELSE 0 END), 0) AS blk_reqs,
 			COALESCE(ROUND(AVG(t.duration_ms)), 0) AS avg_dur,
-			COALESCE(SUM(t.tokens_saved), 0) AS tok_saved
+			COALESCE(SUM(t.tokens_saved), 0) AS tok_saved,
+			COALESCE(SUM(t.cost_usd), 0) AS cost,
+			COALESCE(SUM(CASE WHEN t.cost_usd IS NULL AND t.status_code < 400 THEN 1 ELSE 0 END), 0) AS unpriced
 		FROM traffic_logs t%s
 		WHERE %s
 		GROUP BY g
@@ -1616,6 +1779,7 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 				&g, &kb.KeyName, &masked, &kb.TotalTokens, &kb.PromptTokens, &kb.CompletionTokens,
 				&kb.TotalRequests, &kb.SuccessRequests, &kb.ErrorRequests, &kb.BlockedRequests,
 				&kb.AvgDurationMs, &kb.TokensSaved,
+				&kb.EstimatedCostUSD, &kb.UnpricedRequests,
 			); err == nil {
 				kb.KeyID, kb.Unlinked = splitKeyGroup(g)
 				kb.Key = masked.String
@@ -1648,7 +1812,9 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 			COALESCE(SUM(CASE WHEN t.status_code >= 200 AND t.status_code < 400 THEN 1 ELSE 0 END), 0) as ok_reqs,
 			COALESCE(SUM(CASE WHEN t.status_code >= 400 AND t.status_code != 403 THEN 1 ELSE 0 END), 0) as err_reqs,
 			COALESCE(SUM(CASE WHEN t.status_code = 403 THEN 1 ELSE 0 END), 0) as blk_reqs,
-			COALESCE(ROUND(AVG(t.duration_ms)), 0) as avg_dur
+			COALESCE(ROUND(AVG(t.duration_ms)), 0) as avg_dur,
+			COALESCE(SUM(t.cost_usd), 0) as cost,
+			COALESCE(SUM(CASE WHEN t.cost_usd IS NULL AND t.status_code < 400 THEN 1 ELSE 0 END), 0) as unpriced
 		FROM traffic_logs t
 		LEFT JOIN models m ON COALESCE(NULLIF(t.model_id, ''), t.model) = m.id COLLATE NOCASE
 		WHERE %s
@@ -1666,6 +1832,7 @@ func (m *Manager) GetUsageReports(period, startDate, endDate string, loc *time.L
 				&mb.Model, &enInt, &rmInt, &mb.TotalTokens, &mb.PromptTokens, &mb.CompletionTokens,
 				&mb.TotalRequests, &mb.SuccessRequests, &mb.ErrorRequests, &mb.BlockedRequests,
 				&mb.AvgDurationMs,
+				&mb.EstimatedCostUSD, &mb.UnpricedRequests,
 			); err == nil {
 				mb.Enabled = (enInt == 1)
 				mb.Removed = (rmInt == 1)

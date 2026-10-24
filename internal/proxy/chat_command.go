@@ -323,3 +323,134 @@ func WriteChatCommandResponse(w http.ResponseWriter, command, markdown string, s
 		flusher.Flush()
 	}
 }
+
+// WriteAnthropicChatCommandResponse sends a synthetic message completion matching Anthropic Messages protocol.
+func WriteAnthropicChatCommandResponse(w http.ResponseWriter, command, markdown string, stream bool) {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	msgID := "msg_ng_cmd_" + hex.EncodeToString(b)
+
+	if !stream {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		resp := map[string]interface{}{
+			"id":            msgID,
+			"type":          "message",
+			"role":          "assistant",
+			"model":         "nineguard/system",
+			"content": []map[string]interface{}{
+				{
+					"type": "text",
+					"text": markdown,
+				},
+			},
+			"stop_reason":   "end_turn",
+			"stop_sequence": nil,
+			"usage": map[string]interface{}{
+				"input_tokens":  0,
+				"output_tokens": 0,
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, canFlush := w.(http.Flusher)
+
+	// Event 1: message_start
+	ev1 := map[string]interface{}{
+		"type": "message_start",
+		"message": map[string]interface{}{
+			"id":            msgID,
+			"type":          "message",
+			"role":          "assistant",
+			"model":         "nineguard/system",
+			"content":       []interface{}{},
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage": map[string]interface{}{
+				"input_tokens":  0,
+				"output_tokens": 0,
+			},
+		},
+	}
+	d1, _ := json.Marshal(ev1)
+	_, _ = fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", d1)
+	if canFlush {
+		flusher.Flush()
+	}
+
+	// Event 2: content_block_start
+	ev2 := map[string]interface{}{
+		"type":  "content_block_start",
+		"index": 0,
+		"content_block": map[string]interface{}{
+			"type": "text",
+			"text": "",
+		},
+	}
+	d2, _ := json.Marshal(ev2)
+	_, _ = fmt.Fprintf(w, "event: content_block_start\ndata: %s\n\n", d2)
+	if canFlush {
+		flusher.Flush()
+	}
+
+	// Event 3: content_block_delta
+	ev3 := map[string]interface{}{
+		"type":  "content_block_delta",
+		"index": 0,
+		"delta": map[string]interface{}{
+			"type": "text_delta",
+			"text": markdown,
+		},
+	}
+	d3, _ := json.Marshal(ev3)
+	_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", d3)
+	if canFlush {
+		flusher.Flush()
+	}
+
+	// Event 4: content_block_stop
+	ev4 := map[string]interface{}{
+		"type":  "content_block_stop",
+		"index": 0,
+	}
+	d4, _ := json.Marshal(ev4)
+	_, _ = fmt.Fprintf(w, "event: content_block_stop\ndata: %s\n\n", d4)
+	if canFlush {
+		flusher.Flush()
+	}
+
+	// Event 5: message_delta
+	ev5 := map[string]interface{}{
+		"type": "message_delta",
+		"delta": map[string]interface{}{
+			"stop_reason":   "end_turn",
+			"stop_sequence": nil,
+		},
+		"usage": map[string]interface{}{
+			"output_tokens": 0,
+		},
+	}
+	d5, _ := json.Marshal(ev5)
+	_, _ = fmt.Fprintf(w, "event: message_delta\ndata: %s\n\n", d5)
+	if canFlush {
+		flusher.Flush()
+	}
+
+	// Event 6: message_stop
+	ev6 := map[string]interface{}{
+		"type": "message_stop",
+	}
+	d6, _ := json.Marshal(ev6)
+	_, _ = fmt.Fprintf(w, "event: message_stop\ndata: %s\n\n", d6)
+	if canFlush {
+		flusher.Flush()
+	}
+}

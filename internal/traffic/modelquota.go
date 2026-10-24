@@ -10,9 +10,9 @@ import (
 	"nineguard/internal/timeutil"
 )
 
-// GetModelQuotaUsage sums tokens a key used on one resolved Model ID inside the period's UTC window.
-func GetModelQuotaUsage(d *db.DB, keyID, modelID, period string, now time.Time) (int64, time.Time, error) {
-	start, resetAt := CalcQuotaWindow(period, now)
+// GetModelQuotaUsage sums tokens a key used on one resolved Model ID inside the period's current Quota Window (the key's schedule and Transitional Windows, ADR 0010).
+func GetModelQuotaUsage(d *db.DB, keyID, modelID, period string, rule ResetRule, now time.Time) (int64, time.Time, error) {
+	start, resetAt := CalcQuotaWindow(period, rule, now)
 	var n int64
 	err := d.QueryRow(`SELECT COALESCE(SUM(total_tokens),0) FROM traffic_logs WHERE api_key_id = ? AND model_id = ? AND timestamp >= ?`,
 		keyID, modelID, start.Format(timeutil.SQLiteLayout)).Scan(&n)
@@ -22,11 +22,11 @@ func GetModelQuotaUsage(d *db.DB, keyID, modelID, period string, now time.Time) 
 	return n, resetAt, nil
 }
 
-func (m *Manager) GetModelQuotaUsage(keyID, modelID, period string, now time.Time) (int64, time.Time, error) {
+func (m *Manager) GetModelQuotaUsage(keyID, modelID, period string, rule ResetRule, now time.Time) (int64, time.Time, error) {
 	if m == nil || m.db == nil {
 		return 0, time.Time{}, nil
 	}
-	return GetModelQuotaUsage(m.db, keyID, modelID, period, now)
+	return GetModelQuotaUsage(m.db, keyID, modelID, period, rule, now)
 }
 
 // GetModelUsageSince sums tokens per model_id since start (keys lowercased).

@@ -108,3 +108,118 @@ func ApplySecretGuard(messages []map[string]any, settings map[string]any) (newMe
 	// warn_only or unknown: pass unmodified
 	return messages, false, false, "", nil
 }
+
+func scanAndRedactAny(val any, redact bool) (any, int) {
+	switch v := val.(type) {
+	case string:
+		c := countSecrets(v)
+		if redact && c > 0 {
+			r, _ := redactText(v)
+			return r, c
+		}
+		return v, c
+	case map[string]any:
+		res := make(map[string]any, len(v))
+		total := 0
+		for k, item := range v {
+			newItem, c := scanAndRedactAny(item, redact)
+			total += c
+			res[k] = newItem
+		}
+		return res, total
+	case []any:
+		res := make([]any, len(v))
+		total := 0
+		for i, item := range v {
+			newItem, c := scanAndRedactAny(item, redact)
+			total += c
+			res[i] = newItem
+		}
+		return res, total
+	default:
+		return v, 0
+	}
+}
+
+// ApplySecretGuardToMessages scans and redacts/blocks secrets in an Anthropic messages request body.
+func ApplySecretGuardToMessages(body map[string]any, settings map[string]any) (modifiedBody map[string]any, skipped bool, rejected bool, rejectMsg string, err error) {
+	action := "block"
+	if settings != nil {
+		if a, ok := settings["action"].(string); ok && a != "" {
+			action = strings.ToLower(strings.TrimSpace(a))
+		}
+	}
+
+	totalSecrets := 0
+	clonedBody := make(map[string]any, len(body))
+	for k, v := range body {
+		clonedBody[k] = v
+	}
+
+	// 1. Scan/Redact system field
+	if sysVal, exists := body["system"]; exists && sysVal != nil {
+		newSys, c := scanAndRedactAny(sysVal, action == "redact")
+		totalSecrets += c
+		clonedBody["system"] = newSys
+	}
+
+	// 2. Scan/Redact messages array
+	if rawMsgs, exists := body["messages"].([]any); exists && len(rawMsgs) > 0 {
+		newMsgs := make([]any, len(rawMsgs))
+		for i, m := range rawMsgs {
+			mMap, ok := m.(map[string]any)
+			if !ok {
+				newMsgs[i] = m
+				continue
+			}
+
+			clonedMsg := make(map[string]any, len(mMap))
+			for mk, mv := range mMap {
+				clonedMsg[mk] = mv
+			}
+
+			contentVal := mMap["content"]
+			switch cTyped := contentVal.(type) {
+			case string:
+				newStr, c := scanAndRedactAny(cTyped, action == "redact")
+				totalSecrets += c
+				clonedMsg["content"] = newStr
+			case []any:
+				newBlocks := make([]any, len(cTyped))
+				for j, block := range cTyped {
+					blockMap, isBlockMap := block.(map[string]any)
+					if !isBlockMap {
+						newBlocks[j] = block
+						continue
+					}
+					bType, _ := blockMap["type"].(string)
+					if bType == "image" {
+						// Skip image payload
+						newBlocks[j] = block
+						continue
+					}
+					newBlock, c := scanAndRedactAny(blockMap, action == "redact")
+					totalSecrets += c
+					newBlocks[j] = newBlock
+				}
+				clonedMsg["content"] = newBlocks
+			default:
+				newContent, c := scanAndRedactAny(contentVal, action == "redact")
+				totalSecrets += c
+				clonedMsg["content"] = newContent
+			}
+			newMsgs[i] = clonedMsg
+		}
+		clonedBody["messages"] = newMsgs
+	}
+
+	if totalSecrets == 0 {
+		return body, true, false, "", nil
+	}
+
+	if action == "block" {
+		return body, false, true, "Request blocked: prompt contains sensitive credentials or secrets (SecretGuard).", nil
+	}
+
+	return clonedBody, false, false, "", nil
+}

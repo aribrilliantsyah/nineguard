@@ -137,3 +137,66 @@ curl -X POST "http://localhost:8080/v1/chat/completions" \
     "messages": [{"role": "user", "content": "Ping test"}]
   }'
 ```
+
+---
+
+## 8. Claude Code CLI
+
+NineGuard accepts native Anthropic `/v1/messages` requests with `x-api-key`. Set environment variables before running Claude Code:
+
+```bash
+export ANTHROPIC_BASE_URL="http://localhost:8080"
+export ANTHROPIC_API_KEY="sk-ng-YOUR_NINEGUARD_KEY"
+
+# Jalankan Claude Code
+claude
+```
+
+NineGuard automatically executes safety and token-saving plugins (Caveman, Ponytail, SecretGuard) on Claude Code traffic. Slash commands `/quota` and `/usage` are intercepted directly within the chat.
+
+---
+
+## 9. Anthropic SDK (Python / TypeScript)
+
+### Python (Official Anthropic SDK)
+
+```python
+import anthropic
+
+client = anthropic.Anthropic(
+    base_url="http://localhost:8080",
+    api_key="sk-ng-YOUR_NINEGUARD_KEY"
+)
+
+message = client.messages.create(
+    model="openrouter/anthropic/claude-3.5-sonnet",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Halo NineGuard!"}]
+)
+
+print(message.content[0].text)
+```
+
+### TypeScript (Official Anthropic SDK)
+
+```typescript
+import Anthropic from '@anthropic-ai/sdk';
+
+const anthropic = new Anthropic({
+  baseURL: 'http://localhost:8080',
+  apiKey: 'sk-ng-YOUR_NINEGUARD_KEY',
+});
+
+async function main() {
+  const message = await anthropic.messages.create({
+    model: 'openrouter/anthropic/claude-3.5-sonnet',
+    max_tokens: 1024,
+    messages: [{ role: 'user', content: 'Halo NineGuard!' }],
+  });
+
+  console.log(message.content[0]);
+}
+
+main();
+```
+

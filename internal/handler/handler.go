@@ -15,6 +15,7 @@ import (
 	"nineguard/internal/keys"
 	"nineguard/internal/models"
 	"nineguard/internal/plugins"
+	"nineguard/internal/pricing"
 	"nineguard/internal/providers"
 	"nineguard/internal/proxy"
 	"nineguard/internal/syslog"
@@ -32,6 +33,7 @@ type Handler struct {
 	keys         *keys.Manager
 	providers    *providers.Manager
 	plugins      *plugins.Manager
+	pricing      *pricing.Manager
 	proxy        *proxy.Proxy
 	upstream     *upstream.Manager
 	syncReset    chan struct{}
@@ -968,6 +970,18 @@ func parseFilterParams(q url.Values) traffic.FilterParams {
 		hasImages = &val
 	}
 
+	var fallback *bool
+	if fbParam := q.Get("fallback"); fbParam != "" {
+		val := (fbParam == "1" || strings.EqualFold(fbParam, "true"))
+		fallback = &val
+	}
+
+	var estimated *bool
+	if estParam := q.Get("estimated"); estParam != "" {
+		val := (estParam == "1" || strings.EqualFold(estParam, "true"))
+		estimated = &val
+	}
+
 	return traffic.FilterParams{
 		Period:    q.Get("period"),
 		StartDate: startDate,
@@ -987,6 +1001,10 @@ func parseFilterParams(q url.Values) traffic.FilterParams {
 		Offset:    offset,
 		Loc:       timeutil.LoadLocation(q.Get("tz")),
 		HasImages: hasImages,
+		ApiFormat: q.Get("api_format"),
+		Thinking:  q.Get("thinking"),
+		Fallback:  fallback,
+		Estimated: estimated,
 	}
 }
 
@@ -1064,6 +1082,7 @@ func (h *Handler) ExportTrafficLogs(w http.ResponseWriter, r *http.Request) {
 		_ = cw.Write([]string{
 			"timestamp", "level", "status_code", "model", "provider", "client_key_name", "client_key",
 			"duration_ms", "prompt_tokens", "completion_tokens", "total_tokens", "stream", "client_ip", "error_message", "message",
+			"cost_usd", "cost_currency", "served_model", "model_fallback", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "usage_estimated", "api_format",
 		})
 		for _, e := range logs {
 			streamStr := "false"
@@ -1073,6 +1092,18 @@ func (h *Handler) ExportTrafficLogs(w http.ResponseWriter, r *http.Request) {
 			errStr := ""
 			if e.ErrorMessage != nil {
 				errStr = *e.ErrorMessage
+			}
+			costStr := ""
+			if e.CostUSD != nil {
+				costStr = fmt.Sprintf("%.6f", *e.CostUSD)
+			}
+			fallbackStr := "false"
+			if e.ModelFallback {
+				fallbackStr = "true"
+			}
+			estStr := "false"
+			if e.UsageEstimated {
+				estStr = "true"
 			}
 			_ = cw.Write([]string{
 				e.Timestamp.Format(time.RFC3339Nano),
@@ -1090,6 +1121,15 @@ func (h *Handler) ExportTrafficLogs(w http.ResponseWriter, r *http.Request) {
 				e.ClientIP,
 				errStr,
 				e.Message,
+				costStr,
+				"USD",
+				e.ServedModel,
+				fallbackStr,
+				strconv.Itoa(e.ReasoningTokens),
+				strconv.Itoa(e.CacheReadTokens),
+				strconv.Itoa(e.CacheWriteTokens),
+				estStr,
+				e.ApiFormat,
 			})
 		}
 		cw.Flush()
@@ -1139,6 +1179,104 @@ func (h *Handler) GetUsageReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, report)
+}
+
+func (h *Handler) ExportUsageReport(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	period := q.Get("period")
+	startDate := q.Get("start")
+	if startDate == "" {
+		startDate = q.Get("start_date")
+	}
+	endDate := q.Get("end")
+	if endDate == "" {
+		endDate = q.Get("end_date")
+	}
+
+	report, err := h.traffic.GetUsageReports(period, startDate, endDate, requestLocation(r))
+	if err != nil {
+		slog.Error("failed to export usage report", "error", err)
+		jsonError(w, http.StatusInternalServerError, "Failed to export usage report")
+		return
+	}
+
+	filename := fmt.Sprintf("nineguard-usage-report-%s-%s.csv", period, time.Now().UTC().Format("20060102-150405"))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+
+	cw := csv.NewWriter(w)
+
+	// 1. Executive Summary
+	_ = cw.Write([]string{"# EXECUTIVE SUMMARY"})
+	_ = cw.Write([]string{"period", "start_date", "end_date", "total_requests", "total_tokens", "prompt_tokens", "completion_tokens", "estimated_cost_usd", "unpriced_requests", "top_key", "top_model"})
+	_ = cw.Write([]string{
+		report.Period,
+		report.StartDate,
+		report.EndDate,
+		strconv.Itoa(report.TotalRequests),
+		strconv.Itoa(report.TotalTokens),
+		strconv.Itoa(report.PromptTokens),
+		strconv.Itoa(report.CompletionTokens),
+		fmt.Sprintf("%.4f", report.EstimatedCostUSD),
+		strconv.FormatInt(report.UnpricedRequests, 10),
+		report.TopConsumerKey,
+		report.TopModel,
+	})
+	_ = cw.Write([]string{""})
+
+	// 2. Client Keys Breakdown
+	_ = cw.Write([]string{"# CLIENT KEYS BREAKDOWN"})
+	_ = cw.Write([]string{"key_name", "key_masked", "requests", "prompt_tokens", "completion_tokens", "total_tokens", "estimated_cost_usd", "token_share_pct"})
+	for _, k := range report.KeysBreakdown {
+		_ = cw.Write([]string{
+			k.KeyName,
+			k.Key,
+			strconv.Itoa(k.TotalRequests),
+			strconv.Itoa(k.PromptTokens),
+			strconv.Itoa(k.CompletionTokens),
+			strconv.Itoa(k.TotalTokens),
+			fmt.Sprintf("%.4f", k.EstimatedCostUSD),
+			fmt.Sprintf("%.2f%%", k.TokenShare),
+		})
+	}
+	_ = cw.Write([]string{""})
+
+	// 3. Models Breakdown
+	_ = cw.Write([]string{"# MODELS BREAKDOWN"})
+	_ = cw.Write([]string{"model_id", "requests", "prompt_tokens", "completion_tokens", "total_tokens", "estimated_cost_usd", "token_share_pct"})
+	for _, m := range report.ModelsBreakdown {
+		_ = cw.Write([]string{
+			m.Model,
+			strconv.Itoa(m.TotalRequests),
+			strconv.Itoa(m.PromptTokens),
+			strconv.Itoa(m.CompletionTokens),
+			strconv.Itoa(m.TotalTokens),
+			fmt.Sprintf("%.4f", m.EstimatedCostUSD),
+			fmt.Sprintf("%.2f%%", m.TokenShare),
+		})
+	}
+	_ = cw.Write([]string{""})
+
+	// 4. Key-to-Model Attribution Matrix
+	_ = cw.Write([]string{"# KEY TO MODEL ATTRIBUTION MATRIX"})
+	_ = cw.Write([]string{"key_name", "key_masked", "model_id", "requests", "prompt_tokens", "completion_tokens", "total_tokens", "estimated_cost_usd", "share_of_key_pct"})
+	for _, k := range report.KeysBreakdown {
+		for _, m := range k.ModelUsage {
+			_ = cw.Write([]string{
+				k.KeyName,
+				k.Key,
+				m.Model,
+				strconv.Itoa(m.Requests),
+				strconv.Itoa(m.PromptTokens),
+				strconv.Itoa(m.CompTokens),
+				strconv.Itoa(m.TotalTokens),
+				fmt.Sprintf("%.4f", m.EstimatedCostUSD),
+				fmt.Sprintf("%.2f%%", m.Share),
+			})
+		}
+	}
+
+	cw.Flush()
 }
 
 // ── API Keys Handlers ──
@@ -1222,11 +1360,18 @@ func (h *Handler) CreateKey(w http.ResponseWriter, r *http.Request) {
 		QuotaPeriod     string            `json:"quota_period"`
 		QuotaMode       string            `json:"quota_mode"`
 		ModelQuotas     []keys.ModelQuota `json:"model_quotas"`
+		ResetSchedule   json.RawMessage   `json:"quota_reset_schedule"`
+		CostVisibility  *string           `json:"cost_visibility"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
 	if body.QuotaLimit < 0 {
 		jsonError(w, http.StatusBadRequest, "Quota limit cannot be negative")
+		return
+	}
+	resetSched, serr := parseOptSchedule(body.ResetSchedule)
+	if serr != nil {
+		jsonError(w, http.StatusBadRequest, serr.Error())
 		return
 	}
 	body.QuotaPeriod = strings.ToLower(strings.TrimSpace(body.QuotaPeriod))
@@ -1257,6 +1402,8 @@ func (h *Handler) CreateKey(w http.ResponseWriter, r *http.Request) {
 		QuotaPeriod:     body.QuotaPeriod,
 		QuotaMode:       quotaMode,
 		ModelQuotas:     modelQuotas,
+		ResetSchedule:   resetSched.Value, // nil (absent or null) = follow the global schedule
+		CostVisibility:  body.CostVisibility,
 	})
 	if err != nil {
 		slog.Error("failed to create key", "error", err)
@@ -1288,9 +1435,16 @@ func (h *Handler) UpdateKey(w http.ResponseWriter, r *http.Request) {
 		QuotaPeriod     *string            `json:"quota_period"`
 		QuotaMode       *string            `json:"quota_mode"`
 		ModelQuotas     *[]keys.ModelQuota `json:"model_quotas"`
+		ResetSchedule   json.RawMessage    `json:"quota_reset_schedule"`
+		CostVisibility  *string            `json:"cost_visibility"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+	resetSched, serr := parseOptSchedule(body.ResetSchedule)
+	if serr != nil {
+		jsonError(w, http.StatusBadRequest, serr.Error())
 		return
 	}
 
@@ -1321,6 +1475,8 @@ func (h *Handler) UpdateKey(w http.ResponseWriter, r *http.Request) {
 	upd := keys.KeyUpdate{
 		Name: body.Name, ModelAccessMode: body.ModelAccessMode, ModelGroupIDs: body.ModelGroupIDs, AllowedModels: body.AllowedModels,
 		QuotaLimit: body.QuotaLimit, QuotaPeriod: body.QuotaPeriod, QuotaMode: body.QuotaMode,
+		ResetSchedule: resetSched.scheduleChange(),
+		CostVisibility: body.CostVisibility,
 	}
 	if body.ModelQuotas != nil {
 		// Rows already saved on this key are accepted as they are (they may be inactive now).
@@ -1422,6 +1578,55 @@ func (h *Handler) GetKeyVelocity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, stats)
+}
+
+func (h *Handler) GetKeyUsage(w http.ResponseWriter, r *http.Request) {
+	if h.keys == nil || h.traffic == nil {
+		jsonError(w, http.StatusBadRequest, "Managers not available")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, http.StatusBadRequest, "Key ID required")
+		return
+	}
+
+	keyInfo, err := h.keys.GetKey(id)
+	if err != nil || keyInfo == nil {
+		jsonError(w, http.StatusNotFound, "API key not found")
+		return
+	}
+
+	rng := r.URL.Query().Get("range")
+	if rng == "" {
+		rng = "30d"
+	}
+	rng = strings.ToLower(strings.TrimSpace(rng))
+	if rng != "7d" && rng != "30d" && rng != "all" {
+		jsonError(w, http.StatusBadRequest, "Invalid range parameter, must be 7d, 30d, or all")
+		return
+	}
+
+	loc := time.UTC
+	tzStr := strings.TrimSpace(r.URL.Query().Get("tz"))
+	if tzStr != "" {
+		parsedLoc, err := time.LoadLocation(tzStr)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, fmt.Sprintf("Invalid timezone: %s", tzStr))
+			return
+		}
+		loc = parsedLoc
+	} else if keyInfo.EffectiveResetSchedule != nil {
+		loc = keyInfo.EffectiveResetSchedule.Location()
+	}
+
+	summary, err := h.traffic.GetUsageSummary(id, rng, loc, time.Now(), h.pricing)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, summary)
 }
 
 // ── Providers Handlers ──

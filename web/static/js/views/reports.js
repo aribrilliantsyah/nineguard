@@ -1,7 +1,9 @@
 // Usage Reports: In-depth breakdowns per API Key (consumers) and per Model with custom date range.
 import { api } from '../api.js';
-import { h, icon, emptyState, fmtNum, fmtCompact, fmtAgo, fmtDateTime, tzLabel, toast } from '../ui.js';
+import { h, icon, emptyState, fmtNum, fmtCompact, fmtAgo, fmtDateTime, tzLabel, toast, menu } from '../ui.js';
 import { setRoute } from '../state.js';
+import { formatCost } from '../costhelpers.js';
+import { openCostSettingsModal } from '../costmodal.js';
 
 export function mount(root) {
   let alive = true;
@@ -13,6 +15,8 @@ export function mount(root) {
   let customEnd = '';
   let isCustomOpen = false;
   let reportData = null;
+  let costSettings = { display_currency: 'USD', effective_rate: 1.0, effective_currency: 'USD' };
+  api.get('/settings/cost').then(s => { if (s) costSettings = s; }).catch(() => {});
 
   // Track expanded cards
   const expandedKeys = new Set();
@@ -205,8 +209,23 @@ export function mount(root) {
   const exportBtn = h('button', {
     class: 'btn btn-sm',
     type: 'button',
-    onclick: () => exportCSV()
+    onclick: () => menu(exportBtn, [
+      { label: 'Export Options' },
+      { icon: 'printer', text: 'Print / PDF Summary', onClick: () => printReport() },
+      { icon: 'download', text: 'Export Aggregated CSV', onClick: () => exportAggregatedCSV() },
+      { icon: 'download', text: 'Export Raw Traffic Logs CSV', onClick: () => exportRawCSV() },
+    ])
   }, icon('download'), 'Export');
+
+  const costSettingsBtn = h('button', {
+    class: 'btn btn-sm',
+    type: 'button',
+    title: 'Configure Display Currency, FX Exchange Rates, and Key Cost Visibility',
+    onclick: () => openCostSettingsModal(async () => {
+      await reloadCostSettings();
+      await load();
+    })
+  }, icon('dollar-sign'), 'Cost & Currency');
 
   const header = h('div', { class: 'page-head' },
     h('div', null,
@@ -215,16 +234,184 @@ export function mount(root) {
     ),
     h('div', { class: 'page-actions' },
       exportBtn,
+      costSettingsBtn,
       refreshBtn
     )
   );
 
-  function exportCSV() {
-    api.download('/traffic?export=csv', {
-      period: currentPeriod,
-      start: currentPeriod === 'custom' ? customStart : '',
-      end: currentPeriod === 'custom' ? customEnd : ''
+  function renderBusinessReportPrint() {
+    if (!reportData) return h('div');
+
+    let dateRangeStr = currentPeriod.toUpperCase();
+    if (reportData.start_date && reportData.end_date) {
+      dateRangeStr += ` (${reportData.start_date} to ${reportData.end_date})`;
+    }
+
+    const cur = costSettings.effective_currency || 'USD';
+    const rate = costSettings.effective_rate || 1.0;
+
+    // 1. Header
+    const brandRow = h('div', { class: 'brand-row' },
+      h('img', { src: '/appicon.png', width: '28', height: '28', alt: 'NineGuard' }),
+      h('span', { class: 'brand-title' }, 'NineGuard')
+    );
+
+    const printHead = h('div', { class: 'print-report-header' },
+      h('div', null,
+        brandRow,
+        h('h1', { class: 'report-title' }, 'LLM Usage & Financial Summary Report'),
+        h('p', { class: 'report-period' }, `Reporting Window: ${dateRangeStr} · Timezone: ${tzLabel()}`)
+      ),
+      h('div', { class: 'header-right' },
+        h('div', null, 'Classification: ', h('b', null, 'Internal Financial')),
+        h('div', null, 'Exported: ', h('b', null, new Date().toLocaleString())),
+        h('div', null, 'Display Currency: ', h('b', null, cur))
+      )
+    );
+
+    // 2. Executive KPI Grid (4 cards)
+    const kpiGrid = h('div', { class: 'print-kpi-grid' },
+      h('div', { class: 'print-kpi-card' },
+        h('div', { class: 'label' }, 'Total Est. Spend'),
+        h('div', { class: 'value highlight' }, formatCost(reportData.estimated_cost_usd, cur, rate, reportData.unpriced_requests)),
+        h('div', { class: 'sub' }, 'API list-price equivalent')
+      ),
+      h('div', { class: 'print-kpi-card' },
+        h('div', { class: 'label' }, 'Total Tokens'),
+        h('div', { class: 'value' }, fmtCompact(reportData.total_tokens || 0)),
+        h('div', { class: 'sub' }, `↓ ${fmtCompact(reportData.prompt_tokens || 0)} in · ↑ ${fmtCompact(reportData.completion_tokens || 0)} out`)
+      ),
+      h('div', { class: 'print-kpi-card' },
+        h('div', { class: 'label' }, 'Total Requests'),
+        h('div', { class: 'value' }, fmtNum(reportData.total_requests || 0)),
+        h('div', { class: 'sub' }, `Top Consumer: ${reportData.top_consumer_key || 'None'}`)
+      ),
+      h('div', { class: 'print-kpi-card' },
+        h('div', { class: 'label' }, 'Workload Mix'),
+        h('div', { class: 'value' }, `${reportData.keys_breakdown?.length || 0} Keys · ${reportData.models_breakdown?.length || 0} Models`),
+        h('div', { class: 'sub' }, `Top Model: ${reportData.top_model || 'None'}`)
+      )
+    );
+
+    // 3. Client Key Attribution Table
+    const keyRows = (reportData.keys_breakdown || []).map(k => {
+      const shareStr = typeof k.token_share === 'number' ? `${k.token_share.toFixed(1)}%` : '-';
+      const costStr = formatCost(k.estimated_cost_usd, cur, rate, k.unpriced_requests);
+      return h('tr', null,
+        h('td', { class: 'strong' }, k.key_name),
+        h('td', { class: 'muted' }, k.key || '-'),
+        h('td', { class: 'num' }, fmtNum(k.total_requests)),
+        h('td', { class: 'num' }, fmtNum(k.prompt_tokens)),
+        h('td', { class: 'num' }, fmtNum(k.completion_tokens)),
+        h('td', { class: 'num strong' }, fmtNum(k.total_tokens)),
+        h('td', { class: 'num strong' }, costStr),
+        h('td', { class: 'num' }, shareStr)
+      );
     });
+
+    const keySection = h('div', { class: 'print-section' },
+      h('h2', { class: 'print-section-title' }, 'Client API Key Attribution ("Siapa Saja Pemakai Token")'),
+      h('table', { class: 'print-table' },
+        h('thead', null,
+          h('tr', null,
+            h('th', null, 'Client Key'),
+            h('th', null, 'Masked Key'),
+            h('th', { class: 'num' }, 'Requests'),
+            h('th', { class: 'num' }, 'Input Tokens'),
+            h('th', { class: 'num' }, 'Output Tokens'),
+            h('th', { class: 'num' }, 'Total Tokens'),
+            h('th', { class: 'num' }, 'Est. Spend'),
+            h('th', { class: 'num' }, 'Share %')
+          )
+        ),
+        h('tbody', null, ...keyRows)
+      )
+    );
+
+    // 4. Model Utilization Table
+    const modelRows = (reportData.models_breakdown || []).map(m => {
+      const shareStr = typeof m.token_share === 'number' ? `${m.token_share.toFixed(1)}%` : '-';
+      const costStr = formatCost(m.estimated_cost_usd, cur, rate, m.unpriced_requests);
+      return h('tr', null,
+        h('td', { class: 'strong' }, m.model),
+        h('td', { class: 'num' }, fmtNum(m.total_requests)),
+        h('td', { class: 'num' }, fmtNum(m.prompt_tokens)),
+        h('td', { class: 'num' }, fmtNum(m.completion_tokens)),
+        h('td', { class: 'num strong' }, fmtNum(m.total_tokens)),
+        h('td', { class: 'num strong' }, costStr),
+        h('td', { class: 'num' }, shareStr)
+      );
+    });
+
+    const modelSection = h('div', { class: 'print-section' },
+      h('h2', { class: 'print-section-title' }, 'Model Utilization & Cost Breakdown'),
+      h('table', { class: 'print-table' },
+        h('thead', null,
+          h('tr', null,
+            h('th', null, 'Target Model'),
+            h('th', { class: 'num' }, 'Requests'),
+            h('th', { class: 'num' }, 'Input Tokens'),
+            h('th', { class: 'num' }, 'Output Tokens'),
+            h('th', { class: 'num' }, 'Total Tokens'),
+            h('th', { class: 'num' }, 'Est. Spend'),
+            h('th', { class: 'num' }, 'Share %')
+          )
+        ),
+        h('tbody', null, ...modelRows)
+      )
+    );
+
+    // 5. Footer
+    const footer = h('div', { class: 'print-footer' },
+      h('span', null, 'Generated by NineGuard Universal Gateway & LLM Firewall'),
+      h('span', null, `Reporting Period: ${dateRangeStr}`)
+    );
+
+    return h('div', { id: 'business-report-print' },
+      printHead,
+      kpiGrid,
+      keySection,
+      modelSection,
+      footer
+    );
+  }
+
+  function printReport() {
+    if (!reportData) return;
+    const printDoc = renderBusinessReportPrint();
+    const old = document.getElementById('business-report-print');
+    if (old) old.remove();
+    document.body.append(printDoc);
+    setTimeout(() => {
+      window.print();
+    }, 120);
+  }
+
+  async function exportAggregatedCSV() {
+    try {
+      toast('Preparing Aggregated Summary CSV export...');
+      await api.download('/traffic/report/export', {
+        period: currentPeriod,
+        start: currentPeriod === 'custom' ? customStart : '',
+        end: currentPeriod === 'custom' ? customEnd : ''
+      });
+    } catch (err) {
+      toast(`Export failed: ${err.message}`, 'error');
+    }
+  }
+
+  async function exportRawCSV() {
+    try {
+      toast('Preparing Raw Traffic Logs CSV export...');
+      await api.download('/traffic/export', {
+        period: currentPeriod,
+        start: currentPeriod === 'custom' ? customStart : '',
+        end: currentPeriod === 'custom' ? customEnd : '',
+        format: 'csv'
+      });
+    } catch (err) {
+      toast(`Export failed: ${err.message}`, 'error');
+    }
   }
 
   // ── Last Active (all-time, not limited to the selected period) ──
@@ -322,6 +509,7 @@ export function mount(root) {
     topKPI.replaceChildren(
       kpiCard('Top Token Consumer', topKey, 'Key consuming the most tokens', 'key', 'Top Key'),
       kpiCard('Top Utilized Model', topMod, 'Model handling highest token load', 'box', 'Top Model'),
+      kpiCard('Estimated Cost', formatCost(reportData.estimated_cost_usd, costSettings.effective_currency, costSettings.effective_rate, reportData.unpriced_requests), 'API list-price equivalent', 'dollar-sign'),
       kpiCard('Total Tokens', h('span', { title: `${fmtNum(totToks)} total tokens` }, fmtCompact(totToks)), tokensSub, 'sparkles'),
       kpiCard('Total Requests', fmtNum(totalReq), requestsSub, 'activity')
     );
@@ -391,6 +579,9 @@ export function mount(root) {
         h('div', { class: 'metric-col-tokens', style: { textAlign: 'right' } },
           h('span', null, 'Total Tokens'),
           h('div', { class: 'sub-hdr' }, '↓ Input · ↑ Output')
+        ),
+        h('div', { class: 'metric-col-cost', style: { textAlign: 'right', minWidth: '85px' } },
+          h('span', null, 'Est. Cost')
         ),
         h('div', { class: 'metric-col-requests', style: { textAlign: 'right' } },
           h('span', null, 'Requests'),
@@ -472,6 +663,11 @@ export function mount(root) {
               ),
               renderRatioBar(k.prompt_tokens, k.completion_tokens)
             ),
+            // Cost Column
+            h('div', { class: 'metric-col-cost', style: { textAlign: 'right', minWidth: '85px' } },
+              h('div', { style: { fontSize: '13px', fontWeight: 'bold' } }, formatCost(k.estimated_cost_usd, costSettings.effective_currency, costSettings.effective_rate, k.unpriced_requests)),
+              h('div', { class: 'muted', style: { fontSize: '11px' } }, 'est. list')
+            ),
             // Requests Column
             h('div', { class: 'metric-col-requests', style: { textAlign: 'right' } },
               h('div', { style: { fontSize: '14px', fontWeight: 'bold' } },
@@ -521,6 +717,7 @@ export function mount(root) {
         const models = [...(k.model_usage || [])].sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
         const modelRows = models.map((m) => {
           const modShare = typeof m.share === 'number' ? `${m.share.toFixed(1)}%` : '-';
+          const costStr = formatCost(m.estimated_cost_usd, costSettings.effective_currency, costSettings.effective_rate, m.unpriced_requests);
           return h('tr', null,
             h('td', { class: 'strong' },
               h('span', { class: 'swatch', style: { display: 'inline-block', width: '8px', height: '8px', borderRadius: '2px', background: 'var(--lv-info)', marginRight: '6px' } }),
@@ -531,6 +728,7 @@ export function mount(root) {
             h('td', { class: 'num tok-out' }, fmtNum(m.comp_tokens)),
             h('td', null, renderRatioBar(m.prompt_tokens, m.comp_tokens)),
             h('td', { class: 'num strong' }, fmtNum(m.total_tokens)),
+            h('td', { class: 'num strong', style: { color: 'var(--text)' } }, costStr),
             h('td', { style: { minWidth: '100px' } },
               h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
                 h('div', { style: { flex: '1', height: '5px', background: 'var(--border)', borderRadius: '3px', overflow: 'hidden' } },
@@ -561,11 +759,12 @@ export function mount(root) {
                   ),
                   h('th', { style: { width: '90px' } }, 'In / Out Ratio'),
                   h('th', { class: 'num' }, 'Total Tokens'),
+                  h('th', { class: 'num', style: { minWidth: '95px' } }, 'Est. Cost'),
                   h('th', { style: { minWidth: '100px' } }, 'Key Share')
                 )
               ),
               h('tbody', null,
-                modelRows.length ? modelRows : h('tr', null, h('td', { colspan: 7, class: 'muted' }, 'No model breakdown available.'))
+                modelRows.length ? modelRows : h('tr', null, h('td', { colspan: 8, class: 'muted' }, 'No model breakdown available.'))
               )
             )
           )
@@ -648,6 +847,11 @@ export function mount(root) {
               ),
               renderRatioBar(m.prompt_tokens, m.completion_tokens)
             ),
+            // Cost Column
+            h('div', { class: 'metric-col-cost', style: { textAlign: 'right', minWidth: '85px' } },
+              h('div', { style: { fontSize: '13px', fontWeight: 'bold' } }, formatCost(m.estimated_cost_usd, costSettings.effective_currency, costSettings.effective_rate, m.unpriced_requests)),
+              h('div', { class: 'muted', style: { fontSize: '11px' } }, 'est. list')
+            ),
             // Requests Column
             h('div', { class: 'metric-col-requests', style: { textAlign: 'right' } },
               h('div', { style: { fontSize: '14px', fontWeight: 'bold' } },
@@ -697,6 +901,7 @@ export function mount(root) {
         const consumers = [...(m.key_consumers || [])].sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
         const consumerRows = consumers.map((c) => {
           const cShare = typeof c.share === 'number' ? `${c.share.toFixed(1)}%` : '-';
+          const costStr = formatCost(c.estimated_cost_usd, costSettings.effective_currency, costSettings.effective_rate, c.unpriced_requests);
           return h('tr', null,
             h('td', { class: 'strong' },
               h('span', { class: 'badge', style: { background: 'var(--hover)', marginRight: '6px' } }, icon('key')),
@@ -709,6 +914,7 @@ export function mount(root) {
             h('td', { class: 'num tok-out' }, fmtNum(c.comp_tokens)),
             h('td', null, renderRatioBar(c.prompt_tokens, c.comp_tokens)),
             h('td', { class: 'num strong' }, fmtNum(c.total_tokens)),
+            h('td', { class: 'num strong', style: { color: 'var(--text)' } }, costStr),
             h('td', { style: { minWidth: '100px' } },
               h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
                 h('div', { style: { flex: '1', height: '5px', background: 'var(--border)', borderRadius: '3px', overflow: 'hidden' } },
@@ -740,11 +946,12 @@ export function mount(root) {
                   ),
                   h('th', { style: { width: '90px' } }, 'In / Out Ratio'),
                   h('th', { class: 'num' }, 'Total Tokens'),
+                  h('th', { class: 'num', style: { minWidth: '95px' } }, 'Est. Cost'),
                   h('th', { style: { minWidth: '100px' } }, 'Model Share')
                 )
               ),
               h('tbody', null,
-                consumerRows.length ? consumerRows : h('tr', null, h('td', { colspan: 8, class: 'muted' }, 'No consumer breakdown available.'))
+                consumerRows.length ? consumerRows : h('tr', null, h('td', { colspan: 9, class: 'muted' }, 'No consumer breakdown available.'))
               )
             )
           )

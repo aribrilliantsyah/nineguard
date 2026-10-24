@@ -1,6 +1,6 @@
 # 0005. Token Quotas and Limiting per API Key with UTC Windows
 
-- Status: Accepted, amended by [0007](0007-model-quotas-per-key.md) (Quota Mode and Model Quotas) and [0008](0008-resolved-model-id-in-traffic.md)
+- Status: Accepted, amended by [0007](0007-model-quotas-per-key.md) (Quota Mode and Model Quotas), [0008](0008-resolved-model-id-in-traffic.md), and [0010](0010-quota-reset-schedule.md) (Decision #2: per-key reset schedule; UTC stays the default for keys without one)
 - Date: 2026-10-07
 
 ## Context

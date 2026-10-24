@@ -32,7 +32,7 @@ func TestSecretGuardInPipeline(t *testing.T) {
 
 	// 1. Prompt with API key should be rejected
 	leakBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"Key: sk-123456789012345678901234567890"}]}`)
-	res, _, err := pe.Execute(context.Background(), []plugins.Plugin{plg}, []plugins.Binding{bindingOn}, nil, "key1", "dev", "gpt-4o", "", false, "", leakBody)
+	res, _, err := pe.Execute(context.Background(), []plugins.Plugin{plg}, []plugins.Binding{bindingOn}, nil, "key1", "dev", "gpt-4o", "", "chat", false, "", leakBody)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestSecretGuardInPipeline(t *testing.T) {
 		State:     plugins.StateOn,
 		Settings:  `{"action":"redact"}`,
 	}
-	res2, _, err := pe.Execute(context.Background(), []plugins.Plugin{plg}, []plugins.Binding{bindingRedact}, nil, "key1", "dev", "gpt-4o", "", false, "", leakBody)
+	res2, _, err := pe.Execute(context.Background(), []plugins.Plugin{plg}, []plugins.Binding{bindingRedact}, nil, "key1", "dev", "gpt-4o", "", "chat", false, "", leakBody)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

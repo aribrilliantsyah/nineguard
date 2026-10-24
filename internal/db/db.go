@@ -174,6 +174,24 @@ func (d *DB) migrate() error {
 		PRIMARY KEY (plugin_id, scope_type, scope_id)
 	);
 
+	CREATE TABLE IF NOT EXISTS model_prices (
+		family TEXT PRIMARY KEY,
+		input_per_mtok REAL NOT NULL,
+		output_per_mtok REAL NOT NULL,
+		cache_read_per_mtok REAL,
+		cache_write_per_mtok REAL,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS model_price_overrides (
+		model_id TEXT PRIMARY KEY,
+		input_per_mtok REAL NOT NULL,
+		output_per_mtok REAL NOT NULL,
+		cache_read_per_mtok REAL,
+		cache_write_per_mtok REAL,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_traffic_timestamp ON traffic_logs(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_traffic_model ON traffic_logs(model);
 	CREATE INDEX IF NOT EXISTS idx_traffic_api_key ON traffic_logs(api_key);
@@ -279,11 +297,39 @@ func (d *DB) migrate() error {
 	_, _ = d.Exec("CREATE INDEX IF NOT EXISTS idx_traffic_key_model_ts ON traffic_logs(api_key_id, model_id, timestamp)")
 	_, _ = d.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('quota_warn_percent', '80')")
 
+	// Quota reset schedule (ADR 0010): the key's own schedule (JSON, NULL = follow the global
+	// schedule) and its Transitional Windows (JSON by Quota Period, NULL = none).
+	_, _ = d.Exec("ALTER TABLE api_keys ADD COLUMN quota_reset_schedule TEXT")
+	_, _ = d.Exec("ALTER TABLE api_keys ADD COLUMN quota_window_pins TEXT")
+
 	// Upstream quotas (ADR 0009)
 	_, _ = d.Exec("ALTER TABLE providers ADD COLUMN quota_type TEXT DEFAULT 'disabled'")
 	_, _ = d.Exec("ALTER TABLE providers ADD COLUMN quota_auth_secret TEXT DEFAULT ''")
 	_, _ = d.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('chat_commands_enabled', 'true')")
 	_, _ = d.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('upstream_quota_sync_interval', '10m')")
+
+	// Usage Diagnostics (spec 2026-10-19)
+	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN api_format TEXT DEFAULT ''")
+	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN cache_read_tokens INTEGER DEFAULT 0")
+	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN cache_write_tokens INTEGER DEFAULT 0")
+	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN reasoning_tokens INTEGER DEFAULT 0")
+	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN thinking_requested INTEGER DEFAULT 0")
+	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN thinking_delivered INTEGER DEFAULT 0")
+	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN served_model TEXT DEFAULT ''")
+	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN model_fallback INTEGER DEFAULT 0")
+	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN usage_estimated INTEGER DEFAULT 0")
+	_, _ = d.Exec("ALTER TABLE traffic_logs ADD COLUMN cost_usd REAL")
+	_, _ = d.Exec("ALTER TABLE api_keys ADD COLUMN cost_visibility TEXT")
+	_, _ = d.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('stream_usage_injection', 'true')")
+	_, _ = d.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('price_list_url', 'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json')")
+	_, _ = d.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('price_list_synced_at', '')")
+	_, _ = d.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('display_currency', 'USD')")
+	_, _ = d.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('fx_rate_manual', '')")
+	_, _ = d.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('fx_rate_auto', '')")
+	_, _ = d.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('fx_rate_synced_at', '')")
+	_, _ = d.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('cost_visible_to_keys', 'true')")
+	_, _ = d.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('session_gap_minutes', '30')")
+	_, _ = d.Exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('usage_comparison_enabled', 'true')")
 
 	// Instance ID for loop detection
 	var instID string
@@ -384,7 +430,7 @@ func (d *DB) seedPlugins() error {
 				bypassable = excluded.bypassable,
 				pipeline_order = excluded.pipeline_order,
 				failure_policy = excluded.failure_policy,
-				default_settings = excluded.default_settings
+				default_settings = COALESCE(NULLIF(plugins.default_settings, ''), excluded.default_settings)
 		`, b.id, b.name, b.desc, b.category, b.bypassable, b.order, b.failurePolicy, b.settings)
 		if err != nil {
 			return err

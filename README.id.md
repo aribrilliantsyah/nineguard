@@ -100,11 +100,12 @@ NineGuard bertindak sebagai gateway tunggal antara AI Coding Agents dan Upstream
 | Fitur | Penjelasan |
 |---|---|
 | **Multi-Provider Routing** | Daftarkan rute upstream OpenAI-compatible dan kelompokkan model dengan prefix (e.g. `openrouter/model-id`). |
+| **Dual-Header & Protokol Anthropic** | Mendukung protokol native Anthropic `/v1/messages` bersamaan dengan OpenAI `/v1/chat/completions`. Satu key `sk-ng-...` bekerja di kedua header `Authorization: Bearer` dan `x-api-key` dengan pelestarian penuh extended thinking dan prompt caching tanpa konversi kawat. |
 | **Client Key Management** | Terbitkan dan cabut API key NineGuard (`sk-ng-...`) untuk melacak konsumsi tiap agent. |
 | **Per-Key Model Access Control** | Atur hak akses model per API key (akses global `*`, Model Groups dinamis, atau custom whitelist). |
 | **Model Groups** | Kelompokkan model ke grup reusable (e.g. GPT Ecosystem, Claude) dengan sinkronisasi dinamis ke API key. |
 | **Model Firewall** | Aktifkan/nonaktifkan model secara instan dengan HTTP 403 Forbidden. |
-| **Key Quotas & Rate Limiting** | Batasi anggaran token per API key (harian, mingguan, bulanan, lifetime) dengan soft post-facto gating, respons standar HTTP 429, header `Retry-After` (kecuali kuota lifetime yang tidak pernah reset), dan notifikasi waktu reset (WIB & UTC). |
+| **Key Quotas & Rate Limiting** | Batasi anggaran token per API key (harian, mingguan, bulanan, lifetime) dengan soft post-facto gating, respons standar HTTP 429, header `Retry-After` (kecuali kuota lifetime yang tidak pernah reset), dan notifikasi waktu reset sesuai timezone jadwal key. Atur kapan kuota reset (timezone, jam, hari dalam minggu, tanggal) secara global atau per key; mengubahnya tidak menghapus pemakaian yang sudah terhitung. |
 | **Model Quotas (Per Model)** | Alternatif Key Quota: tiap API key bisa punya batas token terpisah untuk model tertentu (misalnya `openai/gpt-4o` 50k/hari, `anthropic/claude-sonnet` 1M/bulan). Satu key memakai salah satu mode (Key Quota atau Per Model), tidak keduanya, dan pengaturan mode yang tidak aktif tetap tersimpan. Model tanpa batas tetap berjalan. Saat batas tercapai, respons HTTP 429 `model_quota_exceeded` hanya untuk model tersebut. |
 | **Halaman Quotas & Peringatan** | Halaman **Quotas** menampilkan pemakaian semua key dan model (difilter berdasarkan mode/status), kartu "Quotas near limit" di Dashboard, dan kolom Quota di tabel keys. Ambang peringatan diatur lewat `quota_warn_percent` (default 80%). |
 | **Token Burn Velocity & Presets** | Pantau laju konsumsi historis (24 jam, rata-rata 7 hari, 30 hari) per key untuk membantu penentuan batas kuota dengan tombol preset instan (1.5x / 2x rata-rata) yang mengikuti periode reset yang dipilih (daily, weekly, atau monthly). Tersedia untuk Key Quota dan tiap baris Model Quota. |
@@ -458,13 +459,24 @@ curl -b cookies.txt -X PUT http://localhost:8080/api/v1/model-groups/ID_GRUP \
 ### OpenAI-Compatible Proxy (Memerlukan NineGuard API Key)
 * `GET /v1/models` — Daftar agregat seluruh model dari semua provider aktif.
 * `GET /v1/quota` — Mengambil ringkasan dua-tingkat kuota token key pemanggil dan kapasitas shared pool upstream.
+* `GET /v1/usage?range=7d|30d|all` — Mengambil ringkasan penggunaan token, estimasi biaya, sesi inferensi, dan distribusi model per key.
 * `POST /v1/chat/completions` — Chat completions (mendukung SSE streaming & tracking token, serta intersepsi `/quota`, `/limits`, `/usage` instan 0 token).
 * `POST /v1/*` — Proxy transparan untuk endpoint OpenAI standar lainnya.
+
+### Portal Pengguna Mandiri (Tanpa Akun Admin)
+* `GET /portal` — Web portal untuk pemegang API key (`sk-ng-...`) memantau kuota, sisa token, jadwal reset, heatmap harian, dan model yang diizinkan secara mandiri.
 
 ### NineGuard Management API (Dashboard & Admin)
 * `GET /healthz` — Health check status probe.
 * `GET /api/v1/upstream-quotas` — Mengambil data telemetri kuota live dari seluruh provider upstream aktif (mendukung `?force=1` dengan cooldown 30 detik).
 * `POST /api/v1/upstream-quotas/{id}/connections/{connId}/reset` — Membelanjakan 1 jatah reset kuota (Claude limit grant / Codex reset credit) pada provider upstream.
+* `GET /api/v1/prices` — Daftar harga katalog model terdaftar dan status override.
+* `PUT /api/v1/prices/overrides/{model_id...}` — Mengatur override tarif harga untuk model spesifik.
+* `DELETE /api/v1/prices/overrides/{model_id...}` — Menghapus override harga model.
+* `POST /api/v1/prices/refresh` — Memperbarui daftar harga publik LiteLLM secara instan.
+* `GET /api/v1/settings/cost` — Mengambil konfigurasi estimasi biaya dan kurs mata uang.
+* `POST /api/v1/settings/cost` — Memperbarui mata uang tampilan, kurs manual, dan visibilitas biaya.
+* `POST /api/v1/costs/reprice` — Menghitung ulang riwayat biaya pada rentang waktu/model tertentu.
 * `GET /api/v1/providers` — Daftar provider upstream yang terdaftar.
 * `POST /api/v1/providers` — Menambahkan provider baru dengan prefix kustom.
 * `PUT /api/v1/providers/{id}` — Memperbarui data provider.
@@ -480,6 +492,7 @@ curl -b cookies.txt -X PUT http://localhost:8080/api/v1/model-groups/ID_GRUP \
 * `DELETE /api/v1/keys/{id}` — Mencabut / menghapus key.
 * `GET /api/v1/keys/{id}/velocity` — Mengambil metrik laju konsumsi token historis per key (24 jam, rata-rata 7 hari, 30 hari).
 * `GET /api/v1/keys/{id}/model-velocity?model=<id>` — Metrik laju konsumsi yang sama untuk satu model pada key tersebut (perkiraan).
+* `GET /api/v1/keys/{id}/usage?range=7d|30d|all&tz=...` — Ringkasan penggunaan lengkap per key dengan kalender heatmap dan breakdown model.
 * `GET /api/v1/quotas` — Ringkasan pemakaian Key Quota dan Model Quota semua key beserta statusnya (`ok`, `near`, `exhausted`, `unlimited`).
 * `GET /api/v1/models` — Daftar model terdaftar dan status firewall.
 * `POST /api/v1/models/toggle` — Mengubah status aktif/blokir model.

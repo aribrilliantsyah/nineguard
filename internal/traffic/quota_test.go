@@ -12,7 +12,7 @@ func TestCalcWindowBoundsUTC(t *testing.T) {
 	now := time.Date(2026, 10, 7, 14, 30, 0, 0, time.UTC)
 
 	// Daily
-	start, resetAt := traffic.CalcQuotaWindow("daily", now)
+	start, resetAt := traffic.CalcQuotaWindow("daily", traffic.ResetRule{}, now)
 	if !start.Equal(time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC)) {
 		t.Errorf("daily start mismatch: got %v", start)
 	}
@@ -21,7 +21,7 @@ func TestCalcWindowBoundsUTC(t *testing.T) {
 	}
 
 	// Weekly (Monday 00:00 UTC)
-	startW, resetAtW := traffic.CalcQuotaWindow("weekly", now)
+	startW, resetAtW := traffic.CalcQuotaWindow("weekly", traffic.ResetRule{}, now)
 	if !startW.Equal(time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)) {
 		t.Errorf("weekly start mismatch: got %v (expected Mon Oct 5)", startW)
 	}
@@ -30,7 +30,7 @@ func TestCalcWindowBoundsUTC(t *testing.T) {
 	}
 
 	// Monthly (1st of month 00:00 UTC)
-	startM, resetAtM := traffic.CalcQuotaWindow("monthly", now)
+	startM, resetAtM := traffic.CalcQuotaWindow("monthly", traffic.ResetRule{}, now)
 	if !startM.Equal(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)) {
 		t.Errorf("monthly start mismatch: got %v", startM)
 	}
@@ -39,7 +39,7 @@ func TestCalcWindowBoundsUTC(t *testing.T) {
 	}
 
 	// Total (All-time)
-	startT, resetAtT := traffic.CalcQuotaWindow("total", now)
+	startT, resetAtT := traffic.CalcQuotaWindow("total", traffic.ResetRule{}, now)
 	if !startT.Equal(time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)) {
 		t.Errorf("total start mismatch: got %v", startT)
 	}
@@ -71,7 +71,7 @@ func TestGetQuotaUsageQuery(t *testing.T) {
 		t.Fatalf("insert row 2: %v", err)
 	}
 
-	usage, resetAt, err := traffic.GetQuotaUsage(d, keyID, "daily", now)
+	usage, resetAt, err := traffic.GetQuotaUsage(d, keyID, "daily", traffic.ResetRule{}, now)
 	if err != nil {
 		t.Fatalf("GetQuotaUsage: %v", err)
 	}

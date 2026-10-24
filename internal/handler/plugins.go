@@ -122,7 +122,7 @@ func (h *Handler) UpdatePlugin(w http.ResponseWriter, r *http.Request) {
 		URL             *string               `json:"url"`
 		TimeoutMs       int                   `json:"timeout_ms"`
 		FailurePolicy   plugins.FailurePolicy `json:"failure_policy"`
-		Bypassable      bool                  `json:"bypassable"`
+		Bypassable      *bool                 `json:"bypassable"`
 		Category        plugins.Category      `json:"category"`
 		Summary         string                `json:"summary"`
 		DefaultSettings string                `json:"default_settings"`
@@ -137,22 +137,61 @@ func (h *Handler) UpdatePlugin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	urlStr := ""
+	existing, err := h.plugins.GetPluginRaw(id)
+	if err != nil {
+		jsonError(w, http.StatusNotFound, "Plugin not found")
+		return
+	}
+
+	urlStr := existing.URL
 	if body.URL != nil {
 		urlStr = *body.URL
 	}
 
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		name = existing.Name
+	}
+	desc := strings.TrimSpace(body.Description)
+	if desc == "" {
+		desc = existing.Description
+	}
+	summary := strings.TrimSpace(body.Summary)
+	if summary == "" {
+		summary = existing.Summary
+	}
+	cat := body.Category
+	if cat == "" {
+		cat = existing.Category
+	}
+	defSettings := strings.TrimSpace(body.DefaultSettings)
+	if defSettings == "" {
+		defSettings = existing.DefaultSettings
+	}
+	timeoutMs := body.TimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = existing.TimeoutMs
+	}
+	policy := body.FailurePolicy
+	if policy == "" {
+		policy = existing.FailurePolicy
+	}
+	bypassable := existing.Bypassable
+	if body.Bypassable != nil {
+		bypassable = *body.Bypassable
+	}
+
 	p := &plugins.Plugin{
 		ID:              id,
-		Name:            body.Name,
-		Description:     body.Description,
+		Name:            name,
+		Description:     desc,
 		URL:             urlStr,
-		TimeoutMs:       body.TimeoutMs,
-		FailurePolicy:   body.FailurePolicy,
-		Bypassable:      body.Bypassable,
-		Category:        body.Category,
-		Summary:         body.Summary,
-		DefaultSettings: body.DefaultSettings,
+		TimeoutMs:       timeoutMs,
+		FailurePolicy:   policy,
+		Bypassable:      bypassable,
+		Category:        cat,
+		Summary:         summary,
+		DefaultSettings: defSettings,
 	}
 
 	if err := h.plugins.UpdatePlugin(p); err != nil {

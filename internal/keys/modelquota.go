@@ -28,6 +28,12 @@ type ModelQuota struct {
 	ResetAt        *string `json:"reset_at"`
 	Inactive       bool    `json:"inactive"`
 	InactiveReason string  `json:"inactive_reason,omitempty"`
+
+	// Set only on the Key Quota object of the quotas overview (ADR 0010): the key's own schedule
+	// (null = follows the global one), the one in effect, and where it comes from.
+	ResetSchedule          *traffic.ResetSchedule `json:"quota_reset_schedule,omitempty"`
+	EffectiveResetSchedule *traffic.ResetSchedule `json:"effective_quota_reset_schedule,omitempty"`
+	ResetScheduleSource    string                 `json:"quota_reset_schedule_source,omitempty"`
 }
 
 // ModelQuotaSummary is the compact form used by key list responses.
@@ -184,6 +190,8 @@ type KeyUpdate struct {
 	QuotaPeriod     *string
 	QuotaMode       *string
 	ModelQuotas     *[]ModelQuota
+	ResetSchedule   *ScheduleChange // nil leaves the key's own schedule and pins alone (ADR 0010)
+	CostVisibility  *string         // nil leaves unchanged; non-nil with "show", "hide", or "" (resets to null)
 }
 
 // UpdateKeyAll saves the key, its Key Quota, mode and Model Quotas in one transaction.
@@ -222,6 +230,36 @@ func (m *Manager) UpdateKeyAll(id string, u KeyUpdate) (*KeyInfo, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
+
+	// A schedule change keeps usage: the window running now keeps its start (ADR 0010 #5), so
+	// the pins are computed against the stored schedule and written with the new one.
+	if u.ResetSchedule != nil {
+		var ownRaw, pinsRaw string
+		if err := tx.QueryRow(`SELECT COALESCE(quota_reset_schedule,''), COALESCE(quota_window_pins,'') FROM api_keys WHERE id = ?`, id).
+			Scan(&ownRaw, &pinsRaw); err != nil {
+			if err == sql.ErrNoRows {
+				return nil, fmt.Errorf("api key not found")
+			}
+			return nil, err
+		}
+		global := m.globalSchedule()
+		oldOwn := parseSchedule(ownRaw, id)
+		oldEff, _ := effectiveSchedule(oldOwn, global)
+		newOwn := oldOwn
+		switch {
+		case u.ResetSchedule.Clear:
+			newOwn = nil
+		case u.ResetSchedule.Value != nil:
+			newOwn = u.ResetSchedule.Value
+		}
+		newEff, _ := effectiveSchedule(newOwn, global)
+		pins := pinsAfterChange(oldEff, newEff, parsePins(pinsRaw, id), time.Now())
+		if _, err := tx.Exec(`UPDATE api_keys SET quota_reset_schedule = ?, quota_window_pins = ? WHERE id = ?`,
+			encodeSchedule(newOwn), encodePins(pins), id); err != nil {
+			return nil, err
+		}
+	}
+
 	res, err := tx.Exec(`UPDATE api_keys SET name = ?, model_access_mode = ?, model_group_ids = ?, allowed_models = ?,
 		quota_limit = COALESCE(?, quota_limit), quota_period = COALESCE(?, quota_period), quota_mode = COALESCE(?, quota_mode),
 		updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
@@ -234,6 +272,16 @@ func (m *Manager) UpdateKeyAll(id string, u KeyUpdate) (*KeyInfo, error) {
 	}
 	if u.ModelQuotas != nil {
 		if err := replaceModelQuotas(tx, id, *u.ModelQuotas); err != nil {
+			return nil, err
+		}
+	}
+	if u.CostVisibility != nil {
+		cv := strings.ToLower(strings.TrimSpace(*u.CostVisibility))
+		var val *string
+		if cv == "show" || cv == "hide" {
+			val = &cv
+		}
+		if _, err := tx.Exec(`UPDATE api_keys SET cost_visibility = ? WHERE id = ?`, val, id); err != nil {
 			return nil, err
 		}
 	}
@@ -278,14 +326,14 @@ func (m *Manager) AnnotateModelQuotas(ki *KeyInfo, warn int, now time.Time) {
 		mq := &ki.ModelQuotas[i]
 		usage, ok := usageByPeriod[mq.QuotaPeriod]
 		if !ok {
-			start, _ := traffic.CalcQuotaWindow(mq.QuotaPeriod, now)
+			start, _ := traffic.CalcQuotaWindow(mq.QuotaPeriod, ki.ResetRule, now)
 			usage, _ = traffic.GetModelUsageSince(m.db, ki.ID, start)
 			if usage == nil {
 				usage = map[string]int64{}
 			}
 			usageByPeriod[mq.QuotaPeriod] = usage
 		}
-		_, resetAt := traffic.CalcQuotaWindow(mq.QuotaPeriod, now)
+		_, resetAt := traffic.CalcQuotaWindow(mq.QuotaPeriod, ki.ResetRule, now)
 		mq.Usage = usage[strings.ToLower(mq.ModelID)]
 		mq.Percent = QuotaPercent(mq.Usage, mq.QuotaLimit)
 		mq.ResetAt = resetAtString(mq.QuotaPeriod, resetAt)

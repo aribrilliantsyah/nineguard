@@ -5,6 +5,8 @@ import { patchRoute } from '../state.js';
 import { formatTokensCompact } from '../quotahelpers.js';
 import { barTone, formatResetIn, filterQuotaKeys, quotaFiltersFromParams } from '../modelquotas.js';
 import { renderUpstreamQuotas } from './upstream_quotas.js';
+import { openGlobalScheduleDialog } from './globalschedule.js';
+import { nextResetText } from '../resetschedule.js';
 
 const PERIOD_LABEL = { daily: 'daily', weekly: 'weekly', monthly: 'monthly', total: 'lifetime' };
 const REASON_LABEL = { removed: 'removed', disabled: 'disabled', no_access: 'no access' };
@@ -48,6 +50,11 @@ export function mount(root) {
     body
   );
   const upstreamContainer = h('div', { style: { display: 'none' } });
+  // Global Reset Schedule (ADR 0010): applies to client key quotas only, so it hides with the Upstream tab.
+  const scheduleBtn = h('button', {
+    class: 'btn btn-sm', type: 'button', title: 'When client key quotas reset (all keys without their own schedule)',
+    onclick: () => openGlobalScheduleDialog({ onChanged: () => load() }),
+  }, icon('clock'), 'Reset schedule');
 
   function switchTab(tab) {
     activeTab = tab;
@@ -55,12 +62,14 @@ export function mount(root) {
       clientTabBtn.className = 'btn btn-sm';
       upstreamTabBtn.className = 'btn btn-sm btn-primary';
       clientContainer.style.display = 'none';
+      scheduleBtn.style.display = 'none';
       upstreamContainer.style.display = 'block';
       renderUpstreamQuotas(upstreamContainer);
     } else {
       clientTabBtn.className = 'btn btn-sm btn-primary';
       upstreamTabBtn.className = 'btn btn-sm';
       clientContainer.style.display = 'block';
+      scheduleBtn.style.display = '';
       upstreamContainer.style.display = 'none';
     }
   }
@@ -71,7 +80,7 @@ export function mount(root) {
         h('h1', null, 'Quotas & Limits'),
         h('p', null, 'Token limits per client key/model and live rolling capacity from upstream providers.')
       ),
-      h('div', { class: 'page-actions' }, tabSwitcher)
+      h('div', { class: 'page-actions' }, scheduleBtn, tabSwitcher)
     ),
     clientContainer,
     upstreamContainer
@@ -87,12 +96,14 @@ export function mount(root) {
       h('span', { class: `qpct ${barTone(status)}` }, `${percent}%`));
   }
 
-  function resetCell(r) {
+  // tz: the timezone of the key's Effective Reset Schedule (UTC for the default). The relative
+  // text stays; the tooltip shows the exact reset in that zone.
+  function resetCell(r, tz = 'UTC') {
     if (!r.reset_at) return h('td', { class: 'muted' }, 'never');
-    return h('td', { class: 'muted', title: `${new Date(r.reset_at).toISOString().replace('T', ' ').slice(0, 16)} UTC` }, `in ${formatResetIn(r.reset_at)}`);
+    return h('td', { class: 'muted', title: nextResetText(r.reset_at, tz) }, `in ${formatResetIn(r.reset_at)}`);
   }
 
-  function modelRow(r) {
+  function modelRow(r, tz) {
     const inactive = r.inactive;
     return h('tr', { class: inactive ? 'qrow-inactive' : '' },
       h('td', { style: { paddingLeft: '30px' } }, h('code', { style: { fontSize: '12px' } }, r.model_id), ' ',
@@ -102,8 +113,10 @@ export function mount(root) {
       h('td', null, inactive ? '' : `${formatTokensCompact(r.usage)} / ${formatTokensCompact(r.quota_limit)}`),
       h('td', null, inactive ? h('span', { class: 'muted' }, 'not enforced') : bar(r.status, r.percent)),
       h('td', { class: 'muted' }, PERIOD_LABEL[r.quota_period] || r.quota_period),
-      inactive ? h('td') : resetCell(r));
+      inactive ? h('td') : resetCell(r, tz));
   }
+
+  const keyTz = (k) => (k.effective_quota_reset_schedule ? k.effective_quota_reset_schedule.timezone : 'UTC');
 
   function keyRows(k) {
     const open = toggled.has(k.id) ? toggled.get(k.id) : (k.status === 'near' || k.status === 'exhausted');
@@ -121,7 +134,7 @@ export function mount(root) {
         h('td', { class: 'muted' }, k.status === 'unlimited' ? 'nothing enforced' : 'highest of active'),
         h('td', null, k.status === 'unlimited' ? '' : bar(k.status, k.top_percent)),
         h('td'), h('td'));
-      return [head, ...(open ? rows.map(modelRow) : [])];
+      return [head, ...(open ? rows.map((r) => modelRow(r, keyTz(k))) : [])];
     }
     const q = k.key_quota;
     return [h('tr', null,
@@ -130,7 +143,7 @@ export function mount(root) {
       h('td', null, q ? `${formatTokensCompact(q.usage)} / ${formatTokensCompact(q.quota_limit)}` : h('span', { class: 'muted' }, 'unlimited')),
       h('td', null, q ? bar(q.status, q.percent) : ''),
       h('td', { class: 'muted' }, q ? (PERIOD_LABEL[q.quota_period] || q.quota_period) : ''),
-      q ? resetCell(q) : h('td'))];
+      q ? resetCell(q, keyTz(k)) : h('td'))];
   }
 
   function render() {

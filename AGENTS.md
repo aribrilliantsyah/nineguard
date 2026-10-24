@@ -58,7 +58,11 @@ Before a feature is finished, check and update:
 
 - **SQLite has one open connection** (`SetMaxOpenConns(1)`). Never start a query while another `rows` is open, and inside a transaction use only the `tx` handle, or the process deadlocks. Read, close, then query.
 - **Migrations are idempotent** in `internal/db/db.go` `migrate()`: `CREATE … IF NOT EXISTS`, ignored `ALTER … ADD COLUMN`, guarded backfills. Existing databases must keep working.
-- **Soft Post-Facto quota enforcement (ADR 0005):** block only when usage already meets the limit; admitted requests finish. Quota windows are UTC-anchored.
+- **Soft Post-Facto quota enforcement (ADR 0005):** block only when usage already meets the limit; admitted requests finish. Quota windows are UTC-anchored unless an Effective Reset Schedule applies (ADR 0010); a schedule edit never recounts usage (Transitional Window), so write new window math with `traffic.CalcQuotaWindow(period, key.ResetRule, now)` and never compute a window start yourself.
+- **Proxy core request modification (ADR 0011):** the proxy core modifies request bodies ONLY by injecting `stream_options.include_usage = true` on `chat` streams when the setting is enabled, stripping the synthetic usage-only SSE event from client relay. All other request transformations belong strictly in Plugins.
+- **Write-time Estimated Cost (ADR 0012):** `traffic_logs.cost_usd` is stored once at write time in USD (`REAL`); rows with `usage_estimated = 1`, unpriced models, 0 total tokens, or `nineguard/system` rows store `NULL`, never `0`. Display Currency conversion happens only at display/API time using the current effective rate.
+- **Cascaded Upstream Usage (ADR 0013):** Upstream gateway usage is fetched isolated via `GET /v1/usage` and cached for 5 minutes; it is presented purely as aggregate shared upstream context and never mixed into individual key metrics.
+- **Chat Commands:** `/usage [7d|30d|all]` serves Usage Summary; `/quota [filter]` and `/limits` serve Quota Report. Do not use `/usage` to filter provider quotas.
 - **Model names:** `traffic_logs.model` is what the client sent; `model_id` is the resolved canonical id (ADR 0008). Compare model ids case-insensitively.
 - **Don't change access/disabled checks as a side effect** of unrelated work; note issues as follow-ups instead.
 - **Line endings:** the repo uses CRLF working files (`autocrlf=true`). Don't reformat whole files; keep diffs minimal.

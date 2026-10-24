@@ -28,11 +28,11 @@ func TestModelQuotaUsageAndVelocity(t *testing.T) {
 	rec(t, tm, "k1", "gpt", "", 1)    // no model_id -> NULL
 	_, _ = d.Exec(`INSERT INTO traffic_logs (api_key_id,model,model_id,status_code,total_tokens,timestamp) VALUES ('k1','a','p/a',200,500,datetime('now','-3 days'))`)
 
-	got, reset, err := tm.GetModelQuotaUsage("k1", "p/a", "daily", now)
+	got, reset, err := tm.GetModelQuotaUsage("k1", "p/a", "daily", traffic.ResetRule{}, now)
 	if err != nil || got != 150 || !reset.After(now) {
 		t.Fatalf("daily: %d %v %v", got, reset, err)
 	}
-	if got, _, _ = tm.GetModelQuotaUsage("k1", "p/a", "total", now); got != 650 {
+	if got, _, _ = tm.GetModelQuotaUsage("k1", "p/a", "total", traffic.ResetRule{}, now); got != 650 {
 		t.Fatalf("total: %d", got)
 	}
 	m, err := traffic.GetModelUsageSince(d, "k1", now.Add(-time.Hour))

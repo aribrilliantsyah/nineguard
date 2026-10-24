@@ -2,8 +2,12 @@
 // endpoints.js passes in its existing Key Quota inputs as keyQuotaNode and reads the result
 // through payload() / problem(). Rows are kept in memory and rendered from there.
 import { api } from '../api.js';
-import { h, icon } from '../ui.js';
+import { h, icon, timeZone } from '../ui.js';
 import { formatTokensCompact } from '../quotahelpers.js';
+import {
+  usedPeriods, neededFields, scheduleChoice, buildSchedulePayload, describeSchedule, scheduleSourceLabel, defaultSchedule, nextResetText,
+} from '../resetschedule.js';
+import { scheduleFields } from './schedulefields.js';
 import {
   MODEL_QUOTA_PERIODS, barTone, shortModel, isModelAllowed, pickableModels, pickerSections, validateModelQuotaRows, velocityPresets,
 } from '../modelquotas.js';
@@ -27,9 +31,11 @@ export function presetButtons(avgPerDay, limitInput, periodSelect, small = false
 
 const REASON_LABEL = { removed: 'removed', disabled: 'disabled', no_access: 'no access' };
 
-// ctx: { existingKey, isEdit, keyQuotaNode, getAccess(), groups, models, providers }
+// ctx: { existingKey, isEdit, keyQuotaNode, keyPeriodSelect, getAccess(), groups, models, providers, globalSchedule }
+// keyPeriodSelect is the Key Quota period <select>; the schedule block follows it and the rows.
+// globalSchedule is the Global Reset Schedule object or null (ADR 0010).
 export function quotaSection(ctx) {
-  const { existingKey, isEdit, keyQuotaNode, getAccess, groups = [], models = [], providers = [] } = ctx;
+  const { existingKey, isEdit, keyQuotaNode, keyPeriodSelect, getAccess, groups = [], models = [], providers = [], globalSchedule = null } = ctx;
   let mode = existingKey && existingKey.quota_mode === 'model' ? 'model' : 'key';
   let loaded = !isEdit; // until the stored rows arrive, payload() omits model_quotas (= leave unchanged)
   const rows = [];
@@ -174,6 +180,81 @@ export function quotaSection(ctx) {
     if (query) search.focus();
   }
 
+  // ── Reset schedule (ADR 0010): applies to the Key Quota and every Model Quota of this key ──
+  let choice = scheduleChoice(existingKey && existingKey.quota_reset_schedule);
+  const ownSchedule = existingKey && existingKey.quota_reset_schedule;
+  const fields = scheduleFields({ initial: ownSchedule || defaultSchedule(globalSchedule, timeZone()), onChange: () => onScheduleEdited() });
+  const btnFollow = h('button', { type: 'button', class: 'seg-btn', 'aria-pressed': 'false', onclick: () => setChoice('follow') },
+    h('span', { class: 'seg-title' }, 'Follow global'), h('span', { class: 'seg-sub' }, 'no schedule of its own'));
+  const btnCustom = h('button', { type: 'button', class: 'seg-btn', 'aria-pressed': 'false', onclick: () => setChoice('custom') },
+    h('span', { class: 'seg-title' }, 'Custom'), h('span', { class: 'seg-sub' }, 'this key only'));
+  const followLine = h('div', { class: 'muted', style: { fontSize: '12px' } });
+  const nextLine = h('div', { style: { fontSize: '12px' } });
+  const schedProblem = h('div', { class: 'form-error', style: { margin: 0 } });
+  const schedBox = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', paddingTop: '8px', borderTop: '1px solid var(--border)' } },
+    h('div', { class: 'seg-wrap' },
+      h('div', { class: 'seg-label' }, 'Reset schedule ', h('span', { class: 'muted' }, '(when quotas reset, applies to every quota of this key)')),
+      h('div', { class: 'seg', role: 'group', 'aria-label': 'Reset schedule' }, btnFollow, btnCustom)),
+    followLine, fields.node, schedProblem, nextLine);
+
+  const periodsNow = () => usedPeriods({
+    mode,
+    keyPeriod: keyPeriodSelect ? keyPeriodSelect.value : 'none',
+    rows: rows.map((r) => ({ period: r.period.value })),
+  });
+
+  let previewSeq = 0;
+  let previewTimer = null;
+  function onScheduleEdited() {
+    schedProblem.textContent = choice === 'custom' ? fields.problem() : '';
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(refreshPreview, 250);
+  }
+
+  // "Next reset" comes from the server, so it is exactly what saving would produce, including
+  // a Transitional Window (usage is kept, the current window ends at this reset).
+  async function refreshPreview() {
+    const periods = periodsNow();
+    const need = neededFields(periods);
+    if (!need.show) { nextLine.textContent = ''; return; }
+    const seq = ++previewSeq;
+    const own = choice === 'custom' ? buildSchedulePayload('custom', fields.value()) : null;
+    if (choice === 'custom' && fields.problem()) { nextLine.textContent = ''; return; }
+    let p;
+    try {
+      p = await api.post('/quotas/reset-preview', { key_id: isEdit ? existingKey.id : undefined, quota_reset_schedule: own });
+    } catch { if (seq === previewSeq) nextLine.textContent = ''; return; }
+    if (seq !== previewSeq) return; // a newer edit superseded this answer
+    const eff = own || globalSchedule;
+    const tz = eff ? eff.timezone : 'UTC';
+    const first = periods.find((x) => x !== 'total');
+    const iso = { daily: p.daily, weekly: p.weekly, monthly: p.monthly }[first];
+    const transitional = (p.transitional || []).filter((x) => periods.includes(x)).length > 0;
+    nextLine.replaceChildren(
+      ...[
+        h('span', { class: 'muted' }, `Next ${first} reset: `), h('b', null, nextResetText(iso, tz)),
+        transitional ? h('div', { class: 'muted', style: { fontSize: '11.5px' } }, 'Usage is kept; the current window ends at this reset.') : null,
+      ].filter(Boolean)); // replaceChildren(null) would render the text "null"
+  }
+
+  function setChoice(next) {
+    choice = next;
+    renderSchedule();
+  }
+
+  function renderSchedule() {
+    const periods = periodsNow();
+    const need = neededFields(periods);
+    schedBox.style.display = need.show ? '' : 'none';
+    btnFollow.classList.toggle('on', choice === 'follow'); btnFollow.setAttribute('aria-pressed', String(choice === 'follow'));
+    btnCustom.classList.toggle('on', choice === 'custom'); btnCustom.setAttribute('aria-pressed', String(choice === 'custom'));
+    fields.node.style.display = choice === 'custom' ? '' : 'none';
+    fields.setNeeded(need);
+    followLine.style.display = choice === 'follow' ? '' : 'none';
+    followLine.textContent = `${scheduleSourceLabel(globalSchedule ? 'global' : 'default', globalSchedule)}${globalSchedule ? ` (${describeSchedule(globalSchedule, periods)})` : ''}`;
+    onScheduleEdited();
+  }
+
   // ── Mode + render ──
   function setMode(next) {
     mode = next;
@@ -189,6 +270,7 @@ export function quotaSection(ctx) {
       ? `▸ ${rows.length} Model Quota${rows.length === 1 ? '' : 's'} saved (inactive while in Key Quota mode)` : '';
     refreshAccess();
     renderRows();
+    renderSchedule();
   }
 
   // Re-check unsaved rows whenever the access settings change.
@@ -199,7 +281,7 @@ export function quotaSection(ctx) {
   }
 
   const node = h('div', { style: { padding: '12px 14px', background: 'var(--hover)', borderRadius: '8px', border: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: '8px' } },
-    modeBar, keyBox, modelBox,
+    modeBar, keyBox, modelBox, schedBox,
     h('p', { class: 'muted', style: { fontSize: '11px', margin: 0, lineHeight: 1.4 } },
       '🛡️ Soft Post-Facto Gating: requests are blocked with HTTP 429 once consumed tokens reach the quota. Only one mode is enforced; the other mode\'s settings are kept.'));
 
@@ -210,10 +292,17 @@ export function quotaSection(ctx) {
   return {
     node,
     refreshAccess,
+    // The Key Quota period <select> changed: the schedule block follows the periods in use.
+    refreshSchedule: renderSchedule,
     // First problem blocking Save, or '' when fine.
     problem() {
       const bad = validateModelQuotaRows(rowData());
       if (bad) return bad;
+      // A hidden schedule block (nothing resets) is not sent, so it cannot block Save either.
+      if (choice === 'custom' && neededFields(periodsNow()).show) {
+        const sp = fields.problem();
+        if (sp) return sp;
+      }
       const na = rows.find((r) => r.notAllowed);
       return na ? `${na.modelId} is not allowed by this key's access settings. Remove it or change the access.` : '';
     },
@@ -221,6 +310,9 @@ export function quotaSection(ctx) {
     // have loaded, so a fast save can never wipe them.
     payload() {
       const out = { quota_mode: mode };
+      // follow -> null (clears an old custom schedule); custom -> the full object. Sent on every
+      // save: the server keeps unused fields and only writes pins when the effective schedule changes.
+      out.quota_reset_schedule = buildSchedulePayload(choice, fields.value());
       if (loaded) out.model_quotas = rows.map((r) => ({ model_id: r.modelId, quota_limit: Number(r.limit.value) || 0, quota_period: r.period.value }));
       return out;
     },

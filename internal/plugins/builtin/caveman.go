@@ -50,3 +50,31 @@ func ApplyCaveman(messages []map[string]any, settings map[string]any) (newMessag
 	newMessages = append(newMessages, messages...)
 	return newMessages, false, "", overhead, nil
 }
+
+// ApplyCavemanToMessages injects Caveman into the top-level system field of an Anthropic messages body.
+func ApplyCavemanToMessages(body map[string]any, settings map[string]any) (modifiedBody map[string]any, skipped bool, skipReason string, overhead int, err error) {
+	prompt := prompts.CavemanPrompt
+	variant := "caveman"
+	if settings != nil {
+		if v, ok := settings["variant"].(string); ok && v != "" {
+			variant = strings.ToLower(strings.TrimSpace(v))
+		}
+	}
+
+	switch variant {
+	case "ultracave":
+		prompt = prompts.UltraCavePrompt
+	case "megacave":
+		prompt = prompts.MegaCavePrompt
+	default:
+		prompt = prompts.CavemanPrompt
+	}
+
+	if settings != nil {
+		if override, ok := settings["prompt_override"].(string); ok && strings.TrimSpace(override) != "" {
+			prompt = strings.TrimSpace(override)
+		}
+	}
+
+	return InjectSystemPrompt(body, CavemanMarker, prompt)
+}

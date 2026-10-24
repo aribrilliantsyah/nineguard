@@ -9,6 +9,8 @@ import {
 import { quotaPercent, formatQuotaUsage, isQuotaExhausted, quotaPeriodLabel, formatTokensCompact } from '../quotahelpers.js';
 import { quotaStatus, barTone, shortModel } from '../modelquotas.js';
 import { quotaSection, presetButtons } from './keyquota.js';
+import { nextResetText } from '../resetschedule.js';
+import { openKeyUsageModal } from './keyusage.js';
 
 export function mount(root) {
   let alive = true;
@@ -262,6 +264,15 @@ export function mount(root) {
       h('div', { class: 'muted', style: { fontSize: '11px' } }, `${shortModel(s.top_model_id)} \u00b7 ${s.count} limit${s.count === 1 ? '' : 's'}`));
   }
 
+  // When the Key Quota resets, in the key's own timezone (UTC for the default), from the absolute
+  // instant the server returns (ADR 0010). A lifetime quota never resets.
+  function resetTooltip(k) {
+    if (k.quota_period === 'total') return 'lifetime, never resets';
+    if (!k.quota_reset_at) return 'reset time unknown';
+    const eff = k.effective_quota_reset_schedule;
+    return `resets ${nextResetText(k.quota_reset_at, eff ? eff.timezone : 'UTC')}`;
+  }
+
   function quotaCell(k) {
     if (k.quota_mode === 'model') return modelQuotaCell(k);
     if (!k.quota_limit || k.quota_limit <= 0 || !k.quota_period || k.quota_period === 'none') {
@@ -292,7 +303,7 @@ export function mount(root) {
       })
     );
 
-    const tooltip = `${fmtNum(currentUsage)} / ${fmtNum(k.quota_limit)} tokens used in active ${k.quota_period} window (Daily resets at 07:00 WIB / 00:00 UTC) • All-time: ${fmtNum(k.total_tokens || 0)}`;
+    const tooltip = `${fmtNum(currentUsage)} / ${fmtNum(k.quota_limit)} tokens used in active ${k.quota_period} window (${resetTooltip(k)}) • All-time: ${fmtNum(k.total_tokens || 0)}`;
 
     return h('td', { style: { verticalAlign: 'middle' }, title: tooltip },
       h('div', null,
@@ -337,6 +348,7 @@ export function mount(root) {
       h('td', { class: 'muted', title: isNaN(created) ? '' : `${fmtDateTime(created)} (${tzLabel()})` }, isNaN(created) ? '-' : fmtDateTime(created).slice(0, 10)),
       h('td', { style: { textAlign: 'right' } },
         h('div', { style: { display: 'inline-flex', gap: '6px' } },
+          h('button', { class: 'btn btn-sm', type: 'button', title: 'View Key Usage Summary & Heatmap', onclick: () => openKeyUsageModal(k) }, icon('activity'), 'Usage'),
           h('a', { class: 'btn btn-sm', href: '#/plugins', title: 'Manage plugins and token savers' }, icon('puzzle'), 'Plugins'),
           h('button', { class: 'btn btn-sm', type: 'button', title: 'Edit Key & Model Access', onclick: () => openKeyModal(k) }, icon('pencil'), 'Edit'),
           h('button', { class: 'btn btn-sm', type: 'button', title: 'Copy NineGuard API Key', onclick: () => copyText(raw, `Key "${k.name}" copied!`) }, icon('copy'), 'Copy Key'),
@@ -434,11 +446,14 @@ export function mount(root) {
 
     let pluginsList = [];
     let keyBindings = new Map();
+    let globalSchedule = null; // Global Reset Schedule (ADR 0010), null when unset
     try {
-      const [pRes, bRes] = await Promise.all([
+      const [pRes, bRes, gRes] = await Promise.all([
         api.get('/plugins').catch(() => ({ plugins: [] })),
-        existingKey ? api.get('/plugins/bindings', { scope_type: 'key', scope_id: existingKey.id }).catch(() => ({ bindings: [] })) : Promise.resolve({ bindings: [] })
+        existingKey ? api.get('/plugins/bindings', { scope_type: 'key', scope_id: existingKey.id }).catch(() => ({ bindings: [] })) : Promise.resolve({ bindings: [] }),
+        api.get('/settings/quota-reset-schedule').catch(() => ({ quota_reset_schedule: null }))
       ]);
+      globalSchedule = (gRes && gRes.quota_reset_schedule) || null;
       pluginsList = pRes.plugins || [];
       (bRes.bindings || []).forEach(b => keyBindings.set(b.plugin_id, b.state));
     } catch { /* ignore */ }
@@ -507,9 +522,9 @@ export function mount(root) {
 
     const quotaPeriodSelect = h('select', { class: 'input' },
       h('option', { value: 'none', selected: !existingKey || !existingKey.quota_period || existingKey.quota_period === 'none' }, 'None (Unlimited)'),
-      h('option', { value: 'daily', selected: existingKey && existingKey.quota_period === 'daily' }, 'Daily (UTC midnight)'),
-      h('option', { value: 'weekly', selected: existingKey && existingKey.quota_period === 'weekly' }, 'Weekly (UTC Monday)'),
-      h('option', { value: 'monthly', selected: existingKey && existingKey.quota_period === 'monthly' }, 'Monthly (UTC 1st)'),
+      h('option', { value: 'daily', selected: existingKey && existingKey.quota_period === 'daily' }, 'Daily'),
+      h('option', { value: 'weekly', selected: existingKey && existingKey.quota_period === 'weekly' }, 'Weekly'),
+      h('option', { value: 'monthly', selected: existingKey && existingKey.quota_period === 'monthly' }, 'Monthly'),
       h('option', { value: 'total', selected: existingKey && existingKey.quota_period === 'total' }, 'Lifetime (All-time)')
     );
 
@@ -934,16 +949,17 @@ export function mount(root) {
         h('div', { class: 'field', style: { marginBottom: 0 } },
           h('span', { style: { fontSize: '11.5px', fontWeight: '600' } }, 'Reset Period'),
           quotaPeriodSelect,
-          h('small', { class: 'muted', style: { fontSize: '11px' } }, 'Anchors to UTC calendar boundaries.')
+          h('small', { class: 'muted', style: { fontSize: '11px' } }, 'When it resets is set in Reset schedule below.')
         )
       ),
       velocityBox
     );
 
     const quotaUI = quotaSection({
-      existingKey, isEdit, keyQuotaNode, getAccess: currentAccess,
-      groups: modelGroupsList, models: modelsList, providers: providersList,
+      existingKey, isEdit, keyQuotaNode, keyPeriodSelect: quotaPeriodSelect, getAccess: currentAccess,
+      groups: modelGroupsList, models: modelsList, providers: providersList, globalSchedule,
     });
+    quotaPeriodSelect.addEventListener('change', () => quotaUI.refreshSchedule());
 
     // Group/model checkboxes and the extra-models input all live in these panels, so one
     // delegated listener re-checks unsaved Model Quota rows whenever the access changes.
@@ -963,6 +979,12 @@ export function mount(root) {
       panelGroup.style.display = mode === 'group' ? 'flex' : 'none';
       panelCustom.style.display = mode === 'custom' ? 'flex' : 'none';
     }
+
+    const costVisSelect = h('select', { class: 'input' },
+      h('option', { value: '', selected: !existingKey || !existingKey.cost_visibility }, 'Follow global setting'),
+      h('option', { value: 'show', selected: existingKey && existingKey.cost_visibility === 'show' }, 'Always show to key holder'),
+      h('option', { value: 'hide', selected: existingKey && existingKey.cost_visibility === 'hide' }, 'Always hide from key holder')
+    );
 
     formDialog({
       title: isEdit ? `Edit API Key: ${existingKey.name}` : 'Generate New NineGuard API Key',
@@ -992,6 +1014,15 @@ export function mount(root) {
         {
           label: 'Quota (Rate Limiting)',
           node: quotaUI.node
+        },
+        {
+          label: 'Estimated Cost Visibility',
+          node: h('div', null,
+            costVisSelect,
+            h('p', { class: 'muted', style: { fontSize: '11px', margin: '3px 0 0' } },
+              'Controls whether this key can view estimated cost and pricing in /usage and /v1/usage.'
+            )
+          )
         },
         {
           label: 'Plugin Overrides (Optional)',
@@ -1045,6 +1076,7 @@ export function mount(root) {
           allowed_models,
           quota_limit,
           quota_period,
+          cost_visibility: costVisSelect.value || null,
           ...quotaUI.payload()
         };
 

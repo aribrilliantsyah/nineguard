@@ -5,6 +5,12 @@
 **API Key** (Client Key)
 A NineGuard-issued credential (`sk-ng-...`) identifying one agent, user, or tool. Never the upstream provider's key.
 
+**Dual-Header Authentication**
+Acceptance of a client API Key (`sk-ng-...`) through either the standard `Authorization: Bearer <key>` header or the Anthropic `x-api-key: <key>` header interchangeably across all endpoints.
+
+**Messages Protocol** (Native Messages API)
+The Anthropic REST endpoint (`/v1/messages`) where requests use top-level `system` prompts and alternating user/assistant message sequences with typed content blocks, processed natively without translation to OpenAI chat completions.
+
 **Model Group**
 A named set of model IDs or patterns. Serves two independent roles:
 1. *Access template* — an API Key in group mode may only use models in its linked groups.
@@ -89,6 +95,39 @@ Input tokens a plugin removed from a request, as reported by the plugin itself. 
 **Plugin Overhead**
 Input tokens a plugin added to a request (e.g. an injected prompt).
 
+**Served Model**
+The model the upstream says actually answered a request. Can differ from the Requested Model and the resolved Model.
+
+**Model Fallback**
+A request whose Served Model belongs to a different model family than the Model it resolved to (e.g. Opus requested, Sonnet answered). A difference only in version date or spelling is not a Model Fallback.
+
+**Thinking Requested**
+A request in which the client asked the model to reason before answering.
+
+**Thinking Delivered**
+A request whose upstream response shows the model actually reasoned. Thinking Requested without Thinking Delivered means reasoning was lost somewhere upstream.
+
+**Estimated Cost**
+What a request would cost at the model's public API list price ("API-equivalent"). Never NineGuard's real spend, which subscription pools make unknowable. Kept in USD; a Display Currency only changes how it is shown. A model with no known price has no Estimated Cost, never a zero one.
+
+**Display Currency**
+The currency (e.g. IDR) Estimated Costs are shown in, converted from USD at a rate the admin sets.
+
+**Estimated Usage**
+Token counts NineGuard guessed because the upstream reported none. Never priced and never counted in cost totals.
+
+**Session** (Inferred Session)
+A run of requests from one API Key with no idle gap longer than the session gap setting. Inferred by NineGuard; clients never declare it.
+
+**Usage Summary**
+A per-API-Key overview of past activity: requests, tokens, Estimated Cost, Sessions, active days, peak hour, favorite model and per-model breakdown. Shown to the key holder in their key's reset-schedule timezone, and to admins in the viewer's timezone. Distinct from quota status, which shows remaining budget.
+
+**Upstream Usage**
+The Usage Summary a parent NineGuard reports for the API Key this instance uses to reach it. Covers every user of this instance combined, never one user. Shown beside the local Usage Summary, never merged into it.
+
+**Usage Comparison**
+A playful line in the Usage Summary that restates token usage as a multiple of a well-known book's length. Never compares against other API Keys.
+
 **Failure Policy**
 What happens when a plugin errors or times out. *Fail-open*: forward the request unmodified. *Fail-closed*: reject the request.
 
@@ -110,7 +149,25 @@ A Model Quota whose Model the API Key can currently no longer use (access lost, 
 Which kind of quota an API Key enforces: `key` (a single Key Quota) or `model` (Model Quotas). Exactly one mode is enforced at a time. Settings of the inactive mode are kept, not deleted, and take effect again if the mode is switched back.
 
 **Quota Period**
-The fixed time cycle for resetting a Key Quota or Model Quota: `daily`, `weekly`, `monthly`, or `total` (all-time). Unlike reporting periods, Quota Periods always anchor to UTC midnight (ISO Monday 00:00 UTC for weekly; 1st of month 00:00 UTC for monthly).
+The fixed time cycle for resetting a Key Quota or Model Quota: `daily`, `weekly`, `monthly`, or `total` (all-time). Says how often usage resets, not when; see Quota Reset Schedule. Unlike reporting periods, it never follows the viewer's timezone.
+
+**Quota Reset Schedule**
+When Quota Periods reset: a named timezone (so daylight saving is followed), a time of day to the minute, a weekday (weekly) and a day of month (monthly). It applies to an API Key's Key Quota and all its Model Quotas alike. Fields the Quota Period does not use are kept, not discarded. A day of month past the end of a short month means that month's last day. Can be set globally and per API Key (see Global Reset Schedule, Key Reset Schedule).
+
+**Global Reset Schedule**
+The Quota Reset Schedule that applies to every API Key without a Key Reset Schedule. Unset by default.
+
+**Key Reset Schedule**
+A Quota Reset Schedule set on one API Key, overriding the Global Reset Schedule. A key can hold a UTC schedule to stay on UTC while a Global Reset Schedule exists. A key without one follows the global schedule.
+
+**Effective Reset Schedule**
+The schedule an API Key actually uses: its Key Reset Schedule, else the Global Reset Schedule, else the default of 00:00 UTC, ISO Monday for weekly and the 1st for monthly.
+
+**Quota Window**
+The span between two consecutive resets of a Quota Period, within which usage is counted.
+
+**Transitional Window**
+The single Quota Window that follows a change of an API Key's Effective Reset Schedule. It keeps the start of the window that was running, so usage already counted is kept, and ends at the first reset of the new schedule. It can be shorter or longer than a normal window. Changing a schedule never recounts or clears usage.
 
 **Soft Post-Facto Enforcement**
 The mechanism where pre-flight checks block requests only when accumulated tokens already meet or exceed the quota. An admitted request is never truncated mid-flight; final token count is tallied on completion.
@@ -136,7 +193,7 @@ An Upstream Quota fetched from another NineGuard instance higher in the routing 
 A client-facing aggregation of multiple upstream accounts from the same provider into a single quota row, summing consumed and total capacity while hiding underlying account counts and email identities.
 
 **Chat Command Interceptor**
-A proxy pipeline hook that intercepts exact slash prompts (such as `/quota`, `/limits`, `/usage`) in `/v1/chat/completions`, short-circuiting the request to return formatted diagnostic markdown at zero token cost.
+A proxy pipeline hook that intercepts exact slash prompts (such as `/quota`, `/limits`, `/usage`) in `/v1/chat/completions` and `/v1/messages`, short-circuiting the request to return formatted diagnostic markdown at zero token cost. `/quota` and `/limits` show quota status; `/usage` shows the Usage Summary.
 
 ## Security & Encryption
 

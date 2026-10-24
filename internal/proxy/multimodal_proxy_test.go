@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"nineguard/internal/db"
 	"nineguard/internal/keys"
@@ -85,7 +86,8 @@ func TestProxyDetectsAndRecordsImages(t *testing.T) {
 
 	// Wait slightly for async traffic log goroutine
 	var logs []traffic.LogEntry
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 20; i++ {
+		time.Sleep(20 * time.Millisecond)
 		logs, _, _ = trafficMgr.QueryLogs(traffic.FilterParams{Limit: 5})
 		if len(logs) > 0 {
 			break

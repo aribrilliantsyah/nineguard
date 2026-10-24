@@ -12,6 +12,7 @@ import (
 )
 
 type HTTPPluginContext struct {
+	APIFormat  string         `json:"api_format"`
 	APIKeyName string         `json:"api_key_name"`
 	Model      string         `json:"model"`
 	Provider   string         `json:"provider"`

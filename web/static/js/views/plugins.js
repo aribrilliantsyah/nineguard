@@ -619,6 +619,7 @@ export function mount(root) {
 
     // Settings Section (typed fields for built-ins, prompt override editor)
     let settingsSection = null;
+    let saveSettingsFn = null;
     let currentSettings = {};
     try {
       currentSettings = JSON.parse(p.default_settings || '{}');
@@ -646,23 +647,30 @@ export function mount(root) {
         placeholder: 'Optional HEADROOM_PROXY_TOKEN'
       });
 
+      const saveHeadroom = async () => {
+        const newSettings = {
+          url: urlInput.value.trim() || 'http://127.0.0.1:8787',
+          mode: modeSelect.value,
+          compress_user_messages: Boolean(compressUserCheck.checked),
+          token: tokenInput.value.trim()
+        };
+        await api.put(`/plugins/${encodeURIComponent(p.id)}`, {
+          default_settings: JSON.stringify(newSettings)
+        });
+        p.default_settings = JSON.stringify(newSettings);
+        currentSettings = newSettings;
+        reload();
+      };
+      saveSettingsFn = saveHeadroom;
+
       const saveSettingsBtn = h('button', {
         class: 'btn btn-sm btn-primary',
         type: 'button',
         onclick: async () => {
           saveSettingsBtn.disabled = true;
           try {
-            const newSettings = {
-              url: urlInput.value.trim() || 'http://127.0.0.1:8787',
-              mode: modeSelect.value,
-              compress_user_messages: Boolean(compressUserCheck.checked),
-              token: tokenInput.value.trim()
-            };
-            await api.put(`/plugins/${encodeURIComponent(p.id)}`, {
-              default_settings: JSON.stringify(newSettings)
-            });
+            await saveHeadroom();
             toast('Headroom settings saved');
-            reload();
           } catch (e) {
             toast(e.message, 'error');
           } finally {
@@ -723,24 +731,40 @@ export function mount(root) {
         }
       });
 
+      const saveCaveOrPonytail = async () => {
+        const newSettings = isCave ? {
+          variant: variantSelect.value,
+          prompt_override: promptOverrideInput.value.trim()
+        } : {
+          level: variantSelect.value,
+          prompt_override: promptOverrideInput.value.trim()
+        };
+        await api.put(`/plugins/${encodeURIComponent(p.id)}`, {
+          default_settings: JSON.stringify(newSettings)
+        });
+        p.default_settings = JSON.stringify(newSettings);
+        currentSettings = newSettings;
+        reload();
+      };
+      saveSettingsFn = saveCaveOrPonytail;
+
+      variantSelect.onchange = async () => {
+        try {
+          await saveCaveOrPonytail();
+          toast(isCave ? `Caveman variant updated: ${variantSelect.value}` : `Ponytail level updated: ${variantSelect.value}`);
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      };
+
       const savePromptBtn = h('button', {
         class: 'btn btn-sm btn-primary',
         type: 'button',
         onclick: async () => {
           savePromptBtn.disabled = true;
           try {
-            const newSettings = isCave ? {
-              variant: variantSelect.value,
-              prompt_override: promptOverrideInput.value.trim()
-            } : {
-              level: variantSelect.value,
-              prompt_override: promptOverrideInput.value.trim()
-            };
-            await api.put(`/plugins/${encodeURIComponent(p.id)}`, {
-              default_settings: JSON.stringify(newSettings)
-            });
+            await saveCaveOrPonytail();
             toast('Prompt settings saved');
-            reload();
           } catch (e) {
             toast(e.message, 'error');
           } finally {
@@ -756,6 +780,8 @@ export function mount(root) {
           try {
             await api.post(`/plugins/${encodeURIComponent(p.id)}/reset-prompt`);
             promptOverrideInput.value = '';
+            delete currentSettings.prompt_override;
+            p.default_settings = JSON.stringify(currentSettings);
             toast('Prompt override reset to default');
             reload();
           } catch (e) {
@@ -845,17 +871,25 @@ export function mount(root) {
       }
       renderCards();
 
+      const saveSecretGuard = async () => {
+        const newSettings = { action: currentAction };
+        await api.put(`/plugins/${encodeURIComponent(p.id)}`, {
+          default_settings: JSON.stringify(newSettings)
+        });
+        p.default_settings = JSON.stringify(newSettings);
+        currentSettings = newSettings;
+        reload();
+      };
+      saveSettingsFn = saveSecretGuard;
+
       const saveSecretBtn = h('button', {
         class: 'btn btn-sm btn-primary',
         type: 'button',
         onclick: async () => {
           saveSecretBtn.disabled = true;
           try {
-            await api.put(`/plugins/${encodeURIComponent(p.id)}`, {
-              default_settings: JSON.stringify({ action: currentAction })
-            });
+            await saveSecretGuard();
             toast('SecretGuard settings saved', 'ok');
-            reload();
           } catch (e) {
             toast(e.message, 'error');
           } finally {
@@ -976,7 +1010,17 @@ export function mount(root) {
       ),
       submitText: 'Done',
       cancel: false,
-      onSubmit: async () => true
+      onSubmit: async () => {
+        if (saveSettingsFn) {
+          try {
+            await saveSettingsFn();
+          } catch (e) {
+            toast(e.message, 'error');
+            return false;
+          }
+        }
+        return true;
+      }
     });
   }
 

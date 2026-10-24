@@ -208,3 +208,74 @@ func TestTestPluginURL(t *testing.T) {
 		t.Fatalf("unreachable: want 502, got %d", rec.Code)
 	}
 }
+
+func TestPluginHandlers_UpdateDefaultSettingsAndPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "persist_test.db")
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+
+	authMgr := auth.NewManager(database, true)
+	modelsMgr := models.NewManager(database)
+	trafficMgr := traffic.NewManager(database)
+	syslogMgr := syslog.NewManager(database)
+	keysMgr := keys.NewManager(database, "")
+	providersMgr := providers.NewManager(database)
+	pluginsMgr := plugins.NewManager(database, nil)
+
+	h := New(authMgr, modelsMgr, trafficMgr, syslogMgr, keysMgr, providersMgr, nil, "")
+	h.SetPlugins(pluginsMgr)
+
+	admin := &auth.User{ID: 1, Username: "admin", Role: "admin"}
+
+	// 1. Update caveman settings with only default_settings payload
+	updateBody := []byte(`{"default_settings":"{\"variant\":\"ultracave\"}"}`)
+	reqUpdate := contextWithUser(httptest.NewRequest(http.MethodPut, "/api/v1/plugins/caveman", bytes.NewReader(updateBody)), admin)
+	reqUpdate.SetPathValue("id", "caveman")
+	recUpdate := httptest.NewRecorder()
+	h.UpdatePlugin(recUpdate, reqUpdate)
+
+	if recUpdate.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK updating default settings, got %d: %s", recUpdate.Code, recUpdate.Body.String())
+	}
+
+	var updatedPlugin plugins.Plugin
+	_ = json.NewDecoder(recUpdate.Body).Decode(&updatedPlugin)
+	if updatedPlugin.DefaultSettings != `{"variant":"ultracave"}` {
+		t.Errorf("expected default_settings to be updated, got %s", updatedPlugin.DefaultSettings)
+	}
+	if updatedPlugin.Description == "" {
+		t.Errorf("expected description to be preserved, got empty string")
+	}
+	if !updatedPlugin.Bypassable {
+		t.Errorf("expected bypassable to remain true, got false")
+	}
+
+	// 2. Simulate server restart by closing and re-opening database (which triggers seedPlugins)
+	database.Close()
+
+	database2, err := db.InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to re-init db: %v", err)
+	}
+	defer database2.Close()
+
+	pluginsMgr2 := plugins.NewManager(database2, nil)
+	restartedCaveman, err := pluginsMgr2.GetPlugin("caveman")
+	if err != nil {
+		t.Fatalf("failed to get caveman after restart: %v", err)
+	}
+
+	if restartedCaveman.DefaultSettings != `{"variant":"ultracave"}` {
+		t.Errorf("expected default_settings to persist across restart, got %s", restartedCaveman.DefaultSettings)
+	}
+	if restartedCaveman.Description == "" {
+		t.Errorf("expected description to persist across restart, got empty string")
+	}
+	if !restartedCaveman.Bypassable {
+		t.Errorf("expected bypassable to remain true across restart, got false")
+	}
+}
+

@@ -78,7 +78,7 @@ func (h *Handler) BuildUnifiedQuotaResponse(ctx context.Context, keyInfo *keys.K
 	if keyInfo != nil {
 		if !keyInfo.EnforcesModelQuotas() && keyInfo.QuotaLimit > 0 && keyInfo.QuotaPeriod != "" && keyInfo.QuotaPeriod != "none" {
 			if h.traffic != nil {
-				consumed, resetAt, err := h.traffic.GetQuotaUsage(keyInfo.ID, keyInfo.QuotaPeriod, now)
+				consumed, resetAt, err := h.traffic.GetQuotaUsage(keyInfo.ID, keyInfo.QuotaPeriod, keyInfo.ResetRule, now)
 				if err == nil {
 					remaining := keyInfo.QuotaLimit - consumed
 					if remaining < 0 {

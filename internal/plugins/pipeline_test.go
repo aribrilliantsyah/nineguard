@@ -50,7 +50,7 @@ func TestPipelineExecution_OrderAndTransformation(t *testing.T) {
 	executor := NewPipelineExecutor(p1Srv.Client())
 	initBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
 
-	res, _, err := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "gpt-4o", "prov1", false, "", initBody)
+	res, _, err := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "gpt-4o", "prov1", "chat", false, "", initBody)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestPipelineExecution_BypassAndIdempotency(t *testing.T) {
 	initBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
 
 	// 1. Bypass requested -> should skip
-	res, _, err := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "gpt-4o", "prov1", true, "", initBody)
+	res, _, err := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "gpt-4o", "prov1", "chat", true, "", initBody)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestPipelineExecution_BypassAndIdempotency(t *testing.T) {
 	}
 
 	// 2. Incoming header has caveman -> should skip with already_applied
-	res2, appliedHdr, err2 := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "gpt-4o", "prov1", false, "caveman", initBody)
+	res2, appliedHdr, err2 := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "gpt-4o", "prov1", "chat", false, "caveman", initBody)
 	if err2 != nil {
 		t.Fatalf("err: %v", err2)
 	}
@@ -111,7 +111,7 @@ func TestPipelineExecution_FailOpenAndClosed(t *testing.T) {
 	openBindings := []Binding{{PluginID: "open-p", ScopeType: ScopeGlobal, State: StateOn}}
 	executor := NewPipelineExecutor(failingSrv.Client())
 
-	res, _, err := executor.Execute(context.Background(), []Plugin{openPlugin}, openBindings, nil, "", "", "gpt-4o", "", false, "", initBody)
+	res, _, err := executor.Execute(context.Background(), []Plugin{openPlugin}, openBindings, nil, "", "", "gpt-4o", "", "chat", false, "", initBody)
 	if err != nil || res.Rejected {
 		t.Fatalf("fail-open should not reject: res=%v, err=%v", res, err)
 	}
@@ -123,7 +123,7 @@ func TestPipelineExecution_FailOpenAndClosed(t *testing.T) {
 	closedPlugin := Plugin{ID: "closed-p", Kind: KindHTTP, URL: failingSrv.URL, FailurePolicy: PolicyClosed, PipelineOrder: 10}
 	closedBindings := []Binding{{PluginID: "closed-p", ScopeType: ScopeGlobal, State: StateOn}}
 
-	resClosed, _, errClosed := executor.Execute(context.Background(), []Plugin{closedPlugin}, closedBindings, nil, "", "", "gpt-4o", "", false, "", initBody)
+	resClosed, _, errClosed := executor.Execute(context.Background(), []Plugin{closedPlugin}, closedBindings, nil, "", "", "gpt-4o", "", "chat", false, "", initBody)
 	if errClosed != nil {
 		t.Fatalf("unexpected execution err: %v", errClosed)
 	}
@@ -148,11 +148,78 @@ func TestPipelineExecution_ExplicitReject(t *testing.T) {
 	executor := NewPipelineExecutor(rejectSrv.Client())
 	initBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
 
-	res, _, err := executor.Execute(context.Background(), []Plugin{plugin}, bindings, nil, "", "", "gpt-4o", "", false, "", initBody)
+	res, _, err := executor.Execute(context.Background(), []Plugin{plugin}, bindings, nil, "", "", "gpt-4o", "", "chat", false, "", initBody)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 	if !res.Rejected || res.RejectCode != http.StatusForbidden || !strings.Contains(res.RejectMessage, "PII detected") {
 		t.Fatalf("expected 403 rejection with message, got %+v", res)
+	}
+}
+
+func TestPipelineExecution_MessagesFormat(t *testing.T) {
+	var httpReceivedFormat string
+	httpPluginSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		ctxMap, _ := payload["context"].(map[string]any)
+		httpReceivedFormat, _ = ctxMap["api_format"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"request": payload["request"],
+		})
+	}))
+	defer httpPluginSrv.Close()
+
+	pluginsList := []Plugin{
+		{ID: "caveman", Kind: KindBuiltin, PipelineOrder: 10, Bypassable: true, FailurePolicy: PolicyOpen},
+		{ID: "headroom", Kind: KindBuiltin, PipelineOrder: 20, Bypassable: true, FailurePolicy: PolicyOpen},
+		{ID: "custom-http", Kind: KindHTTP, URL: httpPluginSrv.URL, PipelineOrder: 30, Bypassable: true, FailurePolicy: PolicyOpen},
+	}
+	bindings := []Binding{
+		{PluginID: "caveman", ScopeType: ScopeGlobal, State: StateOn},
+		{PluginID: "headroom", ScopeType: ScopeGlobal, State: StateOn},
+		{PluginID: "custom-http", ScopeType: ScopeGlobal, State: StateOn},
+	}
+
+	executor := NewPipelineExecutor(httpPluginSrv.Client())
+	initBody := []byte(`{
+		"model": "claude-3-7-sonnet",
+		"system": "Original system instructions.",
+		"messages": [
+			{"role": "user", "content": "Hello Claude"}
+		]
+	}`)
+
+	res, _, err := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "claude-3-7-sonnet", "p-anthropic", "messages", false, "", initBody)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 1. Caveman was applied and injected into system
+	var outBody map[string]any
+	if err := json.Unmarshal(res.Body, &outBody); err != nil {
+		t.Fatalf("failed to unmarshal output body: %v", err)
+	}
+	sysStr, ok := outBody["system"].(string)
+	if !ok || !strings.Contains(sysStr, "[nineguard:caveman]") {
+		t.Errorf("expected Caveman injected into system, got %v", outBody["system"])
+	}
+
+	// 2. Headroom was skipped as unsupported_format
+	foundHeadroomSkip := false
+	for _, s := range res.PluginsSkipped {
+		if s == "headroom:unsupported_format" {
+			foundHeadroomSkip = true
+			break
+		}
+	}
+	if !foundHeadroomSkip {
+		t.Errorf("expected headroom:unsupported_format in PluginsSkipped, got %v", res.PluginsSkipped)
+	}
+
+	// 3. HTTP Plugin received api_format: "messages"
+	if httpReceivedFormat != "messages" {
+		t.Errorf("expected HTTP plugin to receive api_format='messages', got %q", httpReceivedFormat)
 	}
 }

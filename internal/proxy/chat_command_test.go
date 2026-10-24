@@ -140,3 +140,100 @@ func TestChatCommand_Interception(t *testing.T) {
 		t.Fatalf("expected chat command to be bypassed when disabled, but it was intercepted")
 	}
 }
+
+func TestChatCommand_AnthropicMessages(t *testing.T) {
+	tmpDir := t.TempDir()
+	d, err := db.InitDB(filepath.Join(tmpDir, "test_cmd_anthropic.db"))
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer d.Close()
+
+	km := keys.NewManager(d, "")
+	tm := traffic.NewManager(d)
+	mm := models.NewManager(d)
+	pm := providers.NewManager(d)
+
+	k, err := km.CreateKeyWithOptions("Claude Code Key", keys.CreateKeyOptions{
+		QuotaLimit:  1000000,
+		QuotaPeriod: "weekly",
+	})
+	if err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+
+	p, err := proxy.NewProxy(mm, tm, km, pm, nil)
+	if err != nil {
+		t.Fatalf("NewProxy: %v", err)
+	}
+
+	// 1. Non-streaming /quota on /v1/messages
+	bodyJSON := `{"model":"claude-3-7-sonnet","stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"/quota"}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(bodyJSON))
+	req.Header.Set("x-api-key", k.RawKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		ID      string `json:"id"`
+		Type    string `json:"type"`
+		Role    string `json:"role"`
+		Model   string `json:"model"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		StopReason string `json:"stop_reason"`
+		Usage      struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal anthropic message response: %v, body=%s", err, rec.Body.String())
+	}
+	if resp.Type != "message" || resp.Role != "assistant" || resp.StopReason != "end_turn" {
+		t.Errorf("unexpected anthropic response metadata: %+v", resp)
+	}
+	if len(resp.Content) != 1 || resp.Content[0].Type != "text" {
+		t.Fatalf("expected 1 text content block, got %+v", resp.Content)
+	}
+	if !strings.Contains(resp.Content[0].Text, "NineGuard Quota Report") {
+		t.Errorf("expected Quota Report in content, got: %s", resp.Content[0].Text)
+	}
+	if resp.Usage.InputTokens != 0 || resp.Usage.OutputTokens != 0 {
+		t.Errorf("expected 0 usage tokens, got %+v", resp.Usage)
+	}
+
+	// 2. Streaming /quota on /v1/messages
+	streamBodyJSON := `{"model":"claude-3-7-sonnet","stream":true,"messages":[{"role":"user","content":"/quota"}]}`
+	streamReq := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(streamBodyJSON))
+	streamReq.Header.Set("x-api-key", k.RawKey)
+	streamReq.Header.Set("Content-Type", "application/json")
+	streamRec := httptest.NewRecorder()
+
+	p.ServeHTTP(streamRec, streamReq)
+
+	if streamRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", streamRec.Code, streamRec.Body.String())
+	}
+	outSSE := streamRec.Body.String()
+	if !strings.Contains(outSSE, "event: message_start") {
+		t.Errorf("missing message_start event: %s", outSSE)
+	}
+	if !strings.Contains(outSSE, "event: content_block_delta") {
+		t.Errorf("missing content_block_delta event: %s", outSSE)
+	}
+	if !strings.Contains(outSSE, "event: message_stop") {
+		t.Errorf("missing message_stop event: %s", outSSE)
+	}
+	if !strings.Contains(outSSE, "NineGuard Quota Report") {
+		t.Errorf("missing quota report text in delta: %s", outSSE)
+	}
+}

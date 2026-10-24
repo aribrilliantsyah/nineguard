@@ -22,6 +22,7 @@ import (
 	"nineguard/internal/keys"
 	"nineguard/internal/models"
 	"nineguard/internal/plugins"
+	"nineguard/internal/pricing"
 	"nineguard/internal/providers"
 	"nineguard/internal/proxy"
 	"nineguard/internal/syslog"
@@ -131,6 +132,10 @@ func main() {
 	modelsMgr := models.NewManager(database)
 	trafficMgr := traffic.NewManager(database)
 	pluginsMgr := plugins.NewManager(database, nil)
+	pricingMgr, err := pricing.NewManager(database)
+	if err != nil {
+		slog.Error("failed to initialize pricing manager", "error", err)
+	}
 
 	// 3. Initialize Reverse Proxy
 	revProxy, err := proxy.NewProxy(modelsMgr, trafficMgr, keysMgr, providersMgr, pluginsMgr)
@@ -138,10 +143,16 @@ func main() {
 		slog.Error("failed to initialize reverse proxy", "error", err)
 		os.Exit(1)
 	}
+	if pricingMgr != nil {
+		revProxy.SetPricingResolver(pricingMgr.Resolver())
+	}
 
 	// 4. Handlers
 	h := handler.New(authMgr, modelsMgr, trafficMgr, syslogMgr, keysMgr, providersMgr, revProxy, routerTarget)
 	h.SetPlugins(pluginsMgr)
+	if pricingMgr != nil {
+		h.SetPricing(pricingMgr)
+	}
 	// Share one upstream quota manager so the background sync warms the same cache /quota reads.
 	upstreamMgr := upstream.NewManager()
 	revProxy.SetUpstreamManager(upstreamMgr)
@@ -152,16 +163,58 @@ func main() {
 	// Key allow lists skip Removed Models, so refresh them after each sync (ADR 0006).
 	modelsMgr.SetOnSynced(keysMgr.ReloadGroupCache)
 
-	// Background Auto-Sync: automatically fetch models from active upstream providers
+	// Background Auto-Sync: automatically fetch models and price list from providers
 	go func() {
 		time.Sleep(1200 * time.Millisecond)
 		if added, removed, err := modelsMgr.SyncFromProviders(context.Background(), providersMgr); err == nil && (added > 0 || removed > 0) {
 			slog.Info("auto-synced models from active upstream providers", "models_added", added, "models_cleaned", removed)
 		}
 
+		syncPricesAndFX := func() {
+			if pricingMgr == nil {
+				return
+			}
+			s, err := pricingMgr.GetCostSettings()
+			if err != nil {
+				return
+			}
+			needsPriceRefresh := true
+			if s.PriceListSyncedAt != "" {
+				if t, err := time.Parse(time.RFC3339, s.PriceListSyncedAt); err == nil && time.Since(t) < 24*time.Hour {
+					needsPriceRefresh = false
+				}
+			}
+			if needsPriceRefresh {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				if n, err := pricingMgr.RefreshPrices(ctx); err == nil {
+					slog.Info("auto-refreshed model price list", "count", n)
+				}
+				cancel()
+			}
+
+			if s.DisplayCurrency != "USD" && s.FXRateManual == "" {
+				needsFXRefresh := true
+				if s.FXRateSyncedAt != "" {
+					if t, err := time.Parse(time.RFC3339, s.FXRateSyncedAt); err == nil && time.Since(t) < 24*time.Hour {
+						needsFXRefresh = false
+					}
+				}
+				if needsFXRefresh {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					if rate, err := pricingMgr.RefreshFX(ctx); err == nil {
+						slog.Info("auto-refreshed fx rate", "currency", s.DisplayCurrency, "rate", rate)
+					}
+					cancel()
+				}
+			}
+		}
+
+		syncPricesAndFX()
+
 		ticker := time.NewTicker(30 * time.Minute)
 		for range ticker.C {
 			_, _, _ = modelsMgr.SyncFromProviders(context.Background(), providersMgr)
+			syncPricesAndFX()
 		}
 	}()
 
@@ -223,6 +276,10 @@ func main() {
 		web.Page("auth.html").ServeHTTP(w, r)
 	})
 
+	mux.HandleFunc("GET /portal", func(w http.ResponseWriter, r *http.Request) {
+		web.Page("portal.html").ServeHTTP(w, r)
+	})
+
 	// REST API v1
 	mux.HandleFunc("GET /api/v1/auth/status", h.AuthStatus)
 	mux.HandleFunc("POST /api/v1/auth/setup", h.AuthSetup)
@@ -261,11 +318,20 @@ func main() {
 	mux.HandleFunc("DELETE /api/v1/model-groups/{id}", h.DeleteModelGroup)
 	mux.HandleFunc("POST /api/v1/model-groups/{id}/remove-unavailable", h.RemoveUnavailableFromGroup)
 
+	mux.HandleFunc("POST /api/v1/costs/reprice", h.RepriceCosts)
+	mux.HandleFunc("GET /api/v1/prices", h.GetPrices)
+	mux.HandleFunc("PUT /api/v1/prices/overrides/{model_id...}", h.SetPriceOverride)
+	mux.HandleFunc("DELETE /api/v1/prices/overrides/{model_id...}", h.DeletePriceOverride)
+	mux.HandleFunc("POST /api/v1/prices/refresh", h.RefreshPrices)
+	mux.HandleFunc("GET /api/v1/settings/cost", h.GetCostSettings)
+	mux.HandleFunc("POST /api/v1/settings/cost", h.UpdateCostSettings)
+
 	mux.HandleFunc("GET /api/v1/traffic", h.GetTrafficLogs)
 	mux.HandleFunc("GET /api/v1/traffic/volume", h.GetTrafficVolume)
 	mux.HandleFunc("GET /api/v1/traffic/export", h.ExportTrafficLogs)
 	mux.HandleFunc("GET /api/v1/traffic/stats", h.GetTrafficStats)
 	mux.HandleFunc("GET /api/v1/traffic/report", h.GetUsageReport)
+	mux.HandleFunc("GET /api/v1/traffic/report/export", h.ExportUsageReport)
 	mux.HandleFunc("GET /api/v1/traffic/{id}/payload", h.GetTrafficPayload)
 
 	mux.HandleFunc("GET /api/v1/logs", h.GetSystemLogs)
@@ -281,8 +347,13 @@ func main() {
 	mux.HandleFunc("DELETE /api/v1/keys/{id}", h.DeleteKey)
 	mux.HandleFunc("GET /api/v1/keys/{id}/velocity", h.GetKeyVelocity)
 	mux.HandleFunc("GET /api/v1/keys/{id}/model-velocity", h.GetKeyModelVelocity)
+	mux.HandleFunc("GET /api/v1/keys/{id}/usage", h.GetKeyUsage)
 	mux.HandleFunc("GET /api/v1/keys/{id}", h.GetKey)
 	mux.HandleFunc("GET /api/v1/quotas", h.GetQuotas)
+	mux.HandleFunc("POST /api/v1/quotas/reset-preview", h.PreviewQuotaReset)
+	mux.HandleFunc("GET /api/v1/settings/quota-reset-schedule", h.GetGlobalResetSchedule)
+	mux.HandleFunc("POST /api/v1/settings/quota-reset-schedule", h.SetGlobalResetSchedule)
+	mux.HandleFunc("POST /api/v1/settings/quota-reset-schedule/clear-overrides", h.ClearResetScheduleOverrides)
 	mux.HandleFunc("GET /api/v1/upstream-quotas", h.GetUpstreamQuotas)
 	mux.HandleFunc("GET /api/v1/settings/upstream-sync", h.GetUpstreamSyncSettings)
 	mux.HandleFunc("POST /api/v1/settings/upstream-sync", h.SetUpstreamSyncSettings)
@@ -335,7 +406,7 @@ func main() {
 
 		// API, UI, and Static paths handled by mux
 		if strings.HasPrefix(path, "/api/v1/") ||
-			path == "/" || path == "/login" || path == "/setup" || path == "/healthz" {
+			path == "/" || path == "/login" || path == "/setup" || path == "/healthz" || path == "/portal" {
 			mux.ServeHTTP(w, r)
 			return
 		}

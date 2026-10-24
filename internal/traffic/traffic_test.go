@@ -61,6 +61,41 @@ func TestComputeLevelAndMessage(t *testing.T) {
 	if e4.Level != "FATAL" {
 		t.Errorf("expected level FATAL, got %s", e4.Level)
 	}
+
+	// Dynamic API format path tests
+	tests := []struct {
+		apiFormat      string
+		statusCode     int
+		expectedPrefix string
+	}{
+		{"messages", 200, "POST /v1/messages model=claude-3-5-sonnet 200 OK"},
+		{"messages", 400, "POST /v1/messages model=claude-3-5-sonnet 400"},
+		{"responses", 200, "POST /v1/responses model=o1 200 OK"},
+		{"responses", 500, "POST /v1/responses model=o1 500"},
+		{"chat", 200, "POST /v1/chat/completions model=gpt-4o 200 OK"},
+		{"chat", 404, "POST /v1/chat/completions model=gpt-4o 404"},
+		{"", 200, "POST /v1/chat/completions model=gpt-4o 200 OK"},
+		{"other", 200, "POST /v1/chat/completions model=gpt-4o 200 OK"},
+	}
+
+	for _, tc := range tests {
+		model := "gpt-4o"
+		if tc.apiFormat == "messages" {
+			model = "claude-3-5-sonnet"
+		} else if tc.apiFormat == "responses" {
+			model = "o1"
+		}
+		entry := &LogEntry{
+			StatusCode: tc.statusCode,
+			Model:      model,
+			ApiFormat:  tc.apiFormat,
+		}
+		entry.ComputeLevelAndMessage()
+		if len(entry.Message) < len(tc.expectedPrefix) || entry.Message[:len(tc.expectedPrefix)] != tc.expectedPrefix {
+			t.Errorf("apiFormat=%q statusCode=%d: expected message prefix %q, got %q",
+				tc.apiFormat, tc.statusCode, tc.expectedPrefix, entry.Message)
+		}
+	}
 }
 
 func TestRecordAndQueryLogs(t *testing.T) {

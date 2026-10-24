@@ -50,3 +50,31 @@ func ApplyPonytail(messages []map[string]any, settings map[string]any) (newMessa
 	newMessages = append(newMessages, messages...)
 	return newMessages, false, "", overhead, nil
 }
+
+// ApplyPonytailToMessages injects Ponytail into the top-level system field of an Anthropic messages body.
+func ApplyPonytailToMessages(body map[string]any, settings map[string]any) (modifiedBody map[string]any, skipped bool, skipReason string, overhead int, err error) {
+	prompt := prompts.PonytailPrompt
+	level := "full"
+	if settings != nil {
+		if lvl, ok := settings["level"].(string); ok && lvl != "" {
+			level = strings.ToLower(strings.TrimSpace(lvl))
+		}
+	}
+
+	switch level {
+	case "lite":
+		prompt = "Level: lite. Preserve mild compression, keep explanations concise.\n" + prompts.PonytailPrompt
+	case "ultra":
+		prompt = "Level: ultra. Maximum brevity, no pleasantries, concise syntax.\n" + prompts.PonytailPrompt
+	default:
+		prompt = prompts.PonytailPrompt
+	}
+
+	if settings != nil {
+		if override, ok := settings["prompt_override"].(string); ok && strings.TrimSpace(override) != "" {
+			prompt = strings.TrimSpace(override)
+		}
+	}
+
+	return InjectSystemPrompt(body, PonytailMarker, prompt)
+}

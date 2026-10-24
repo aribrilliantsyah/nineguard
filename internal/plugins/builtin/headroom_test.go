@@ -98,3 +98,28 @@ func TestApplyHeadroom_CompressionSkipped(t *testing.T) {
 		t.Fatalf("expected original body returned")
 	}
 }
+
+func TestApplyHeadroom_UnsupportedFormat(t *testing.T) {
+	body := map[string]any{
+		"model": "claude-3-7-sonnet",
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "text", "text": "hello"},
+				},
+			},
+		},
+	}
+	settings := map[string]any{"api_format": "messages"}
+	res, saved, skipped, reason, err := ApplyHeadroom(context.Background(), nil, body, settings)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !skipped || reason != "unsupported_format" || saved != 0 {
+		t.Fatalf("expected skipped with unsupported_format, got skipped=%v reason=%s saved=%d", skipped, reason, saved)
+	}
+	if res["model"] != "claude-3-7-sonnet" {
+		t.Fatalf("expected unmodified body returned")
+	}
+}

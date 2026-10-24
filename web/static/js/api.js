@@ -80,11 +80,11 @@ export const api = {
       throw new ApiError(resp.status, msg);
     }
     const name = /filename="([^"]+)"/.exec(resp.headers.get('Content-Disposition') || '')?.[1] || 'nineguard-export';
-    const url = URL.createObjectURL(await resp.blob());
-    const a = Object.assign(document.createElement('a'), { href: url, download: name });
+    const blobUrl = URL.createObjectURL(await resp.blob());
+    const a = Object.assign(document.createElement('a'), { href: blobUrl, download: name });
     document.body.append(a);
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
   },
 };

@@ -250,11 +250,16 @@ func (m *Manager) UpdatePlugin(p *Plugin) error {
 		name = existing.Name
 	}
 	desc := strings.TrimSpace(p.Description)
+	if desc == "" {
+		desc = existing.Description
+	}
 	url := strings.TrimRight(strings.TrimSpace(p.URL), "/")
 	if existing.Kind == KindBuiltin {
 		url = existing.URL // built-ins have fixed URLs
 	} else if url != "" && !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return fmt.Errorf("plugin URL must use http or https")
+	} else if url == "" {
+		url = existing.URL
 	}
 
 	policy := p.FailurePolicy
@@ -264,6 +269,8 @@ func (m *Manager) UpdatePlugin(p *Plugin) error {
 	bypassable := p.Bypassable
 	if policy == PolicyClosed {
 		bypassable = false
+	} else if !p.Bypassable && existing.Kind == KindBuiltin {
+		bypassable = existing.Bypassable
 	}
 
 	timeoutMs := p.TimeoutMs
@@ -274,6 +281,11 @@ func (m *Manager) UpdatePlugin(p *Plugin) error {
 	cat := p.Category
 	if cat == "" {
 		cat = existing.Category
+	}
+
+	summary := strings.TrimSpace(p.Summary)
+	if summary == "" {
+		summary = existing.Summary
 	}
 
 	defSettings := strings.TrimSpace(p.DefaultSettings)
@@ -290,7 +302,7 @@ func (m *Manager) UpdatePlugin(p *Plugin) error {
 		UPDATE plugins
 		SET name = ?, description = ?, url = ?, timeout_ms = ?, failure_policy = ?, bypassable = ?, category = ?, summary = ?, default_settings = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, name, desc, url, timeoutMs, policy, bInt, cat, strings.TrimSpace(p.Summary), defSettings, p.ID)
+	`, name, desc, url, timeoutMs, policy, bInt, cat, summary, defSettings, p.ID)
 	if err != nil {
 		return fmt.Errorf("update plugin error: %w", err)
 	}
@@ -481,6 +493,7 @@ func (m *Manager) ExecutePipeline(
 	groups []models.ModelGroup,
 	apiKeyID, apiKeyName string,
 	model, providerID string,
+	apiFormat string,
 	isBypassRequested bool,
 	incomingAppliedHeader string,
 	bodyBytes []byte,
@@ -501,6 +514,7 @@ func (m *Manager) ExecutePipeline(
 		apiKeyName,
 		model,
 		providerID,
+		apiFormat,
 		isBypassRequested,
 		incomingAppliedHeader,
 		bodyBytes,

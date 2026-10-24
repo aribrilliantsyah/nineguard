@@ -1,6 +1,8 @@
 // Models & Groups view: View, filter by provider, toggle firewall, and manage Model Groups.
 import { api } from '../api.js';
 import { h, icon, emptyState, toast, formDialog, confirmDialog, fmtNum, fmtCompact, fmtAgo, searchableSelect } from '../ui.js';
+import { formatPriceRate } from '../costhelpers.js';
+import { openCostSettingsModal } from '../costmodal.js';
 
 export function mount(root) {
   let alive = true;
@@ -13,6 +15,7 @@ export function mount(root) {
   let allModels = [];
   let modelGroups = [];
   let providersList = [];
+  let pricesMap = new Map();
   let selectedProvider = '';
   let filterText = '';
   let groupFilterText = '';
@@ -79,6 +82,41 @@ export function mount(root) {
     onclick: fetchFromProviders
   }, icon('refresh'), 'Fetch from Providers');
 
+  const repriceAllBtn = h('button', {
+    class: 'btn',
+    type: 'button',
+    title: 'Re-calculate estimated costs for all past non-estimated requests',
+    onclick: async () => {
+      const ok = await confirmDialog({
+        title: 'Re-price All Traffic History?',
+        body: 'This will re-calculate the estimated cost for all non-estimated historical requests using the latest LiteLLM catalog and active price overrides.',
+        okText: 'Re-price History',
+        danger: false
+      });
+      if (!ok) return;
+
+      repriceAllBtn.disabled = true;
+      repriceAllBtn.replaceChildren(icon('refresh'), ' Re-pricing...');
+      try {
+        const res = await api.post('/costs/reprice', {});
+        toast(`Successfully re-priced ${fmtNum(res.recalculated || 0)} historical requests!`, 'ok');
+        await load();
+      } catch (err) {
+        toast(`Re-price failed: ${err.message}`, 'error');
+      } finally {
+        repriceAllBtn.disabled = false;
+        repriceAllBtn.replaceChildren(icon('refresh'), 'Re-price All');
+      }
+    }
+  }, icon('refresh'), 'Re-price All');
+
+  const costSettingsBtn = h('button', {
+    class: 'btn',
+    type: 'button',
+    title: 'Configure Display Currency, FX Exchange Rates, and Key Cost Visibility',
+    onclick: () => openCostSettingsModal(() => load())
+  }, icon('dollar-sign'), 'Cost & Currency');
+
   const addModelBtn = h('button', {
     class: 'btn btn-primary',
     type: 'button',
@@ -132,13 +170,102 @@ export function mount(root) {
 
     if (tab === 'models') {
       subText.textContent = 'Control model firewall rules and access. Models are grouped by provider prefix (e.g. openrouter/model-id).';
-      actionsWrap.replaceChildren(searchInput, providerSelect, clearRemovedBtn, fetchBtn, addModelBtn);
+      actionsWrap.replaceChildren(searchInput, providerSelect, clearRemovedBtn, fetchBtn, costSettingsBtn, repriceAllBtn, addModelBtn);
       renderModelsTable();
     } else {
       subText.textContent = 'Create reusable groups of models (e.g. GPT Ecosystem, Claude) that API keys dynamically link to.';
       actionsWrap.replaceChildren(groupSearchInput, addGroupBtn);
       renderGroupsTable();
     }
+  }
+
+  async function openPriceOverrideModal(m, currentPrice) {
+    const inputIn = h('input', {
+      class: 'input',
+      type: 'number',
+      step: '0.001',
+      min: '0',
+      value: (currentPrice && currentPrice.input_per_mtok != null) ? String(currentPrice.input_per_mtok) : ''
+    });
+    const inputOut = h('input', {
+      class: 'input',
+      type: 'number',
+      step: '0.001',
+      min: '0',
+      value: (currentPrice && currentPrice.output_per_mtok != null) ? String(currentPrice.output_per_mtok) : ''
+    });
+    const inputRead = h('input', {
+      class: 'input',
+      type: 'number',
+      step: '0.001',
+      min: '0',
+      value: (currentPrice && currentPrice.cache_read_per_mtok != null) ? String(currentPrice.cache_read_per_mtok) : '',
+      placeholder: 'Default (matches input price)'
+    });
+    const inputWrite = h('input', {
+      class: 'input',
+      type: 'number',
+      step: '0.001',
+      min: '0',
+      value: (currentPrice && currentPrice.cache_write_per_mtok != null) ? String(currentPrice.cache_write_per_mtok) : '',
+      placeholder: 'Default (matches input price)'
+    });
+
+    const fields = [
+      { label: 'Prompt Input Price ($ / 1M tokens)', node: inputIn },
+      { label: 'Completion Output Price ($ / 1M tokens)', node: inputOut },
+      { label: 'Prompt Cache Read ($ / 1M tokens, optional)', node: inputRead },
+      { label: 'Prompt Cache Creation/Write ($ / 1M tokens, optional)', node: inputWrite }
+    ];
+
+    if (currentPrice && currentPrice.is_override) {
+      const removeBtn = h('button', {
+        class: 'btn btn-danger btn-sm',
+        type: 'button',
+        style: { marginTop: '8px' },
+        onclick: async () => {
+          try {
+            const res = await api.del(`/prices/overrides/${encodeURIComponent(m.id)}`);
+            const count = res && res.recalculated != null ? res.recalculated : 0;
+            toast(`Override removed for ${m.id} (${count} past requests re-priced)`, 'ok');
+            await load();
+          } catch (e) {
+            toast(`Failed to remove override: ${e.message}`, 'error');
+          }
+        }
+      }, icon('trash'), 'Remove Override (Revert to List Price)');
+      fields.push({ label: 'Current Override', node: removeBtn });
+    }
+
+    formDialog({
+      title: `Price Override — ${m.id}`,
+      submitText: 'Save Override',
+      fields,
+      onSubmit: async () => {
+        const inVal = parseFloat(inputIn.value);
+        const outVal = parseFloat(inputOut.value);
+        if (isNaN(inVal) || inVal < 0) throw new Error('Input price must be a valid non-negative number');
+        if (isNaN(outVal) || outVal < 0) throw new Error('Output price must be a valid non-negative number');
+
+        const payload = {
+          input_per_mtok: inVal,
+          output_per_mtok: outVal
+        };
+        if (inputRead.value.trim() !== '') {
+          const rVal = parseFloat(inputRead.value);
+          if (!isNaN(rVal) && rVal >= 0) payload.cache_read_per_mtok = rVal;
+        }
+        if (inputWrite.value.trim() !== '') {
+          const wVal = parseFloat(inputWrite.value);
+          if (!isNaN(wVal) && wVal >= 0) payload.cache_write_per_mtok = wVal;
+        }
+
+        const res = await api.put(`/prices/overrides/${encodeURIComponent(m.id)}`, payload);
+        const count = res && res.recalculated != null ? res.recalculated : 0;
+        toast(`Price override saved for ${m.id} (${count} past requests re-priced)`, 'ok');
+        await load();
+      }
+    });
   }
 
   // ── All Models Tab Logic ──
@@ -325,6 +452,29 @@ export function mount(root) {
         h('td', null, h('div', { style: { display: 'inline-flex', gap: '6px', flexWrap: 'wrap' } }, statusBadge, removedBadge)),
         h('td', { class: 'num' }, fmtNum(m.total_requests || 0)),
         h('td', { class: 'num' }, fmtCompact(m.total_tokens || 0)),
+        (() => {
+          const priceInfo = pricesMap.get(m.id);
+          if (priceInfo && priceInfo.source !== 'none') {
+            return h('td', { class: 'num' },
+              h('div', {
+                style: { cursor: 'pointer', display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', gap: '2px' },
+                onclick: () => openPriceOverrideModal(m, priceInfo),
+                title: `Input: $${priceInfo.input_per_mtok}/1M · Output: $${priceInfo.output_per_mtok}/1M\n${priceInfo.cache_read_per_mtok != null ? `Cache Read: $${priceInfo.cache_read_per_mtok}/1M\n` : ''}${priceInfo.cache_write_per_mtok != null ? `Cache Write: $${priceInfo.cache_write_per_mtok}/1M\n` : ''}Source: ${priceInfo.source} (Click to edit override)`
+              },
+                h('span', { class: 'strong', style: { fontSize: '11px' } }, formatPriceRate(priceInfo.input_per_mtok, priceInfo.output_per_mtok)),
+                h('span', { class: `badge ${priceInfo.is_override ? 'warn' : 'muted'}`, style: { fontSize: '8.5px', padding: '0 3px' } }, priceInfo.is_override ? 'override' : 'list')
+              )
+            );
+          }
+          return h('td', { class: 'num' },
+            h('button', {
+              class: 'btn btn-sm',
+              type: 'button',
+              style: { fontSize: '10.5px', opacity: 0.8 },
+              onclick: () => openPriceOverrideModal(m, null)
+            }, 'Set price')
+          );
+        })(),
         h('td', { class: 'muted' }, lastUsed),
         h('td', { class: 'num' },
           h('div', { style: { display: 'inline-flex', gap: '6px' } }, actionBtn, deleteBtn)
@@ -451,6 +601,7 @@ export function mount(root) {
               h('th', null, 'Firewall Status'),
               h('th', { class: 'num' }, 'Total Requests'),
               h('th', { class: 'num' }, 'Tokens Used'),
+              h('th', { class: 'num' }, 'Price (per 1M)'),
               h('th', null, 'Last Request'),
               h('th', { class: 'num' }, 'Action')
             )
@@ -939,7 +1090,7 @@ export function mount(root) {
   async function load() {
     contentWrap.replaceChildren(h('div', { class: 'skel', style: { height: '240px' } }));
     try {
-      const [mRes, gRes, pRes] = await Promise.all([
+      const [mRes, gRes, pRes, prRes] = await Promise.all([
         api.get('/models').catch((err) => {
           toast(`Failed to load models: ${err.message || 'Server error'}`, 'error');
           return [];
@@ -948,11 +1099,13 @@ export function mount(root) {
         api.get('/providers').catch((err) => {
           toast(`Failed to load providers: ${err.message || 'Server error'}`, 'error');
           return { providers: [] };
-        })
+        }),
+        api.get('/prices').catch(() => [])
       ]);
       allModels = Array.isArray(mRes) ? mRes : [];
       modelGroups = (gRes && Array.isArray(gRes.groups)) ? gRes.groups : [];
       providersList = (pRes && Array.isArray(pRes.providers)) ? pRes.providers : [];
+      pricesMap = new Map((Array.isArray(prRes) ? prRes : []).map(p => [p.model_id, p]));
 
       tabModelsBadge.textContent = fmtNum(allModels.length);
       tabGroupsBadge.textContent = fmtNum(modelGroups.length);
@@ -981,7 +1134,7 @@ export function mount(root) {
     if (!alive) return;
     clearRemovedBtn.hidden = !allModels.some(m => m.removed);
     if (activeTab === 'models') {
-      actionsWrap.replaceChildren(searchInput, providerSelect, clearRemovedBtn, fetchBtn, addModelBtn);
+      actionsWrap.replaceChildren(searchInput, providerSelect, clearRemovedBtn, fetchBtn, costSettingsBtn, repriceAllBtn, addModelBtn);
       renderModelsTable();
     } else {
       actionsWrap.replaceChildren(groupSearchInput, addGroupBtn);

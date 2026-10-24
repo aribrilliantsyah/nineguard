@@ -318,3 +318,92 @@ func TestProxy_PluginPipelineExecution(t *testing.T) {
 	}
 }
 
+func TestDualHeaderAuth(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "dual_auth_test.db")
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+	defer database.Close()
+
+	keyMgr := keys.NewManager(database, "")
+	trafficMgr := traffic.NewManager(database)
+	modelsMgr := models.NewManager(database)
+	providersMgr := providers.NewManager(database)
+
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/models" {
+			_, _ = w.Write([]byte(`{"data":[{"id":"mock-model"}]}`))
+			return
+		}
+		if r.URL.Path == "/v1/messages" {
+			_, _ = w.Write([]byte(`{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"text","text":"hello anthropic"}],"model":"mock-model","usage":{"input_tokens":10,"output_tokens":5}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-123","choices":[{"message":{"role":"assistant","content":"hello openai"}}]}`))
+	}))
+	defer mockUpstream.Close()
+
+	_, _ = providersMgr.CreateProvider("test-prov", mockUpstream.URL, "prov-key", "", true, true)
+	clientKey, err := keyMgr.CreateKey("test-dual-auth", "all", nil, nil)
+	if err != nil {
+		t.Fatalf("failed to create client key: %v", err)
+	}
+
+	p, err := proxy.NewProxy(modelsMgr, trafficMgr, keyMgr, providersMgr, nil)
+	if err != nil {
+		t.Fatalf("failed to init proxy: %v", err)
+	}
+
+	// 1. GET /v1/models with x-api-key
+	reqModels := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	reqModels.Header.Set("x-api-key", clientKey.RawKey)
+	recModels := httptest.NewRecorder()
+	p.ServeHTTP(recModels, reqModels)
+	if recModels.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for GET /v1/models with x-api-key, got %d: %s", recModels.Code, recModels.Body.String())
+	}
+
+	// 2. POST /v1/chat/completions with x-api-key
+	reqChat := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"mock-model","messages":[{"role":"user","content":"hi"}]}`))
+	reqChat.Header.Set("x-api-key", clientKey.RawKey)
+	reqChat.Header.Set("Content-Type", "application/json")
+	recChat := httptest.NewRecorder()
+	p.ServeHTTP(recChat, reqChat)
+	if recChat.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for POST /v1/chat/completions with x-api-key, got %d: %s", recChat.Code, recChat.Body.String())
+	}
+
+	// 3. POST /v1/messages with x-api-key
+	reqMessages := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"mock-model","messages":[{"role":"user","content":"hi"}]}`))
+	reqMessages.Header.Set("x-api-key", clientKey.RawKey)
+	reqMessages.Header.Set("Content-Type", "application/json")
+	recMessages := httptest.NewRecorder()
+	p.ServeHTTP(recMessages, reqMessages)
+	if recMessages.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for POST /v1/messages with x-api-key, got %d: %s", recMessages.Code, recMessages.Body.String())
+	}
+
+	// 4. Invalid x-api-key -> 401
+	reqInvalid := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	reqInvalid.Header.Set("x-api-key", "sk-ng-invalid")
+	recInvalid := httptest.NewRecorder()
+	p.ServeHTTP(recInvalid, reqInvalid)
+	if recInvalid.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for invalid x-api-key, got %d", recInvalid.Code)
+	}
+
+	// 5. Empty auth -> 401
+	reqEmpty := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	recEmpty := httptest.NewRecorder()
+	p.ServeHTTP(recEmpty, reqEmpty)
+	if recEmpty.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for empty auth, got %d", recEmpty.Code)
+	}
+}
+
+

@@ -17,6 +17,9 @@ func ApplyHeadroom(ctx context.Context, client *http.Client, reqBody map[string]
 	token := ""
 
 	if settings != nil {
+		if fmtVal, ok := settings["api_format"].(string); ok && fmtVal == "messages" {
+			return reqBody, 0, true, "unsupported_format", nil
+		}
 		if u, ok := settings["url"].(string); ok && strings.TrimSpace(u) != "" {
 			url = strings.TrimRight(strings.TrimSpace(u), "/")
 		}

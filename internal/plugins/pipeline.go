@@ -100,11 +100,15 @@ func (pe *PipelineExecutor) Execute(
 	groups []models.ModelGroup,
 	apiKeyID, apiKeyName string,
 	model, providerID string,
+	apiFormat string,
 	isBypassRequested bool,
 	incomingAppliedHeader string,
 	bodyBytes []byte,
 ) (*PipelineResult, string, error) {
 	start := time.Now()
+	if apiFormat == "" {
+		apiFormat = "chat"
+	}
 
 	var bodyMap map[string]any
 	if err := json.Unmarshal(bodyBytes, &bodyMap); err != nil {
@@ -183,58 +187,76 @@ func (pe *PipelineExecutor) Execute(
 
 		switch p.ID {
 		case "secretguard":
-			msgs, ok := toMapSlice(currentBody["messages"])
-			if !ok {
-				err = fmt.Errorf("invalid messages format")
+			if apiFormat == "messages" {
+				modifiedBody, skipped, rejected, rejectMsg, err = builtin.ApplySecretGuardToMessages(currentBody, item.MergedSettings)
 			} else {
-				var newMsgs []map[string]any
-				newMsgs, skipped, rejected, rejectMsg, err = builtin.ApplySecretGuard(msgs, item.MergedSettings)
-				if err == nil && !skipped && !rejected {
-					cloned := make(map[string]any, len(currentBody))
-					for k, v := range currentBody {
-						cloned[k] = v
+				msgs, ok := toMapSlice(currentBody["messages"])
+				if !ok {
+					err = fmt.Errorf("invalid messages format")
+				} else {
+					var newMsgs []map[string]any
+					newMsgs, skipped, rejected, rejectMsg, err = builtin.ApplySecretGuard(msgs, item.MergedSettings)
+					if err == nil && !skipped && !rejected {
+						cloned := make(map[string]any, len(currentBody))
+						for k, v := range currentBody {
+							cloned[k] = v
+						}
+						cloned["messages"] = toAnySlice(newMsgs)
+						modifiedBody = cloned
 					}
-					cloned["messages"] = toAnySlice(newMsgs)
-					modifiedBody = cloned
 				}
 			}
 		case "headroom":
-			modifiedBody, tokensSaved, skipped, skipReason, err = builtin.ApplyHeadroom(pCtx, pe.httpClient, currentBody, item.MergedSettings)
-		case "caveman":
-			msgs, ok := toMapSlice(currentBody["messages"])
-			if !ok {
-				err = fmt.Errorf("invalid messages format")
+			if apiFormat == "messages" {
+				skipped = true
+				skipReason = "unsupported_format"
 			} else {
-				var newMsgs []map[string]any
-				newMsgs, skipped, skipReason, tokensOverhead, err = builtin.ApplyCaveman(msgs, item.MergedSettings)
-				if err == nil && !skipped {
-					cloned := make(map[string]any, len(currentBody))
-					for k, v := range currentBody {
-						cloned[k] = v
+				modifiedBody, tokensSaved, skipped, skipReason, err = builtin.ApplyHeadroom(pCtx, pe.httpClient, currentBody, item.MergedSettings)
+			}
+		case "caveman":
+			if apiFormat == "messages" {
+				modifiedBody, skipped, skipReason, tokensOverhead, err = builtin.ApplyCavemanToMessages(currentBody, item.MergedSettings)
+			} else {
+				msgs, ok := toMapSlice(currentBody["messages"])
+				if !ok {
+					err = fmt.Errorf("invalid messages format")
+				} else {
+					var newMsgs []map[string]any
+					newMsgs, skipped, skipReason, tokensOverhead, err = builtin.ApplyCaveman(msgs, item.MergedSettings)
+					if err == nil && !skipped {
+						cloned := make(map[string]any, len(currentBody))
+						for k, v := range currentBody {
+							cloned[k] = v
+						}
+						cloned["messages"] = toAnySlice(newMsgs)
+						modifiedBody = cloned
 					}
-					cloned["messages"] = toAnySlice(newMsgs)
-					modifiedBody = cloned
 				}
 			}
 		case "ponytail":
-			msgs, ok := toMapSlice(currentBody["messages"])
-			if !ok {
-				err = fmt.Errorf("invalid messages format")
+			if apiFormat == "messages" {
+				modifiedBody, skipped, skipReason, tokensOverhead, err = builtin.ApplyPonytailToMessages(currentBody, item.MergedSettings)
 			} else {
-				var newMsgs []map[string]any
-				newMsgs, skipped, skipReason, tokensOverhead, err = builtin.ApplyPonytail(msgs, item.MergedSettings)
-				if err == nil && !skipped {
-					cloned := make(map[string]any, len(currentBody))
-					for k, v := range currentBody {
-						cloned[k] = v
+				msgs, ok := toMapSlice(currentBody["messages"])
+				if !ok {
+					err = fmt.Errorf("invalid messages format")
+				} else {
+					var newMsgs []map[string]any
+					newMsgs, skipped, skipReason, tokensOverhead, err = builtin.ApplyPonytail(msgs, item.MergedSettings)
+					if err == nil && !skipped {
+						cloned := make(map[string]any, len(currentBody))
+						for k, v := range currentBody {
+							cloned[k] = v
+						}
+						cloned["messages"] = toAnySlice(newMsgs)
+						modifiedBody = cloned
 					}
-					cloned["messages"] = toAnySlice(newMsgs)
-					modifiedBody = cloned
 				}
 			}
 		default:
 			// HTTP Plugin
 			pluginCtx := HTTPPluginContext{
+				APIFormat:  apiFormat,
 				APIKeyName: apiKeyName,
 				Model:      model,
 				Provider:   providerID,
