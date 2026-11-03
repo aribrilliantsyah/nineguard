@@ -1231,7 +1231,12 @@ table.table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .pt-copy-text code { font-size: 12.5px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; user-select: all; }
 .pt-copy-text small { font-size: 10.5px; color: var(--muted); }
 .pt-pools { display: flex; flex-direction: column; gap: 16px; margin-top: 14px; }
+.pt-pool { padding: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+.pt-pool.is-warn { border-color: color-mix(in srgb, var(--lv-warn) 50%, var(--border)); }
+.pt-pool.is-err { border-color: color-mix(in srgb, var(--danger) 50%, var(--border)); }
 .pt-pool-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 12px; }
+.pt-pool-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pt-pool-name strong { overflow-wrap: anywhere; }
 .pt-buckets { display: flex; flex-direction: column; gap: 10px; }
 .pt-filter { width: 100%; margin-bottom: 8px; }
 .pt-models { display: flex; flex-direction: column; }

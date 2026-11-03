@@ -16,7 +16,8 @@ import {
 import { volumeChart } from './chart.js';
 import { formatCost } from './costhelpers.js';
 import { formatTokensCompact } from './quotahelpers.js';
-import { isPercentBucket, remainingLabel, observationLabel, telemetryStateLabel, sdkMeter } from './upstreamtelemetry.js';
+import { isPercentBucket, remainingLabel, observationLabel, telemetryStateLabel, sdkMeter, remainingTone } from './upstreamtelemetry.js';
+import { iconTile, subProviderIconURL } from './providericons.js';
 import { formatResetIn, shortModel } from './modelquotas.js';
 
 const root = document.getElementById('portal-app');
@@ -671,9 +672,10 @@ function renderSharedCapacity() {
     h('p', { class: 'pt-sub' }, 'Upstream limits shared by every key. When one runs out, requests fail even if your own budget is left.'),
     h('ul', { class: 'pt-pools' }, ...pools.map((pool) => {
       const buckets = (pool.buckets || []).filter((b) => isPercentBucket(b) || b.is_credit_balance || b.total > 0);
-      return h('li', null,
+      const name = pool.family || pool.provider;
+      return h('li', { class: `pt-pool${pool.status === 'error' ? ' is-err' : pool.status === 'degraded' ? ' is-warn' : ''}` },
         h('div', { class: 'pt-pool-head' },
-          h('strong', null, pool.family || pool.provider),
+          h('span', { class: 'pt-pool-name' }, iconTile({ img: subProviderIconURL(pool.sub_provider) }, name, 'sm'), h('strong', null, name)),
           pool.status && pool.status !== 'ok' ? h('span', { class: `badge ${pool.status === 'degraded' ? 'warn' : 'err'}` }, pool.status) : null
         ),
         pool.source === 'sdk' ? h('p', { class: 'pt-fine' }, 'Most constrained observed account; not pooled capacity. Other connected accounts may still have room.') : null,
@@ -692,13 +694,13 @@ function renderSharedCapacity() {
                 return h('li', null, h('div', { class: 'pt-mq-head' }, h('span', null, b.name), h('span', { class: 'pt-num' }, `$${(b.remaining / 100).toFixed(2)} credit`)));
               }
               const left = Math.max(0, Math.min(100, b.remaining_percentage || 0));
-              const tone = left < 30 ? 'err' : left <= 70 ? 'warn' : 'ok';
+              const tone = remainingTone(left);
               return h('li', null,
                 h('div', { class: 'pt-mq-head' },
                   h('span', null, b.name),
-                  h('span', { class: 'pt-num' }, `${left}% left`)
+                  h('span', { class: `pt-num tone-${tone}` }, left ? `${left}% left` : 'Limit reached')
                 ),
-                meter(100 - left, tone, `${b.name}: ${left}% left`),
+                meter(left, tone, `${b.name}: ${left}% left`),
                 b.reset_at ? h('div', { class: 'pt-mq-foot' }, h('span', null, `resets in ${formatResetIn(b.reset_at)}`)) : null
               );
             }))
