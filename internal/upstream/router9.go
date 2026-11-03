@@ -392,9 +392,17 @@ func cleanBucketName(key, displayName string) string {
 		return displayName
 	}
 	switch key {
-	case "five_hour", "session", "gemini_session", "claude_gpt_session":
+	case "gemini_session":
+		return "Gemini (5h)"
+	case "gemini_weekly":
+		return "Gemini (Weekly)"
+	case "claude_gpt_session":
+		return "Claude & GPT (5h)"
+	case "claude_gpt_weekly":
+		return "Claude & GPT (Weekly)"
+	case "five_hour", "session":
 		return "5h Session"
-	case "seven_day", "weekly", "gemini_weekly", "claude_gpt_weekly":
+	case "seven_day", "weekly":
 		return "Weekly Limit"
 	default:
 		// Replace underscores and title case
