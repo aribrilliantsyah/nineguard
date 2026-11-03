@@ -1230,14 +1230,15 @@ table.table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .pt-copy-text span { font-size: 11px; color: var(--muted); }
 .pt-copy-text code { font-size: 12.5px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; user-select: all; }
 .pt-copy-text small { font-size: 10.5px; color: var(--muted); }
-.pt-pools { display: flex; flex-direction: column; gap: 16px; margin-top: 14px; }
+.pt-pools { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
 .pt-pool { padding: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
 .pt-pool.is-warn { border-color: color-mix(in srgb, var(--lv-warn) 50%, var(--border)); }
 .pt-pool.is-err { border-color: color-mix(in srgb, var(--danger) 50%, var(--border)); }
 .pt-pool-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 12px; }
 .pt-pool-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .pt-pool-name strong { overflow-wrap: anywhere; }
-.pt-buckets { display: flex; flex-direction: column; gap: 10px; }
+.pt-buckets { display: flex; flex-direction: column; gap: 8px; }
+.pt-reset { color: var(--muted); font-weight: 400; }
 .pt-filter { width: 100%; margin-bottom: 8px; }
 .pt-models { display: flex; flex-direction: column; }
 .pt-models li + li { border-top: 1px solid var(--border); }
@@ -1250,6 +1251,7 @@ table.table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .pt-models button:hover { color: var(--accent-text); }
 .pt-models button:focus-visible, .pt-copy .icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 4px; }
 .pt-more { margin-top: 8px; }
+.pt-pool .pt-more { width: 100%; }
 .pt-key-row { display: flex; gap: 8px; }
 .pt-key-row .input { flex: 1; height: 38px; font-size: 13px; }
 .pt-key-row .btn { height: 38px; width: 40px; justify-content: center; }

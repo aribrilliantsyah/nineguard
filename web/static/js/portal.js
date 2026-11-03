@@ -16,7 +16,7 @@ import {
 import { volumeChart } from './chart.js';
 import { formatCost } from './costhelpers.js';
 import { formatTokensCompact } from './quotahelpers.js';
-import { isPercentBucket, remainingLabel, observationLabel, telemetryStateLabel, sdkMeter, remainingTone } from './upstreamtelemetry.js';
+import { isPercentBucket, remainingLabel, observationLabel, telemetryStateLabel, sdkMeter, remainingTone, splitPoolBuckets } from './upstreamtelemetry.js';
 import { iconTile, subProviderIconURL } from './providericons.js';
 import { formatResetIn, shortModel } from './modelquotas.js';
 
@@ -34,6 +34,7 @@ let loading = false;
 let errorMsg = '';
 let modelFilter = '';
 let showAllModels = false;
+const expandedPools = new Set();
 
 async function fetchJSON(url, key) {
   const resp = await fetch(url, { headers: { ...buildHeaders(key), 'Accept': 'application/json' } });
@@ -663,6 +664,38 @@ function renderConnect() {
   );
 }
 
+function renderSharedBucket(b) {
+  if (isPercentBucket(b)) {
+    const m = sdkMeter(b);
+    return h('li', { class: m.dim ? 'is-dim' : null },
+      h('div', { class: 'pt-mq-head' },
+        h('span', null, b.name),
+        h('span', { class: `pt-num tone-${m.tone}` },
+          remainingLabel(b),
+          b.reset_at ? h('span', { class: 'pt-reset', title: `resets in ${formatResetIn(b.reset_at)}` }, ` · ${formatResetIn(b.reset_at)}`) : null
+        )
+      ),
+      meter(m.pct, m.known ? m.tone : 'muted', `${b.name}: ${remainingLabel(b)}`),
+      m.dim ? h('p', { class: 'pt-fine' }, `${observationLabel(b.observed_at, b.observation_state)}${b.incomplete ? ' · incomplete observations' : ''}`) : null
+    );
+  }
+  if (b.is_credit_balance) {
+    return h('li', null, h('div', { class: 'pt-mq-head' }, h('span', null, b.name), h('span', { class: 'pt-num' }, `$${(b.remaining / 100).toFixed(2)} credit`)));
+  }
+  const left = Math.max(0, Math.min(100, b.remaining_percentage || 0));
+  const tone = remainingTone(left);
+  return h('li', null,
+    h('div', { class: 'pt-mq-head' },
+      h('span', null, b.name),
+      h('span', { class: `pt-num tone-${tone}` },
+        left ? `${left}% left` : 'Limit reached',
+        b.reset_at ? h('span', { class: 'pt-reset', title: `resets in ${formatResetIn(b.reset_at)}` }, ` · ${formatResetIn(b.reset_at)}`) : null
+      )
+    ),
+    meter(left, tone, `${b.name}: ${left}% left`)
+  );
+}
+
 function renderSharedCapacity() {
   const pools = (quotaData && quotaData.upstream_pools) || [];
   if (!pools.length) return null;
@@ -673,38 +706,61 @@ function renderSharedCapacity() {
     h('ul', { class: 'pt-pools' }, ...pools.map((pool) => {
       const buckets = (pool.buckets || []).filter((b) => isPercentBucket(b) || b.is_credit_balance || b.total > 0);
       const name = pool.family || pool.provider;
+      const poolKey = `${pool.provider}|${pool.sub_provider}|${pool.family}`;
+
+      if (!buckets.length) {
+        return h('li', { class: `pt-pool${pool.status === 'error' ? ' is-err' : pool.status === 'degraded' ? ' is-warn' : ''}` },
+          h('div', { class: 'pt-pool-head' },
+            h('span', { class: 'pt-pool-name' }, iconTile({ img: subProviderIconURL(pool.sub_provider) }, name, 'sm'), h('strong', null, name)),
+            pool.status && pool.status !== 'ok' ? h('span', { class: `badge ${pool.status === 'degraded' ? 'warn' : 'err'}` }, pool.status) : null
+          ),
+          pool.source === 'sdk' ? h('p', { class: 'pt-fine' }, 'Most constrained observed account; not pooled capacity. Other connected accounts may still have room.') : null,
+          h('p', { class: 'pt-fine' }, pool.source === 'sdk' ? telemetryStateLabel(pool.observation_state) : 'No limits reported.')
+        );
+      }
+
+      const { shown, hidden, minHiddenLeft } = splitPoolBuckets(buckets);
+      const allBuckets = [...shown, ...hidden];
+      const listEl = h('ul', { class: 'pt-buckets' });
+      let moreBtn = null;
+
+      function paintBuckets() {
+        const isExpanded = expandedPools.has(poolKey);
+        const displayBuckets = isExpanded ? allBuckets : shown;
+        listEl.replaceChildren(...displayBuckets.map(renderSharedBucket));
+        if (moreBtn) {
+          const suffix = minHiddenLeft === 0
+            ? ' · some at limit'
+            : minHiddenLeft != null
+              ? ` · all ≥${minHiddenLeft}% left`
+              : '';
+          const collapsedText = `+${hidden.length} more${suffix}`;
+          moreBtn.textContent = isExpanded ? 'Show fewer' : collapsedText;
+        }
+      }
+
+      if (hidden.length > 0) {
+        moreBtn = h('button', { class: 'btn btn-sm pt-more', type: 'button' });
+        moreBtn.addEventListener('click', () => {
+          if (expandedPools.has(poolKey)) {
+            expandedPools.delete(poolKey);
+          } else {
+            expandedPools.add(poolKey);
+          }
+          paintBuckets();
+        });
+      }
+
+      paintBuckets();
+
       return h('li', { class: `pt-pool${pool.status === 'error' ? ' is-err' : pool.status === 'degraded' ? ' is-warn' : ''}` },
         h('div', { class: 'pt-pool-head' },
           h('span', { class: 'pt-pool-name' }, iconTile({ img: subProviderIconURL(pool.sub_provider) }, name, 'sm'), h('strong', null, name)),
           pool.status && pool.status !== 'ok' ? h('span', { class: `badge ${pool.status === 'degraded' ? 'warn' : 'err'}` }, pool.status) : null
         ),
         pool.source === 'sdk' ? h('p', { class: 'pt-fine' }, 'Most constrained observed account; not pooled capacity. Other connected accounts may still have room.') : null,
-        buckets.length
-          ? h('ul', { class: 'pt-buckets' }, ...buckets.map((b) => {
-              if (isPercentBucket(b)) {
-                const m = sdkMeter(b);
-                return h('li', { class: m.dim ? 'is-dim' : null },
-                  h('div', { class: 'pt-mq-head' }, h('span', null, b.name), h('span', { class: `pt-num tone-${m.tone}` }, remainingLabel(b))),
-                  meter(m.pct, m.known ? m.tone : 'muted', `${b.name}: ${remainingLabel(b)}`),
-                  h('p', { class: 'pt-fine' }, `${observationLabel(b.observed_at, b.observation_state)}${b.incomplete ? ' · incomplete observations' : ''}`),
-                  b.reset_at ? h('div', { class: 'pt-mq-foot' }, `resets in ${formatResetIn(b.reset_at)}`) : null
-                );
-              }
-              if (b.is_credit_balance) {
-                return h('li', null, h('div', { class: 'pt-mq-head' }, h('span', null, b.name), h('span', { class: 'pt-num' }, `$${(b.remaining / 100).toFixed(2)} credit`)));
-              }
-              const left = Math.max(0, Math.min(100, b.remaining_percentage || 0));
-              const tone = remainingTone(left);
-              return h('li', null,
-                h('div', { class: 'pt-mq-head' },
-                  h('span', null, b.name),
-                  h('span', { class: `pt-num tone-${tone}` }, left ? `${left}% left` : 'Limit reached')
-                ),
-                meter(left, tone, `${b.name}: ${left}% left`),
-                b.reset_at ? h('div', { class: 'pt-mq-foot' }, h('span', null, `resets in ${formatResetIn(b.reset_at)}`)) : null
-              );
-            }))
-          : h('p', { class: 'pt-fine' }, pool.source === 'sdk' ? telemetryStateLabel(pool.observation_state) : 'No limits reported.')
+        listEl,
+        moreBtn
       );
     }))
   );
