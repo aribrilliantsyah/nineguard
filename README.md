@@ -270,7 +270,7 @@ docker run -d \
   nineguard:latest
 ```
 
-#### Docker Compose (NineGuard + 9router + Billion Context Stack)
+#### Docker Compose (NineGuard + 9router Stack)
 
 ```bash
 # 1. Prepare environment variables
@@ -281,14 +281,13 @@ cp .env.example .env
 docker compose up -d --build
 
 # 3. Access from local machine via SSH tunnel
-ssh -L 8080:localhost:8080 -L 20128:localhost:20128 -L 8788:localhost:8788 user@VM_IP
+ssh -L 8080:localhost:8080 -L 20128:localhost:20128 user@VM_IP
 ```
 
 * NineGuard: `http://localhost:8080/` (set up admin account on first visit).
 * 9router: `http://localhost:20128/dashboard` — issue your API keys here.
 * Register 9router in NineGuard (**Gateway → Providers**) using `http://9router:20128/v1` and the 9router API key.
-* Billion Context (`bili`): Runs ACP proxy on port 8787 in Docker (exposed at `127.0.0.1:8788` on the host). In NineGuard (**Plugins → Billion Context**), set endpoint URL to `http://bili:8787` to enable incremental, prefix-cache friendly history compression for OpenAI chat and Anthropic messages.
-* All services bind strictly to `127.0.0.1`. For remote public access, place them behind a TLS reverse proxy (Caddy/Nginx).
+* Both services bind strictly to `127.0.0.1`. For remote public access, place them behind a TLS reverse proxy (Caddy/Nginx).
 
 ---
 

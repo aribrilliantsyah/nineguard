@@ -41,28 +41,6 @@ services:
       API_KEY_SECRET: ${NINEROUTER_API_KEY_SECRET:?set NINEROUTER_API_KEY_SECRET in .env}
       MACHINE_ID_SALT: ${NINEROUTER_MACHINE_ID_SALT:?set NINEROUTER_MACHINE_ID_SALT in .env}
 
-  bili:
-    image: ghcr.io/darktama/billion-context:latest
-    build:
-      context: ./deploy/billion-context
-    container_name: bili
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8788:8787"
-    volumes:
-      - bili-config:/root/.config/billion-context
-      - bili-share:/root/.local/share/billion-context
-      - bili-cache:/root/.cache/billion-context
-      - bili-state:/root/.local/state/billion-context
-    environment:
-      ACP_AUTO_UPDATE: "0"
-      BILI_ALLOW_PRIVATE_HTTP_PROVIDERS: "1"
-      BILI_TUNNEL_ALLOWED_HOSTS: "9router:20128"
-
 volumes:
   nineguard-data:
   9router-data:
-  bili-config:
-  bili-share:
-  bili-cache:
-  bili-state:
