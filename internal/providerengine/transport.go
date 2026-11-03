@@ -73,7 +73,7 @@ func (e *Engine) RoundTrip(ctx context.Context, providerID, accountID string, re
 	out.Body = io.NopCloser(bytes.NewReader(raw))
 	out.ContentLength = int64(len(raw))
 	out.Header = out.Header.Clone()
-	for _, key := range []string{"Authorization", "X-Api-Key", "Cookie", "Accept-Encoding", sessionHeader, "X-NineGuard-Hop", "X-NineGuard-Trace", "X-NineGuard-Plugins-Applied"} {
+	for _, key := range []string{"Authorization", "X-Api-Key", "Cookie", "Accept-Encoding", sessionHeader, "X-NineGuard-Hop", "X-NineGuard-Trace", "X-NineGuard-Plugins-Applied", "X-App"} {
 		out.Header.Del(key)
 	}
 	out.Header.Set("Authorization", "Bearer "+e.secret)

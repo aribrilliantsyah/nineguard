@@ -16,6 +16,9 @@ func TestOAuthBufferedAndStreamUsage(t *testing.T) {
 		if r.Header.Get("Cookie") != "" {
 			t.Error("browser cookie leaked")
 		}
+		if r.Header.Get("X-App") != "" {
+			t.Error("client X-App header leaked to SDK upstream")
+		}
 		var b struct {
 			Model  string `json:"model"`
 			Stream bool   `json:"stream"`
@@ -59,6 +62,7 @@ func TestOAuthBufferedAndStreamUsage(t *testing.T) {
 		req := httptest.NewRequest("POST", "http://upstream.invalid/v1/messages", strings.NewReader(string(raw)))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Cookie", "nineguard_session=fake")
+		req.Header.Set("X-App", "cli")
 		resp, err := e.RoundTrip(ctx, "p", "", req)
 		if err != nil {
 			t.Fatal(err)

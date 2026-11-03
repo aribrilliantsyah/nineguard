@@ -57,6 +57,10 @@ func TestProxy_HopByHopHeaders_Integration(t *testing.T) {
 		if val := r.Header.Get("X-Custom-Hop"); val != "" {
 			t.Errorf("upstream received X-Custom-Hop header (listed in Connection): %q", val)
 		}
+		// Verify client identity header is stripped (prevents upstream SDK fingerprint mismatch)
+		if val := r.Header.Get("X-App"); val != "" {
+			t.Errorf("upstream received X-App header: %q", val)
+		}
 
 		// Verify upstream DOES receive end-to-end headers
 		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
@@ -106,6 +110,7 @@ func TestProxy_HopByHopHeaders_Integration(t *testing.T) {
 	req.Header.Set("Keep-Alive", "timeout=5")
 	req.Header.Set("Upgrade", "h2c")
 	req.Header.Set("X-Custom-Hop", "client-secret-token")
+	req.Header.Set("X-App", "cli")
 
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
@@ -133,6 +138,9 @@ func TestProxy_HopByHopHeaders_Integration(t *testing.T) {
 	}
 	if headers.Get("X-Custom-Hop") != "" {
 		t.Errorf("upstream received X-Custom-Hop: %q", headers.Get("X-Custom-Hop"))
+	}
+	if headers.Get("X-App") != "" {
+		t.Errorf("upstream received X-App: %q", headers.Get("X-App"))
 	}
 
 	// Verify client response headers have upstream hop-by-hop headers removed

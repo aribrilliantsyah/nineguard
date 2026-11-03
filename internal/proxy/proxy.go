@@ -625,6 +625,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	RemoveHopByHopHeaders(outReq.Header)
 	outReq.Close = false
 	outReq.Header.Del("X-NineGuard-Plugins") // Never forward bypass header upstream
+	outReq.Header.Del("X-App") // Strip client identity header; leaking it causes upstream SDK fingerprint mismatch (429)
 	if upstreamAppliedHeader != "" {
 		outReq.Header.Set("X-NineGuard-Plugins-Applied", upstreamAppliedHeader)
 	} else {
