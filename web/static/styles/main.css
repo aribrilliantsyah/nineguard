@@ -2386,7 +2386,7 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 .uq-card.is-allowance { background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--panel); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
 .uq-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; min-width: 0; }
 .uq-ttl { flex: 1 1 120px; min-width: 0; }
-.uq-card-head h3 { margin: 0; font-size: 13.5px; font-weight: 700; overflow-wrap: anywhere; }
+.uq-card-head h3 { margin: 0; font-size: 13.5px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .uq-sub { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; color: var(--muted); }
 .uq-side { display: flex; align-items: center; gap: 6px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
 .uq-card .badge .icon { width: 11px; height: 11px; }
