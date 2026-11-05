@@ -169,39 +169,42 @@ function setProviderOpen(p, open) {
   try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(all)); } catch { /* storage unavailable */ }
 }
 
-// Group-by choice: 'model' (one card per model family) or 'account' (one card per connection).
+// Group-by choice: 'account' (one card per connection), 'provider' (one card per sub-provider), or 'model' (one card per model family).
 const GROUP_KEY = 'ng.upstream.groupBy';
+const VALID_GROUP_BY = new Set(['account', 'provider', 'model']);
 export function loadGroupBy() {
-  try { return localStorage.getItem(GROUP_KEY) === 'account' ? 'account' : 'model'; } catch { return 'model'; }
+  try {
+    const val = localStorage.getItem(GROUP_KEY);
+    return VALID_GROUP_BY.has(val) ? val : 'account';
+  } catch {
+    return 'account';
+  }
 }
 function saveGroupBy(v) {
   try { localStorage.setItem(GROUP_KEY, v); } catch { /* storage unavailable */ }
 }
 
 // ---- Model families -------------------------------------------------------
-export const FAMILY_ORDER = ['allowance', 'claude', 'gemini', 'gpt', 'image', 'other', 'credit'];
+export const FAMILY_ORDER = ['allowance', 'claude', 'gemini', 'gpt', 'other', 'credit'];
 export const FAMILY_META = {
   allowance: { title: 'Key allowance', spec: { ic: 'shield' } },
   claude: { title: 'Claude', spec: { img: '/provider-icons/claude.svg' } },
   gemini: { title: 'Gemini', spec: { img: '/provider-icons/gemini.svg' } },
   gpt: { title: 'GPT / OpenAI', spec: { img: '/provider-icons/openai.svg' } },
-  image: { title: 'Image', spec: { ic: 'image' } },
   other: { title: 'Other / account-wide windows', spec: { ic: 'clock' } },
   credit: { title: 'Credits', spec: { ic: 'dollar-sign' } },
 };
 // Single-vendor connections may claim generic windows ("5h Session"); antigravity/github host several vendors, so they do not.
 const PROVIDER_FAMILY = { claude: 'claude', anthropic: 'claude', codex: 'gpt', openai: 'gpt', gemini: 'gemini', google: 'gemini', 'gemini-cli': 'gemini' };
 
-// Family key for one bucket of a connection. Order matters: "Gemini 3 Pro Image" is an image bucket,
-// and 9router's "Claude & GPT (5h)" pools count as Claude.
+// Family key for one bucket of a connection. Order matters: 9router's "Claude & GPT (5h)" pools count as Claude.
 export function bucketFamily(b, conn) {
   if (b?.is_credit_balance) return 'credit';
   const name = String(b?.name || '');
   if (/^key allowance/i.test(name)) return 'allowance';
   const text = `${b?.scope && b.scope !== 'account' ? b.scope : ''} ${name}`; // SDK per-model buckets carry the model id in scope
-  if (/image|imagen/i.test(text)) return 'image';
   if (/claude|sonnet|opus|haiku/i.test(text)) return 'claude';
-  if (/gemini/i.test(text)) return 'gemini';
+  if (/gemini|imagen/i.test(text)) return 'gemini';
   if (/gpt|codex|\bo[134]\b|openai/i.test(text)) return 'gpt';
   return PROVIDER_FAMILY[String(conn?.provider || '').toLowerCase()] || 'other';
 }
@@ -220,6 +223,30 @@ export function groupProviderByFamily(provider) {
     for (const [family, bs] of Object.entries(per)) (byFamily[family] ||= []).push({ conn, buckets: bs });
   }
   const cards = FAMILY_ORDER.filter((f) => byFamily[f]).map((family) => ({ family, groups: byFamily[family] }));
+  return { cards, attention };
+}
+
+// Provider -> { cards: [{ subProvider, groups: [{ conn, buckets }] }], attention: [conn] }.
+// Errored or empty connections also land in `attention` (errored ones keep their buckets in the sub-provider cards).
+export function groupProviderBySubProvider(provider) {
+  const cards = [];
+  const bySubProvider = new Map();
+  const attention = [];
+  for (const conn of (provider?.connections || [])) {
+    if (!conn) continue;
+    const buckets = Array.isArray(conn.buckets) ? conn.buckets.filter(Boolean) : [];
+    if (conn.status === 'error' || (conn.status === 'degraded' && conn.error_msg) || !buckets.length) attention.push(conn);
+    if (!buckets.length) continue;
+    const subProvider = String(conn.provider || '').toLowerCase();
+    let entry = bySubProvider.get(subProvider);
+    if (!entry) {
+      entry = { subProvider, groups: [] };
+      bySubProvider.set(subProvider, entry);
+      cards.push(entry);
+    }
+    const sorted = [...buckets].sort((a, b) => FAMILY_ORDER.indexOf(bucketFamily(a, conn)) - FAMILY_ORDER.indexOf(bucketFamily(b, conn)));
+    entry.groups.push({ conn, buckets: sorted });
+  }
   return { cards, attention };
 }
 
@@ -281,7 +308,12 @@ export function renderUpstreamQuotas(container) {
     h('span', { class: 'muted', style: { fontSize: '11.5px' } }, 'Applies to the dashboard and the agent /quota command.')
   );
   const groupBtns = {};
-  for (const [value, label] of [['model', 'Model'], ['account', 'Account']]) {
+  const groupOptions = [
+    ['account', 'Account'],
+    ['provider', 'Provider'],
+    ['model', 'Model'],
+  ];
+  for (const [value, label] of groupOptions) {
     groupBtns[value] = h('button', {
       type: 'button', 'aria-pressed': String(groupBy === value),
       onclick: () => {
@@ -297,7 +329,9 @@ export function renderUpstreamQuotas(container) {
     syncBox,
     h('div', { class: 'uq-toolbar-group' },
       h('span', { class: 'muted' }, 'Group by'),
-      h('div', { class: 'segmented uq-seg', role: 'group', 'aria-label': 'Group by' }, groupBtns.model, groupBtns.account)
+      h('div', { class: 'segmented uq-seg', role: 'group', 'aria-label': 'Group by' },
+        groupBtns.account, groupBtns.provider, groupBtns.model
+      )
     )
   );
   container.replaceChildren(toolbar, content);
@@ -401,7 +435,7 @@ export function renderUpstreamQuotas(container) {
     return h('div', { class: `uq-row${m.dim ? ' dim' : ''}${m.limit ? ' limit' : ''}` },
       h('div', { class: 'uq-row-top' },
         h('span', { class: 'uq-row-name', title: b.name },
-          famIcon ? iconTile(FAMILY_META[bucketFamily(b, conn)].spec, '', 'sm') : null,
+          famIcon ? iconTile((FAMILY_META[bucketFamily(b, conn)] || FAMILY_META.other).spec, '', 'sm') : null,
           b.warning ? h('span', { class: 'uq-warn', title: 'Depletion warning (<25%)' }, icon('alert')) : null,
           h('span', { class: 'uq-t' }, name),
           period ? h('span', { class: 'badge sm' }, period) : null,
@@ -501,6 +535,38 @@ export function renderUpstreamQuotas(container) {
         errBanner(c) || emptyNote(c))));
   }
 
+  const subProviderTitle = (id) => {
+    const s = String(id || '');
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
+  };
+
+  function subProviderCard({ subProvider, groups }, provider, shownReset) {
+    const title = subProviderTitle(subProvider);
+    const all = groups.flatMap((g) => g.buckets);
+    const w = worstOf(all);
+    const chip = w.limit ? h('span', { class: 'badge err' }, icon('alert'), 'Limit reached')
+      : w.low != null && w.low < 30 ? h('span', { class: 'badge warn' }, `lowest ${Math.round(w.low)}%`) : null;
+    const allowance = groups.length > 0 && groups.every((g) => isAllowanceConn(g.conn));
+    const cardIcon = allowance ? iconTile({ ic: 'shield' }, title) : subProviderTile(subProvider, title);
+    return h('article', { class: `uq-card${cardState(w)}${allowance ? ' is-allowance' : ''}` },
+      h('div', { class: 'uq-card-head' }, cardIcon,
+        h('div', { class: 'uq-ttl' },
+          h('h3', null, title),
+          h('div', { class: 'uq-sub' },
+            `${groups.length} ${groups.length === 1 ? 'account' : 'accounts'} · ${all.length} ${all.length === 1 ? 'limit' : 'limits'}`,
+            allowance ? h('span', { class: 'badge sm ok' }, 'admin limit') : null)),
+        h('div', { class: 'uq-side' }, chip)),
+      groups.map((g) => accountGroup(g, provider, shownReset)));
+  }
+
+  function cardsByProvider(p) {
+    const { cards, attention } = groupProviderBySubProvider(p);
+    const shownReset = new Set();
+    const out = cards.map((c) => subProviderCard(c, p, shownReset));
+    if (attention.length) out.push(attentionCard(attention));
+    return out;
+  }
+
   function cardsByModel(p) {
     const { cards, attention } = groupProviderByFamily(p);
     const shownReset = new Set();
@@ -580,7 +646,10 @@ export function renderUpstreamQuotas(container) {
       isUnsupported
         ? h('p', { class: 'uq-empty-note' }, 'This provider connects directly to an LLM without upstream limit telemetry. Switch protocol in Providers menu to enable.')
         : conns.length
-        ? h('div', { class: 'uq-grid' }, groupBy === 'account' ? conns.map((c) => connectionCard(c, p)) : cardsByModel(p))
+        ? h('div', { class: 'uq-grid' },
+            groupBy === 'account' ? conns.map((c) => connectionCard(c, p))
+            : groupBy === 'provider' ? cardsByProvider(p)
+            : cardsByModel(p))
         : h('p', { class: 'uq-empty-note' }, sdk ? 'No connected accounts. Connect an account in Providers.' : 'No account connections found on upstream.')
     );
     const setOpen = (next) => {

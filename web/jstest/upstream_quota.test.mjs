@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { upstreamBarTone, upstreamAlertRows, upstreamNeedsAttention, upstreamProviderSummary, bucketFamily, groupProviderByFamily, bucketMeter, splitPeriod, FAMILY_ORDER } from '../static/js/views/upstream_quotas.js';
+import { upstreamBarTone, upstreamAlertRows, upstreamNeedsAttention, upstreamProviderSummary, bucketFamily, groupProviderByFamily, groupProviderBySubProvider, loadGroupBy, bucketMeter, splitPeriod, FAMILY_ORDER } from '../static/js/views/upstream_quotas.js';
 import { subProviderIconURL, initials } from '../static/js/providericons.js';
 
 test('upstreamBarTone assigns correct status color tones', () => {
@@ -370,8 +370,9 @@ test('bucketFamily classifies buckets by name, scope and connection provider', (
   assert.equal(bucketFamily({ name: 'Claude & GPT (Weekly)' }, ag), 'claude');
   assert.equal(bucketFamily({ name: 'Gemini (Weekly)' }, ag), 'gemini');
   assert.equal(bucketFamily({ name: 'Gemini (5h)' }, ag), 'gemini');
-  assert.equal(bucketFamily({ name: 'Gemini 3 Pro Image' }, ag), 'image');
-  assert.equal(bucketFamily({ name: 'Imagen 4' }, ag), 'image');
+  assert.equal(bucketFamily({ name: 'Gemini 3 Pro Image' }, ag), 'gemini');
+  assert.equal(bucketFamily({ name: 'Imagen 4' }, ag), 'gemini');
+  assert.equal(bucketFamily({ name: 'gpt-image-1' }, ag), 'gpt');
   assert.equal(bucketFamily({ name: '5h Session' }, { provider: 'codex' }), 'gpt');
   assert.equal(bucketFamily({ name: '5h Session' }, { provider: 'claude' }), 'claude');
   assert.equal(bucketFamily({ name: '5h Session' }, { provider: 'gemini-cli' }), 'gemini');
@@ -398,11 +399,11 @@ test('groupProviderByFamily builds family cards, attention list and keeps accoun
     { connection_id: 'e', provider: 'codex', status: 'ok', buckets: [bk('5h Session')] },
   ] };
   const { cards, attention } = groupProviderByFamily(provider);
-  assert.deepEqual(cards.map((c) => c.family), ['claude', 'gemini', 'gpt', 'image', 'credit']);
+  assert.deepEqual(cards.map((c) => c.family), ['claude', 'gemini', 'gpt', 'credit']);
   assert.deepEqual(cards.map((c) => c.family), FAMILY_ORDER.filter((f) => cards.some((c) => c.family === f)));
   const gemini = cards.find((c) => c.family === 'gemini');
   assert.deepEqual(gemini.groups.map((g) => g.conn.connection_id), ['a', 'b']);
-  assert.equal(gemini.groups[0].buckets.length, 1);
+  assert.equal(gemini.groups[0].buckets.length, 2);
   assert.deepEqual(attention.map((c) => c.connection_id), ['c', 'd']);
 
   assert.deepEqual(groupProviderByFamily({ connections: [] }), { cards: [], attention: [] });
@@ -448,4 +449,55 @@ test('subProviderIconURL maps known providers to bundled files and unknown to em
   assert.equal(subProviderIconURL(undefined), '');
   assert.equal(initials('alice@acme.dev'), 'AL');
   assert.equal(initials(''), '?');
+});
+
+test('groupProviderBySubProvider builds sub-provider cards and attention list in first-appearance order', () => {
+  const bk = (name, extra = {}) => ({ name, remaining_percentage: 50, total: 100, ...extra });
+  const provider = { connections: [
+    { connection_id: 'ag1', provider: 'antigravity', status: 'ok', buckets: [bk('Gemini (5h)'), bk('Claude & GPT (5h)')] },
+    { connection_id: 'cx1', provider: 'codex', status: 'ok', buckets: [bk('5h Session')] },
+    { connection_id: 'ag2', provider: 'antigravity', status: 'ok', buckets: [bk('Gemini (Weekly)')] },
+    { connection_id: 'err1', provider: 'github', status: 'error', error_msg: 'unauthorized', buckets: [] },
+  ] };
+  const { cards, attention } = groupProviderBySubProvider(provider);
+  assert.deepEqual(cards.map((c) => c.subProvider), ['antigravity', 'codex']);
+  assert.deepEqual(cards[0].groups.map((g) => g.conn.connection_id), ['ag1', 'ag2']);
+  assert.deepEqual(cards[1].groups.map((g) => g.conn.connection_id), ['cx1']);
+  assert.deepEqual(cards[0].groups[0].buckets.map((b) => b.name), ['Claude & GPT (5h)', 'Gemini (5h)']);
+  assert.deepEqual(attention.map((c) => c.connection_id), ['err1']);
+
+  assert.deepEqual(groupProviderBySubProvider({ connections: [] }), { cards: [], attention: [] });
+  assert.deepEqual(groupProviderBySubProvider(null), { cards: [], attention: [] });
+});
+
+test('loadGroupBy defaults to account and validates stored choices', () => {
+  const original = globalThis.localStorage;
+  try {
+    delete globalThis.localStorage;
+    assert.equal(loadGroupBy(), 'account');
+
+    let stored = null;
+    globalThis.localStorage = {
+      getItem: () => stored,
+    };
+    assert.equal(loadGroupBy(), 'account');
+
+    stored = 'invalid';
+    assert.equal(loadGroupBy(), 'account');
+
+    stored = 'provider';
+    assert.equal(loadGroupBy(), 'provider');
+
+    stored = 'model';
+    assert.equal(loadGroupBy(), 'model');
+
+    stored = 'account';
+    assert.equal(loadGroupBy(), 'account');
+  } finally {
+    if (original !== undefined) {
+      globalThis.localStorage = original;
+    } else {
+      delete globalThis.localStorage;
+    }
+  }
 });
