@@ -511,28 +511,29 @@ export function renderUpstreamQuotas(container) {
     return h('article', { class: `uq-card${cardState(w)}${family === 'allowance' ? ' is-allowance' : ''}` },
       h('div', { class: 'uq-card-head' }, iconTile(meta.spec, meta.title),
         h('div', { class: 'uq-ttl' },
-          h('h3', null, meta.title),
+          h('h3', { title: meta.title }, meta.title),
           h('div', { class: 'uq-sub' },
             `${groups.length} ${groups.length === 1 ? 'account' : 'accounts'} · ${all.length} ${family === 'credit' ? 'balance' : 'limit'}${all.length === 1 ? '' : 's'}`,
             family === 'allowance' ? h('span', { class: 'badge sm ok' }, 'admin limit') : null)),
         h('div', { class: 'uq-side' }, chip)),
-      groups.map((g) => accountGroup(g, provider, shownReset)));
+      h('div', { class: 'uq-accts' }, groups.map((g) => accountGroup(g, provider, shownReset))));
   }
 
   function attentionCard(conns) {
     const errs = conns.some((c) => c.status === 'error' || c.status === 'degraded');
+    const title = errs ? 'Needs attention' : 'Waiting for data';
     return h('article', { class: `uq-card${errs ? ' is-err' : ''}` },
       h('div', { class: 'uq-card-head' }, iconTile({ ic: 'circle-x' }, 'X'),
         h('div', { class: 'uq-ttl' },
-          h('h3', null, errs ? 'Needs attention' : 'Waiting for data'),
+          h('h3', { title }, title),
           h('div', { class: 'uq-sub' }, `${conns.length} ${conns.length === 1 ? 'account' : 'accounts'}`))),
-      conns.map((c) => h('div', { class: 'uq-acct' },
+      h('div', { class: 'uq-accts' }, conns.map((c) => h('div', { class: 'uq-acct' },
         h('div', { class: 'uq-acct-head' }, subProviderTile(c.provider, c.account_label, 'sm'),
           h('span', { class: 'uq-nm', title: c.account_label }, c.account_label),
           c.plan ? h('span', { class: 'badge sm' }, c.plan) : null,
           h('span', { class: `badge sm ${c.status === 'error' ? 'err' : c.status === 'degraded' ? 'warn' : ''}` },
             c.status === 'ok' ? telemetryStateLabel(c.observation_state) : c.status)),
-        errBanner(c) || emptyNote(c))));
+        errBanner(c) || emptyNote(c)))));
   }
 
   const subProviderTitle = (id) => {
@@ -551,12 +552,12 @@ export function renderUpstreamQuotas(container) {
     return h('article', { class: `uq-card${cardState(w)}${allowance ? ' is-allowance' : ''}` },
       h('div', { class: 'uq-card-head' }, cardIcon,
         h('div', { class: 'uq-ttl' },
-          h('h3', null, title),
+          h('h3', { title }, title),
           h('div', { class: 'uq-sub' },
             `${groups.length} ${groups.length === 1 ? 'account' : 'accounts'} · ${all.length} ${all.length === 1 ? 'limit' : 'limits'}`,
             allowance ? h('span', { class: 'badge sm ok' }, 'admin limit') : null)),
         h('div', { class: 'uq-side' }, chip)),
-      groups.map((g) => accountGroup(g, provider, shownReset)));
+      h('div', { class: 'uq-accts' }, groups.map((g) => accountGroup(g, provider, shownReset))));
   }
 
   function cardsByProvider(p) {
@@ -646,7 +647,7 @@ export function renderUpstreamQuotas(container) {
       isUnsupported
         ? h('p', { class: 'uq-empty-note' }, 'This provider connects directly to an LLM without upstream limit telemetry. Switch protocol in Providers menu to enable.')
         : conns.length
-        ? h('div', { class: 'uq-grid' },
+        ? h('div', { class: groupBy === 'account' ? 'uq-grid' : 'uq-grid is-grouped' },
             groupBy === 'account' ? conns.map((c) => connectionCard(c, p))
             : groupBy === 'provider' ? cardsByProvider(p)
             : cardsByModel(p))
