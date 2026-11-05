@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { upstreamBarTone, upstreamAlertRows, upstreamNeedsAttention, upstreamProviderSummary } from '../static/js/views/upstream_quotas.js';
+import { upstreamBarTone, upstreamAlertRows, upstreamNeedsAttention, upstreamProviderSummary, bucketFamily, groupProviderByFamily, bucketMeter, splitPeriod, FAMILY_ORDER } from '../static/js/views/upstream_quotas.js';
+import { subProviderIconURL, initials } from '../static/js/providericons.js';
 
 test('upstreamBarTone assigns correct status color tones', () => {
   // > 70% is ok (green)
@@ -361,4 +362,90 @@ test('upstreamProviderSummary reports connections, lowest remaining and next res
   const s = upstreamProviderSummary(p, now);
   assert.match(s, /^2 connections · lowest 12% left · next reset in /);
   assert.equal(upstreamProviderSummary({ connections: [] }, now), '0 connections');
+});
+
+test('bucketFamily classifies buckets by name, scope and connection provider', () => {
+  const ag = { provider: 'antigravity' };
+  assert.equal(bucketFamily({ name: 'Claude & GPT (5h)' }, ag), 'claude');
+  assert.equal(bucketFamily({ name: 'Claude & GPT (Weekly)' }, ag), 'claude');
+  assert.equal(bucketFamily({ name: 'Gemini (Weekly)' }, ag), 'gemini');
+  assert.equal(bucketFamily({ name: 'Gemini (5h)' }, ag), 'gemini');
+  assert.equal(bucketFamily({ name: 'Gemini 3 Pro Image' }, ag), 'image');
+  assert.equal(bucketFamily({ name: 'Imagen 4' }, ag), 'image');
+  assert.equal(bucketFamily({ name: '5h Session' }, { provider: 'codex' }), 'gpt');
+  assert.equal(bucketFamily({ name: '5h Session' }, { provider: 'claude' }), 'claude');
+  assert.equal(bucketFamily({ name: '5h Session' }, { provider: 'gemini-cli' }), 'gemini');
+  assert.equal(bucketFamily({ name: '5h Session' }, ag), 'other');
+  assert.equal(bucketFamily({ name: 'Premium Interactions' }, { provider: 'github' }), 'other');
+  assert.equal(bucketFamily({ name: 'Credit Balance', is_credit_balance: true }, ag), 'credit');
+  assert.equal(bucketFamily({ name: 'Key Allowance (daily)' }, { provider: 'nineguard' }), 'allowance');
+  assert.equal(bucketFamily({ name: 'gpt-5-codex (weekly)' }, { provider: 'nineguard' }), 'gpt');
+  assert.equal(bucketFamily({ name: 'claude-sonnet-5-5 (daily)' }, { provider: 'nineguard' }), 'claude');
+  // SDK per-model bucket: the model id lives in scope, the name is a generic window.
+  assert.equal(bucketFamily({ name: '5-hour window', scope: 'gpt-5-codex' }, ag), 'gpt');
+  assert.equal(bucketFamily({ name: '5-hour window', scope: 'account' }, ag), 'other');
+  assert.equal(bucketFamily({ name: 'Weekly o3 usage' }, ag), 'gpt');
+  assert.equal(bucketFamily(null, null), 'other');
+});
+
+test('groupProviderByFamily builds family cards, attention list and keeps account grouping', () => {
+  const bk = (name, extra = {}) => ({ name, remaining_percentage: 50, total: 100, ...extra });
+  const provider = { connections: [
+    { connection_id: 'a', provider: 'antigravity', status: 'ok', buckets: [bk('Gemini (5h)'), bk('Claude & GPT (5h)'), bk('Gemini 3 Pro Image'), bk('Credit Balance', { is_credit_balance: true })] },
+    { connection_id: 'b', provider: 'antigravity', status: 'ok', buckets: [bk('Gemini (5h)')] },
+    { connection_id: 'c', provider: 'codex', status: 'error', error_msg: '401', buckets: [] },
+    { connection_id: 'd', provider: 'codex', status: 'ok', buckets: [] },
+    { connection_id: 'e', provider: 'codex', status: 'ok', buckets: [bk('5h Session')] },
+  ] };
+  const { cards, attention } = groupProviderByFamily(provider);
+  assert.deepEqual(cards.map((c) => c.family), ['claude', 'gemini', 'gpt', 'image', 'credit']);
+  assert.deepEqual(cards.map((c) => c.family), FAMILY_ORDER.filter((f) => cards.some((c) => c.family === f)));
+  const gemini = cards.find((c) => c.family === 'gemini');
+  assert.deepEqual(gemini.groups.map((g) => g.conn.connection_id), ['a', 'b']);
+  assert.equal(gemini.groups[0].buckets.length, 1);
+  assert.deepEqual(attention.map((c) => c.connection_id), ['c', 'd']);
+
+  assert.deepEqual(groupProviderByFamily({ connections: [] }), { cards: [], attention: [] });
+  assert.deepEqual(groupProviderByFamily(null), { cards: [], attention: [] });
+});
+
+test('groupProviderByFamily keeps degraded connections with an error message in attention', () => {
+  const b = { name: 'Gemini (5h)', remaining_percentage: 40, total: 100 };
+  const { cards, attention } = groupProviderByFamily({ connections: [
+    { connection_id: 'x', status: 'degraded', error_msg: 'slow', buckets: [b] },
+    { connection_id: 'y', status: 'degraded', buckets: [b] },
+  ] });
+  assert.deepEqual(attention.map((c) => c.connection_id), ['x']);
+  assert.equal(cards[0].groups.length, 2);
+});
+
+test('bucketMeter reports limit reached, unknown and stale states', () => {
+  assert.deepEqual(bucketMeter({ remaining_percentage: 0, total: 100 }), { pct: 0, tone: 'err', dim: false, limit: true, label: 'Limit reached' });
+  assert.equal(bucketMeter({ remaining_percentage: 18.64, total: 100 }).label, '18.6% left');
+  assert.equal(bucketMeter({ remaining_percentage: 150, total: 100 }).pct, 100);
+  const sdk = { unit: 'percent', remaining_percent: 0, observation_state: 'observed' };
+  assert.equal(bucketMeter(sdk).label, 'Limit reached');
+  assert.equal(bucketMeter({ unit: 'percent', remaining_percent: null, limit_reached: true }).label, 'Limit reached');
+  const unknown = bucketMeter({ unit: 'percent', remaining_percent: null });
+  assert.equal(unknown.label, 'Unknown');
+  assert.equal(unknown.tone, 'muted');
+  assert.equal(unknown.dim, true);
+  const stale = bucketMeter({ unit: 'percent', remaining_percent: 55, observation_state: 'stale', observed_at: new Date().toISOString() });
+  assert.equal(stale.dim, true);
+  assert.equal(stale.label, '55% left');
+});
+
+test('splitPeriod peels the window suffix off cascaded bucket names', () => {
+  assert.deepEqual(splitPeriod('claude-sonnet-5-5 (daily)'), { name: 'claude-sonnet-5-5', period: 'daily' });
+  assert.deepEqual(splitPeriod('Gemini (5h)'), { name: 'Gemini (5h)', period: null });
+});
+
+test('subProviderIconURL maps known providers to bundled files and unknown to empty', () => {
+  assert.equal(subProviderIconURL('antigravity'), '/provider-icons/9router/antigravity.png');
+  assert.equal(subProviderIconURL('Gemini-CLI'), '/provider-icons/9router/gemini-cli.png');
+  assert.equal(subProviderIconURL('nineguard'), '/appicon.png');
+  assert.equal(subProviderIconURL('some-new-provider'), '');
+  assert.equal(subProviderIconURL(undefined), '');
+  assert.equal(initials('alice@acme.dev'), 'AL');
+  assert.equal(initials(''), '?');
 });

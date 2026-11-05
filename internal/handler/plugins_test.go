@@ -279,3 +279,58 @@ func TestPluginHandlers_UpdateDefaultSettingsAndPersistence(t *testing.T) {
 	}
 }
 
+func TestPluginHandlers_TestBillionContext(t *testing.T) {
+	h, database := setupTestHandler(t)
+	defer database.Close()
+
+	var mockStatus int
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__bili/health" {
+			w.WriteHeader(mockStatus)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mockServer.Close()
+
+	_, _ = database.Exec("UPDATE plugins SET default_settings = ? WHERE id = 'billion-context'", `{"url":"`+mockServer.URL+`"}`)
+	_ = h.plugins.ReloadCache()
+
+	callTest := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/billion-context/test", nil)
+		req.SetPathValue("id", "billion-context")
+		rec := httptest.NewRecorder()
+		h.TestPlugin(rec, req)
+		return rec
+	}
+
+	// 200 OK -> 200
+	mockStatus = http.StatusOK
+	rec := callTest()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 403 Forbidden -> 200
+	mockStatus = http.StatusForbidden
+	rec = callTest()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 404 Not Found -> 502
+	mockStatus = http.StatusNotFound
+	rec = callTest()
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 Bad Gateway on 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 500 Error -> 502
+	mockStatus = http.StatusInternalServerError
+	rec = callTest()
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 Bad Gateway on 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+

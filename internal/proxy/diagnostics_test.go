@@ -345,6 +345,90 @@ func TestParseDiagnosticsStream(t *testing.T) {
 		}
 	})
 
+	t.Run("OpenAI chat stream with prompt and completion tokens but zero total_tokens", func(t *testing.T) {
+		parser := proxy.NewStreamDiagnosticsParser("chat")
+		// Usage chunk has prompt_tokens and completion_tokens, but total_tokens is 0
+		parser.FeedSSEEvent([]byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":80,\"total_tokens\":0}}\n\n"),
+			[]byte(`{"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":80,"total_tokens":0}}`))
+
+		diag := parser.Finalize(1, 200, 200)
+		if diag.PromptTokens != 120 {
+			t.Errorf("PromptTokens = %d, expected 120", diag.PromptTokens)
+		}
+		if diag.CompletionTokens != 80 {
+			t.Errorf("CompletionTokens = %d, expected 80", diag.CompletionTokens)
+		}
+		if diag.TotalTokens != 200 {
+			t.Errorf("TotalTokens = %d, expected 200 (prompt+completion)", diag.TotalTokens)
+		}
+		if diag.UsageEstimated {
+			t.Errorf("UsageEstimated = true, expected false")
+		}
+	})
+
+	t.Run("Anthropic messages stream with input/cache only on message_delta", func(t *testing.T) {
+		parser := proxy.NewStreamDiagnosticsParser("messages")
+
+		// message_start with all 0 usage
+		parser.FeedSSEEvent([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-3-7-sonnet-20250219\",\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}}\n\n"),
+			[]byte(`{"type":"message_start","message":{"model":"claude-3-7-sonnet-20250219","usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`))
+
+		// message_delta with input_tokens, cache_read, cache_creation, output_tokens
+		parser.FeedSSEEvent([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":400,\"cache_read_input_tokens\":1000,\"cache_creation_input_tokens\":50,\"output_tokens\":200}}\n\n"),
+			[]byte(`{"type":"message_delta","usage":{"input_tokens":400,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50,"output_tokens":200}}`))
+
+		diag := parser.Finalize(2, 400, 200)
+		// Prompt = 400 + 1000 + 50 = 1450
+		if diag.PromptTokens != 1450 {
+			t.Errorf("PromptTokens = %d; expected 1450", diag.PromptTokens)
+		}
+		if diag.CompletionTokens != 200 {
+			t.Errorf("CompletionTokens = %d; expected 200", diag.CompletionTokens)
+		}
+		if diag.TotalTokens != 1650 {
+			t.Errorf("TotalTokens = %d; expected 1650", diag.TotalTokens)
+		}
+		if diag.CacheReadTokens != 1000 {
+			t.Errorf("CacheReadTokens = %d; expected 1000", diag.CacheReadTokens)
+		}
+		if diag.CacheWriteTokens != 50 {
+			t.Errorf("CacheWriteTokens = %d; expected 50", diag.CacheWriteTokens)
+		}
+		if diag.UsageEstimated {
+			t.Errorf("UsageEstimated = true; expected false")
+		}
+	})
+
+	t.Run("Anthropic messages stream keeps message_start values when present", func(t *testing.T) {
+		parser := proxy.NewStreamDiagnosticsParser("messages")
+
+		// message_start with non-zero usage
+		parser.FeedSSEEvent([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-3-7-sonnet-20250219\",\"usage\":{\"input_tokens\":300,\"cache_read_input_tokens\":1200,\"cache_creation_input_tokens\":100}}}\n\n"),
+			[]byte(`{"type":"message_start","message":{"model":"claude-3-7-sonnet-20250219","usage":{"input_tokens":300,"cache_read_input_tokens":1200,"cache_creation_input_tokens":100}}}`))
+
+		// message_delta with different input/cache values that should NOT overwrite message_start
+		parser.FeedSSEEvent([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":999,\"cache_read_input_tokens\":888,\"cache_creation_input_tokens\":777,\"output_tokens\":250}}\n\n"),
+			[]byte(`{"type":"message_delta","usage":{"input_tokens":999,"cache_read_input_tokens":888,"cache_creation_input_tokens":777,"output_tokens":250}}`))
+
+		diag := parser.Finalize(2, 400, 200)
+		// Prompt = 300 + 1200 + 100 = 1600 (not 999+888+777)
+		if diag.PromptTokens != 1600 {
+			t.Errorf("PromptTokens = %d; expected 1600", diag.PromptTokens)
+		}
+		if diag.CompletionTokens != 250 {
+			t.Errorf("CompletionTokens = %d; expected 250", diag.CompletionTokens)
+		}
+		if diag.TotalTokens != 1850 {
+			t.Errorf("TotalTokens = %d; expected 1850", diag.TotalTokens)
+		}
+		if diag.CacheReadTokens != 1200 {
+			t.Errorf("CacheReadTokens = %d; expected 1200", diag.CacheReadTokens)
+		}
+		if diag.CacheWriteTokens != 100 {
+			t.Errorf("CacheWriteTokens = %d; expected 100", diag.CacheWriteTokens)
+		}
+	})
+
 	t.Run("Stream with missing usage triggers estimated flag", func(t *testing.T) {
 		parser := proxy.NewStreamDiagnosticsParser("chat")
 		parser.FeedSSEEvent([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"),
@@ -432,6 +516,65 @@ func TestBuildStreamSummary(t *testing.T) {
 		}
 		if summary.Usage.PromptTokens != 130 || summary.Usage.CompletionTokens != 45 || summary.Usage.TotalTokens != 175 {
 			t.Errorf("unexpected usage: %+v", summary.Usage)
+		}
+	})
+
+	t.Run("Responses stream with reasoning items and text delta", func(t *testing.T) {
+		parser := proxy.NewStreamDiagnosticsParser("responses")
+
+		// 1. output_item.added with item.type: "reasoning"
+		parser.FeedSSEEvent(nil, []byte(`{"type":"response.output_item.added","item":{"type":"reasoning","encrypted_content":"xyz"}}`))
+
+		// 2. reasoning_summary_text.delta
+		parser.FeedSSEEvent(nil, []byte(`{"type":"response.reasoning_summary_text.delta","delta":"thinking about primes"}`))
+
+		// 3. output_text.delta
+		parser.FeedSSEEvent(nil, []byte(`{"type":"response.output_text.delta","delta":"397"}`))
+
+		// 4. response.completed with usage output_tokens_details.reasoning_tokens = 0
+		parser.FeedSSEEvent(nil, []byte(`{"type":"response.completed","response":{"model":"gpt-4o","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150,"output_tokens_details":{"reasoning_tokens":0}}}}`))
+
+		diag := parser.Finalize(4, 200, 200)
+		summaryBytes := parser.BuildStreamSummary(4, diag)
+
+		var summary proxy.StreamSummary
+		if err := json.Unmarshal(summaryBytes, &summary); err != nil {
+			t.Fatalf("failed to unmarshal summary JSON: %v", err)
+		}
+
+		if !diag.ThinkingDelivered {
+			t.Errorf("expected diag.ThinkingDelivered=true, got false")
+		}
+		if !summary.ThinkingDelivered {
+			t.Errorf("expected summary.ThinkingDelivered=true, got false")
+		}
+		if summary.Thinking != "thinking about primes" {
+			t.Errorf("expected Thinking='thinking about primes', got %q", summary.Thinking)
+		}
+		if summary.Content != "397" {
+			t.Errorf("expected Content='397', got %q", summary.Content)
+		}
+	})
+
+	t.Run("Responses stream function_call_arguments delta does not pollute content", func(t *testing.T) {
+		parser := proxy.NewStreamDiagnosticsParser("responses")
+
+		// 1. function_call_arguments.delta
+		parser.FeedSSEEvent(nil, []byte(`{"type":"response.function_call_arguments.delta","delta":"{\"location\":\"Paris\"}"}`))
+
+		// 2. output_text.delta
+		parser.FeedSSEEvent(nil, []byte(`{"type":"response.output_text.delta","delta":"Here is the weather"}`))
+
+		diag := parser.Finalize(2, 100, 200)
+		summaryBytes := parser.BuildStreamSummary(2, diag)
+
+		var summary proxy.StreamSummary
+		if err := json.Unmarshal(summaryBytes, &summary); err != nil {
+			t.Fatalf("failed to unmarshal summary JSON: %v", err)
+		}
+
+		if summary.Content != "Here is the weather" {
+			t.Errorf("expected Content='Here is the weather', got %q", summary.Content)
 		}
 	})
 

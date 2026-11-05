@@ -89,9 +89,10 @@ type ResolvedPlugin struct {
 }
 
 type PipelineResult struct {
-	Body           []byte
-	PluginsApplied []string
-	PluginsSkipped []string // format id:reason
+	Body             []byte
+	UpstreamProxyURL string
+	PluginsApplied   []string
+	PluginsSkipped   []string // format id:reason
 	TokensSaved    int
 	TokensOverhead int
 	PluginErrors   []string

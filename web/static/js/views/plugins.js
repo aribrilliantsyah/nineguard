@@ -802,6 +802,54 @@ export function mount(root) {
         ),
         saveSettingsBtn
       );
+    } else if (p.id === 'billion-context') {
+      const urlInput = h('input', {
+        class: 'input',
+        type: 'text',
+        value: currentSettings.url || 'http://127.0.0.1:8788',
+        placeholder: 'e.g. http://127.0.0.1:8788'
+      });
+
+      const saveBillionContext = async () => {
+        const newSettings = {
+          url: urlInput.value.trim() || 'http://127.0.0.1:8788'
+        };
+        await api.put(`/plugins/${encodeURIComponent(p.id)}`, {
+          default_settings: JSON.stringify(newSettings)
+        });
+        p.default_settings = JSON.stringify(newSettings);
+        currentSettings = newSettings;
+        reload();
+      };
+      saveSettingsFn = saveBillionContext;
+
+      const saveSettingsBtn = h('button', {
+        class: 'btn btn-sm btn-primary',
+        type: 'button',
+        onclick: async () => {
+          saveSettingsBtn.disabled = true;
+          try {
+            await saveBillionContext();
+            toast('Billion Context settings saved');
+          } catch (e) {
+            toast(e.message, 'error');
+          } finally {
+            saveSettingsBtn.disabled = false;
+          }
+        }
+      }, 'Save Billion Context Settings');
+
+      settingsSection = h('div', { style: { marginBottom: '16px', padding: '14px', background: 'var(--hover)', borderRadius: '6px' } },
+        h('h4', { style: { margin: '0 0 10px', fontSize: '13px' } }, 'Billion Context Connector Settings'),
+        h('div', { class: 'field', style: { marginBottom: '10px' } },
+          h('span', null, 'Billion Context Endpoint URL'),
+          urlInput,
+          h('p', { class: 'muted', style: { fontSize: '11px', margin: '4px 0 0', lineHeight: '1.4' } },
+            'Default is http://127.0.0.1:8788. When running in Docker Compose, point to http://bili:8787 and ensure bili is configured with BILI_ALLOW_PRIVATE_HTTP_PROVIDERS=1 & BILI_TUNNEL_ALLOWED_HOSTS=<host:port>.'
+          )
+        ),
+        saveSettingsBtn
+      );
     } else if (p.id === 'caveman' || p.id === 'ponytail') {
       const isCave = p.id === 'caveman';
       const variantSelect = isCave ? h('select', { class: 'input' },

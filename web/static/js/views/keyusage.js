@@ -125,7 +125,8 @@ export async function openKeyUsageModal(key) {
 
     const s = summary;
     const reqSub = s.errors > 0 ? `${fmtNum(s.errors)} err (${s.error_rate_pct}%)` : '100% success';
-    const tokSub = `↓ ${fmtCompact(s.tokens.prompt)} · ↑ ${fmtCompact(s.tokens.completion)}`;
+    const fresh = Math.max(0, (s.tokens.prompt || 0) - (s.tokens.cache_read || 0) - (s.tokens.cache_write || 0));
+    const tokSub = `↓ ${fmtCompact(fresh)} fresh · ${fmtCompact(s.tokens.cache_read || 0)} cache · ↑ ${fmtCompact(s.tokens.completion)} out`;
     const costVal = s.cost ? s.cost.display_formatted : '—';
     const costSub = s.cost ? `${s.cost.currency} (est. list)` : 'Unpriced';
 
@@ -212,9 +213,11 @@ export async function openKeyUsageModal(key) {
 
     const rows = models.map(m => {
       const costStr = (m.cost != null && summary?.cost) ? formatCost(m.cost, cur, rate, 0) : '—';
+      const freshM = Math.max(0, (m.prompt || 0) - (m.cache_read || 0) - (m.cache_write || 0));
       return h('tr', null,
         h('td', { class: 'strong' }, m.model_id),
-        h('td', { class: 'num' }, fmtCompact(m.prompt)),
+        h('td', { class: 'num' }, fmtCompact(freshM)),
+        h('td', { class: 'num' }, fmtCompact(m.cache_read || 0)),
         h('td', { class: 'num' }, fmtCompact(m.completion)),
         h('td', { class: 'num strong' }, fmtCompact(m.total)),
         h('td', { class: 'num' }, costStr),
@@ -234,7 +237,8 @@ export async function openKeyUsageModal(key) {
         h('thead', null,
           h('tr', null,
             h('th', null, 'Model'),
-            h('th', { class: 'num' }, 'Prompt Tokens'),
+            h('th', { class: 'num' }, 'Fresh Input'),
+            h('th', { class: 'num' }, 'Cache Read'),
             h('th', { class: 'num' }, 'Completion Tokens'),
             h('th', { class: 'num' }, 'Total Tokens'),
             h('th', { class: 'num' }, `Est. Cost (${cur})`),

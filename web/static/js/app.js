@@ -27,7 +27,7 @@ const NAV = [
     { view: 'providers', label: 'Providers', icon: 'server', keywords: 'providers upstream openai compatible route apikey target prefix' },
     { view: 'endpoints', label: 'Endpoints & Keys', icon: 'key', keywords: 'endpoints agent setup url integration cursor cline continue python node curl' },
     { view: 'quotas', label: 'Quotas', icon: 'chart', keywords: 'quota limit per model usage budget near limit exhausted' },
-    { view: 'plugins', label: 'Plugins', icon: 'puzzle', keywords: 'plugins caveman ponytail headroom compress tokens transform token savers' },
+    { view: 'plugins', label: 'Plugins', icon: 'puzzle', keywords: 'plugins caveman ponytail headroom billion-context bili compress tokens transform token savers' },
     { view: 'models', label: 'Models', icon: 'box', keywords: 'models enable disable firewall' },
     { view: 'traffic', label: 'Traffic Explorer', icon: 'clock', keywords: 'traffic requests telemetry tokens latency usage' },
     { view: 'logs', label: 'Log Explorer', icon: 'logs', keywords: 'logs server system gateway stdout error debug kibana elk' },

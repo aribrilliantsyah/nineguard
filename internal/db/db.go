@@ -432,6 +432,7 @@ func (d *DB) seedPlugins() error {
 	}{
 		{"secretguard", "SecretGuard", "Scans prompts for API keys, private keys, and environment secrets", "other", 5, `{"action":"block"}`, 0, "closed"},
 		{"headroom", "Headroom", "Compresses message history before forwarding to model", "input_compression", 10, `{"url":"http://127.0.0.1:8787","mode":"incremental","compress_user_messages":false}`, 1, "open"},
+		{"billion-context", "Billion Context", "Routes requests through a billion-context (ACP) proxy for incremental, prefix-cache friendly history compression", "input_compression", 15, `{"url":"http://127.0.0.1:8788"}`, 1, "open"},
 		{"ponytail", "Ponytail", "Instructs model to respond with compact formatting", "output_style", 20, `{"level":"full"}`, 1, "open"},
 		{"caveman", "Caveman", "Instructs model to respond in terse caveman style", "output_style", 30, `{"variant":"caveman"}`, 1, "open"},
 	}

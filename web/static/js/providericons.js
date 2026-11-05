@@ -17,3 +17,27 @@ export function providerMark(provider) {
   else box.append(icon('server'));
   return box;
 }
+
+// 9router connection.provider ids that ship a mark under /provider-icons/9router/<id>.png.
+export const SUB_PROVIDER_PNGS = new Set(['antigravity', 'codex', 'claude', 'github', 'copilot', 'kiro', 'qoder', 'cursor', 'gemini-cli', 'glm', 'kimi', 'minimax', 'deepseek', 'groq', 'xiaomi-mimo', 'zed', 'opencode', 'codebuddy-cn', 'commandcode', 'grok-cli']);
+const SUB_PROVIDER_EXTRA = { nineguard: '/appicon.png', openai: '/provider-icons/openai.svg', anthropic: '/provider-icons/anthropic.svg', gemini: '/provider-icons/gemini.svg', google: '/provider-icons/gemini.svg' };
+// Connection provider id -> icon URL, or '' when unknown (callers show initials).
+export function subProviderIconURL(id) {
+  const key = String(id || '').toLowerCase();
+  if (SUB_PROVIDER_PNGS.has(key)) return `/provider-icons/9router/${key}.png`;
+  return SUB_PROVIDER_EXTRA[key] || '';
+}
+
+export const initials = (label) => String(label || '?').replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase() || '?';
+
+// Small square tile: spec is { img: url } | { ic: spriteName } | null (initials of label). A broken img falls back to initials.
+export function iconTile(spec, label, size = '') {
+  const el = h('span', { class: `uq-tile${size ? ` ${size}` : ''}`, 'aria-hidden': 'true' });
+  const text = () => h('span', null, initials(label));
+  if (spec?.img) el.append(h('img', { src: spec.img, alt: '', referrerpolicy: 'no-referrer', onerror: () => el.replaceChildren(text()) }));
+  else if (spec?.ic) el.append(icon(spec.ic));
+  else el.append(text());
+  return el;
+}
+
+export const subProviderTile = (id, label, size) => { const img = subProviderIconURL(id); return iconTile(img ? { img } : null, label, size); };

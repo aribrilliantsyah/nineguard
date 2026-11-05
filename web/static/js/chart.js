@@ -71,22 +71,53 @@ function frame({ legend, height, table }) {
 }
 
 // Keyboard: arrows move between buckets, Enter opens the focused one.
-function keyNav(plot, n, show, hide, select) {
+// When segmentHover is on, ArrowUp/ArrowDown cycle through series in the bucket.
+function keyNav(plot, n, show, hide, select, { segmentHover = false, getSeriesForBucket } = {}) {
   let cur = -1;
-  plot.addEventListener('focus', () => { cur = cur < 0 ? n - 1 : cur; show(cur); });
-  plot.addEventListener('blur', hide);
+  let curSeries = -1;
+  plot.addEventListener('focus', () => {
+    cur = cur < 0 ? n - 1 : cur;
+    curSeries = -1;
+    show(cur, curSeries);
+  });
+  plot.addEventListener('blur', () => {
+    curSeries = -1;
+    hide();
+  });
   plot.addEventListener('keydown', (e) => {
     if (!n) return;
     const moves = { ArrowLeft: -1, ArrowRight: 1, Home: -n, End: n };
     if (e.key in moves) {
       e.preventDefault();
       cur = Math.max(0, Math.min(n - 1, (cur < 0 ? n - 1 : cur) + moves[e.key]));
-      show(cur);
+      curSeries = -1;
+      show(cur, curSeries);
+    } else if (segmentHover && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      const list = getSeriesForBucket ? getSeriesForBucket(cur) : [];
+      if (list.length) {
+        e.preventDefault();
+        if (curSeries < 0) {
+          curSeries = e.key === 'ArrowUp' ? list[list.length - 1] : list[0];
+        } else {
+          const idx = list.indexOf(curSeries);
+          if (idx < 0) {
+            curSeries = list[0];
+          } else if (e.key === 'ArrowUp') {
+            curSeries = idx > 0 ? list[idx - 1] : list[list.length - 1];
+          } else {
+            curSeries = idx < list.length - 1 ? list[idx + 1] : list[0];
+          }
+        }
+        show(cur, curSeries);
+      }
     } else if (e.key === 'Enter' && select && cur >= 0) {
       select(cur);
     }
   });
-  return (i) => { cur = i; };
+  return (i, seriesIdx = -1) => {
+    cur = i;
+    curSeries = seriesIdx;
+  };
 }
 
 function axisGrid(svg, ticks, top, gutter, W, plotH, fmt) {
@@ -108,7 +139,18 @@ function xLabels(svg, n, xOf, W, gutter, height, text) {
 
 // ── Stacked level volume ──
 // daily: one bucket per day in the local time zone (labels show dates).
-export function volumeChart(result, { series = SERIES, height = 80, onSelect, daily = false, table = true } = {}) {
+export function volumeChart(result, {
+  series = SERIES,
+  height = 80,
+  onSelect,
+  daily = false,
+  table = true,
+  segmentHover = false,
+  format = fmtNum,
+  unit = null,
+  errorRate = true,
+  dayLabel = null,
+} = {}) {
   const activeSeries = series || SERIES;
   const buckets = result?.buckets || [];
   const totals = result?.totals || {};
@@ -119,25 +161,46 @@ export function volumeChart(result, { series = SERIES, height = 80, onSelect, da
   const top = ticks[ticks.length - 1];
   const spanMs = ((result?.to || 0) - (result?.from || 0)) / 1e6;
 
-  const label = (ms) => (daily ? localDate(ms).slice(5) : spanMs >= 20 * 3600e3 ? `${localDate(ms).slice(5)} ${fmtClock(ms)}` : fmtClock(ms));
+  const getDayLabel = (i) => {
+    if (typeof dayLabel === 'function') return dayLabel(i);
+    if (Array.isArray(dayLabel)) return dayLabel[i];
+    return null;
+  };
+  const label = (ms, i) => {
+    const dl = getDayLabel(i);
+    if (dl != null) return dl.length > 5 ? dl.slice(5) : dl;
+    return daily ? localDate(ms).slice(5) : spanMs >= 20 * 3600e3 ? `${localDate(ms).slice(5)} ${fmtClock(ms)}` : fmtClock(ms);
+  };
   const startMs = (i) => buckets[i].start / 1e6;
   const endMs = (i) => (buckets[i].start + result.bucket_nanos) / 1e6;
-  const title = (i) => (daily ? localDate(startMs(i)) : `${label(startMs(i))} to ${label(endMs(i))}`);
+  const title = (i) => {
+    const dl = getDayLabel(i);
+    if (dl != null) return dl;
+    return daily ? localDate(startMs(i)) : `${label(startMs(i), i)} to ${label(endMs(i), i)}`;
+  };
   const order = [...activeSeries].reverse(); // legend and tooltip read top to bottom like the stack
 
   const legend = [
     ...order.map((sr) => h('span', { class: 'legend-item' },
-      h('i', { class: 'swatch', style: { background: sr.color } }), sr.label, h('b', null, fmtNum(sumLevels(totals, sr.levels))))),
+      h('i', { class: 'swatch', style: { background: sr.color } }), sr.label, h('b', null, format(sumLevels(totals, sr.levels))))),
     result?.partial ? h('span', { class: 'partial' }, 'partial: scan limit reached') : null,
   ];
   const tableView = () => h('table', { class: 'table' },
-    h('thead', null, h('tr', null, h('th', null, daily ? 'Day' : 'From'), ...order.map((sr) => h('th', { class: 'num' }, sr.label)), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Error rate'))),
+    h('thead', null, h('tr', null,
+      h('th', null, daily ? 'Day' : 'From'),
+      ...order.map((sr) => h('th', { class: 'num' }, sr.label)),
+      h('th', { class: 'num' }, 'Total'),
+      errorRate ? h('th', { class: 'num' }, 'Error rate') : null
+    )),
     h('tbody', null, buckets.map((_, i) => {
       const t = totalOf(i);
       const errCount = t - (stacks[i][activeSeries.length - 1] || 0);
-      return h('tr', null, h('td', null, title(i)),
-        ...order.map((sr) => h('td', { class: 'num' }, fmtNum(stacks[i][activeSeries.indexOf(sr)]))),
-        h('td', { class: 'num strong' }, fmtNum(t)), h('td', { class: 'num' }, t ? fmtPct((errCount / t) * 100) : '-'));
+      return h('tr', null,
+        h('td', null, title(i)),
+        ...order.map((sr) => h('td', { class: 'num' }, format(stacks[i][activeSeries.indexOf(sr)]))),
+        h('td', { class: 'num strong' }, format(t)),
+        errorRate ? h('td', { class: 'num' }, t ? fmtPct((errCount / t) * 100) : '-') : null
+      );
     }).reverse()));
   const { el, plot, tip } = frame({ legend, height, table: table && buckets.length ? tableView : null });
 
@@ -149,78 +212,170 @@ export function volumeChart(result, { series = SERIES, height = 80, onSelect, da
   let svg = null;
   let hl = null;
   let geo = { gutter: 0, bw: 0 };
+  let barSegments = [];
+
+  let curHlCol = -1;
+  let curHlSeries = -1;
+
+  function clearSegmentHighlight() {
+    if (curHlCol >= 0 && barSegments[curHlCol]) {
+      for (const seg of barSegments[curHlCol]) {
+        seg.el.classList.remove('is-focus', 'is-dim');
+      }
+    }
+    curHlCol = -1;
+    curHlSeries = -1;
+  }
+
+  function findSegment(i, mouseY) {
+    const list = barSegments[i];
+    if (!list || !list.length) return -1;
+    const topOfBar = list[list.length - 1].yTop;
+    const bottomOfBar = list[0].yBottom;
+    if (mouseY < topOfBar || mouseY > bottomOfBar) return -1;
+    for (const seg of list) {
+      if (mouseY >= seg.yTop && mouseY <= seg.yBottom) return seg.seriesIdx;
+    }
+    let closest = list[0];
+    let minDiff = Infinity;
+    for (const seg of list) {
+      const diff = mouseY < seg.yTop ? seg.yTop - mouseY : mouseY - seg.yBottom;
+      if (diff < minDiff) { minDiff = diff; closest = seg; }
+    }
+    return closest ? closest.seriesIdx : -1;
+  }
 
   function draw() {
     const W = plot.clientWidth;
     if (!W) return;
     svg?.remove();
+    clearSegmentHighlight();
+    barSegments = [];
     const plotH = height - AXIS_H;
     const n = buckets.length;
     const gutter = Math.ceil(Math.max(...ticks.map((t) => fmtCompact(t).length)) * CHAR_W) + 10;
     const bw = (W - gutter) / n;
     const barW = Math.min(BAR_MAX, Math.max(1, bw - GAP));
     geo = { gutter, bw };
-    svg = s('svg', { width: W, height, viewBox: `0 0 ${W} ${height}`, role: 'img', 'aria-label': `Volume, peak ${fmtNum(peak)} lines per ${daily ? 'day' : 'bucket'}` });
+    svg = s('svg', {
+      width: W, height, viewBox: `0 0 ${W} ${height}`, role: 'img',
+      'aria-label': `Volume, peak ${format(peak)} ${unit || 'lines'} per ${daily ? 'day' : 'bucket'}`
+    });
     axisGrid(svg, ticks, top, gutter, W, plotH, fmtCompact);
     hl = s('rect', { class: 'hl', x: gutter, y: 0, width: bw, height: plotH, rx: 3, visibility: 'hidden' });
     svg.append(hl);
 
     const scale = (v) => (v / top) * (plotH - 6);
     stacks.forEach((stack, i) => {
-      const segs = stack.map((v, j) => ({ v, color: activeSeries[j].color })).filter((o) => o.v > 0);
+      const segs = stack.map((v, j) => ({ v, color: activeSeries[j].color, seriesIdx: j })).filter((o) => o.v > 0);
       let base = plotH;
       const x = gutter + i * bw + (bw - barW) / 2;
+      barSegments[i] = [];
       segs.forEach((o, k) => {
         const full = scale(o.v);
         const gap = k > 0 && full > GAP + 1 ? GAP : 0;
         const hgt = Math.max(full - gap, 1);
         const y = base - gap - hgt;
-        svg.append(k === segs.length - 1
-          ? s('path', { d: topRounded(x, y, barW, hgt, 4), fill: o.color })
-          : s('rect', { x, y, width: barW, height: hgt, fill: o.color }));
+        const el = k === segs.length - 1
+          ? s('path', { class: 'vchart-seg', d: topRounded(x, y, barW, hgt, 4), fill: o.color })
+          : s('rect', { class: 'vchart-seg', x, y, width: barW, height: hgt, fill: o.color });
+        svg.append(el);
+        barSegments[i].push({ seriesIdx: o.seriesIdx, yTop: y, yBottom: y + hgt, el });
         base = y;
       });
     });
     xLabels(svg, n, (i, anchor) => (anchor === 'start' ? gutter : anchor === 'end' ? W : gutter + i * bw + bw / 2), W, gutter, height,
-      (i, anchor) => label(anchor === 'end' && !daily ? endMs(i) : startMs(i)));
+      (i, anchor) => (dayLabel ? label(null, i) : label(anchor === 'end' && !daily ? endMs(i) : startMs(i), i)));
     plot.insertBefore(svg, tip);
   }
 
-  function show(i) {
+  function show(i, hlSeriesIdx = -1) {
     const t = totalOf(i);
     const errCount = t - (stacks[i][activeSeries.length - 1] || 0);
     hl?.setAttribute('x', geo.gutter + i * geo.bw);
     hl?.setAttribute('visibility', 'visible');
-    tip.replaceChildren(
+
+    if (segmentHover) {
+      clearSegmentHighlight();
+      if (hlSeriesIdx >= 0 && barSegments[i]) {
+        curHlCol = i;
+        curHlSeries = hlSeriesIdx;
+        for (const seg of barSegments[i]) {
+          if (seg.seriesIdx === hlSeriesIdx) {
+            seg.el.classList.add('is-focus');
+          } else {
+            seg.el.classList.add('is-dim');
+          }
+        }
+      }
+    }
+
+    const rows = order.map((sr) => {
+      const sIdx = activeSeries.indexOf(sr);
+      const v = stacks[i][sIdx];
+      const isHl = segmentHover && hlSeriesIdx >= 0 && sIdx === hlSeriesIdx;
+      const row = tipRow(sr.color, sr.label, format(v), t ? fmtPct((v / t) * 100) : '');
+      if (isHl) row.classList.add('is-focus');
+      return row;
+    });
+
+    if (segmentHover && hlSeriesIdx >= 0) {
+      tip.classList.add('has-focus');
+    } else {
+      tip.classList.remove('has-focus');
+    }
+
+    const totalNoun = unit ? `${unit} in total` : 'requests in total';
+    const totalRow = tipRow(null, totalNoun, format(t));
+    totalRow.classList.add('tip-total');
+
+    const tipChildren = [
       h('div', { class: 'tip-title' }, title(i)),
-      ...order.map((sr) => {
-        const v = stacks[i][activeSeries.indexOf(sr)];
-        return tipRow(sr.color, sr.label, fmtNum(v), t ? fmtPct((v / t) * 100) : '');
-      }),
+      ...rows,
       h('div', { class: 'tip-sep' }),
-      tipRow(null, 'requests in total', fmtNum(t)),
-      tipRow(null, 'error rate', t ? fmtPct((errCount / t) * 100) : '-'),
-      onSelect ? h('div', { class: 'tip-hint' }, daily ? 'Click to open this day' : 'Click to zoom in') : null);
+      totalRow,
+      errorRate ? tipRow(null, 'error rate', t ? fmtPct((errCount / t) * 100) : '-') : null,
+      onSelect ? h('div', { class: 'tip-hint' }, daily ? 'Click to open this day' : 'Click to zoom in') : null,
+    ].filter(Boolean);
+    tip.replaceChildren(...tipChildren);
     placeTip(tip, plot, geo.gutter + i * geo.bw + geo.bw);
-    setCur(i);
+    setCur(i, hlSeriesIdx);
   }
   const hide = () => {
     tip.hidden = true;
+    tip.classList.remove('has-focus');
     hl?.setAttribute('visibility', 'hidden');
+    if (segmentHover) clearSegmentHighlight();
   };
   const select = (i) => onSelect?.(startMs(i), endMs(i));
   const bucketAt = (ev) => {
     const i = Math.floor((ev.clientX - plot.getBoundingClientRect().left - geo.gutter) / geo.bw);
     return i >= 0 && i < buckets.length ? i : -1;
   };
-  const setCur = keyNav(plot, buckets.length, show, hide, onSelect ? select : null);
+  const getSeriesForBucket = (bucketIdx) => {
+    if (!stacks[bucketIdx]) return [];
+    return order.map((sr) => activeSeries.indexOf(sr)).filter((sIdx) => stacks[bucketIdx][sIdx] > 0);
+  };
+  const setCur = keyNav(plot, buckets.length, show, hide, onSelect ? select : null, {
+    segmentHover,
+    getSeriesForBucket,
+  });
 
-  plot.addEventListener('mousemove', (ev) => {
+  const onPointer = (ev) => {
     const i = bucketAt(ev);
     if (i < 0) return hide();
-    show(i);
+    let hlSeries = -1;
+    if (segmentHover) {
+      const rect = plot.getBoundingClientRect();
+      const mouseY = ev.clientY - rect.top;
+      hlSeries = findSegment(i, mouseY);
+    }
+    show(i, hlSeries);
     plot.style.cursor = onSelect ? 'pointer' : '';
-  });
+  };
+
+  plot.addEventListener('mousemove', onPointer);
+  plot.addEventListener('pointerdown', onPointer);
   plot.addEventListener('mouseleave', hide);
   plot.addEventListener('click', (ev) => {
     const i = bucketAt(ev);
@@ -291,9 +446,13 @@ export function lineChart(points, { height = 160, format = fmtNum, color = 'var(
     dot?.setAttribute('cx', x);
     dot?.setAttribute('cy', geo.yOf(p.y));
     dot?.setAttribute('visibility', 'visible');
-    tip.replaceChildren(h('div', { class: 'tip-title' }, p.title), tipRow(color, name, format(p.y)),
+    const tipChildren = [
+      h('div', { class: 'tip-title' }, p.title),
+      tipRow(color, name, format(p.y)),
       ...(p.rows || []).map(([k, v]) => tipRow(null, k, v)),
-      onSelect ? h('div', { class: 'tip-hint' }, 'Click to open') : null);
+      onSelect ? h('div', { class: 'tip-hint' }, 'Click to open') : null,
+    ].filter(Boolean);
+    tip.replaceChildren(...tipChildren);
     placeTip(tip, plot, x);
     setCur(i);
   }

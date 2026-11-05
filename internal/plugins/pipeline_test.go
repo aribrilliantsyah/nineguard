@@ -3,10 +3,13 @@ package plugins
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"nineguard/internal/plugins/builtin"
 )
 
 func TestPipelineExecution_OrderAndTransformation(t *testing.T) {
@@ -50,7 +53,7 @@ func TestPipelineExecution_OrderAndTransformation(t *testing.T) {
 	executor := NewPipelineExecutor(p1Srv.Client())
 	initBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
 
-	res, _, err := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "gpt-4o", "prov1", "chat", false, "", initBody)
+	res, _, err := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "gpt-4o", "prov1", "http", "chat", false, "", initBody)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -77,7 +80,7 @@ func TestPipelineExecution_BypassAndIdempotency(t *testing.T) {
 	initBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
 
 	// 1. Bypass requested -> should skip
-	res, _, err := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "gpt-4o", "prov1", "chat", true, "", initBody)
+	res, _, err := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "gpt-4o", "prov1", "http", "chat", true, "", initBody)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -86,7 +89,7 @@ func TestPipelineExecution_BypassAndIdempotency(t *testing.T) {
 	}
 
 	// 2. Incoming header has caveman -> should skip with already_applied
-	res2, appliedHdr, err2 := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "gpt-4o", "prov1", "chat", false, "caveman", initBody)
+	res2, appliedHdr, err2 := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "gpt-4o", "prov1", "http", "chat", false, "caveman", initBody)
 	if err2 != nil {
 		t.Fatalf("err: %v", err2)
 	}
@@ -111,7 +114,7 @@ func TestPipelineExecution_FailOpenAndClosed(t *testing.T) {
 	openBindings := []Binding{{PluginID: "open-p", ScopeType: ScopeGlobal, State: StateOn}}
 	executor := NewPipelineExecutor(failingSrv.Client())
 
-	res, _, err := executor.Execute(context.Background(), []Plugin{openPlugin}, openBindings, nil, "", "", "gpt-4o", "", "chat", false, "", initBody)
+	res, _, err := executor.Execute(context.Background(), []Plugin{openPlugin}, openBindings, nil, "", "", "gpt-4o", "", "http", "chat", false, "", initBody)
 	if err != nil || res.Rejected {
 		t.Fatalf("fail-open should not reject: res=%v, err=%v", res, err)
 	}
@@ -123,7 +126,7 @@ func TestPipelineExecution_FailOpenAndClosed(t *testing.T) {
 	closedPlugin := Plugin{ID: "closed-p", Kind: KindHTTP, URL: failingSrv.URL, FailurePolicy: PolicyClosed, PipelineOrder: 10}
 	closedBindings := []Binding{{PluginID: "closed-p", ScopeType: ScopeGlobal, State: StateOn}}
 
-	resClosed, _, errClosed := executor.Execute(context.Background(), []Plugin{closedPlugin}, closedBindings, nil, "", "", "gpt-4o", "", "chat", false, "", initBody)
+	resClosed, _, errClosed := executor.Execute(context.Background(), []Plugin{closedPlugin}, closedBindings, nil, "", "", "gpt-4o", "", "http", "chat", false, "", initBody)
 	if errClosed != nil {
 		t.Fatalf("unexpected execution err: %v", errClosed)
 	}
@@ -148,7 +151,7 @@ func TestPipelineExecution_ExplicitReject(t *testing.T) {
 	executor := NewPipelineExecutor(rejectSrv.Client())
 	initBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
 
-	res, _, err := executor.Execute(context.Background(), []Plugin{plugin}, bindings, nil, "", "", "gpt-4o", "", "chat", false, "", initBody)
+	res, _, err := executor.Execute(context.Background(), []Plugin{plugin}, bindings, nil, "", "", "gpt-4o", "", "http", "chat", false, "", initBody)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -191,7 +194,7 @@ func TestPipelineExecution_MessagesFormat(t *testing.T) {
 		]
 	}`)
 
-	res, _, err := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "claude-3-7-sonnet", "p-anthropic", "messages", false, "", initBody)
+	res, _, err := executor.Execute(context.Background(), pluginsList, bindings, nil, "k1", "Key 1", "claude-3-7-sonnet", "p-anthropic", "http", "messages", false, "", initBody)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -223,3 +226,124 @@ func TestPipelineExecution_MessagesFormat(t *testing.T) {
 		t.Errorf("expected HTTP plugin to receive api_format='messages', got %q", httpReceivedFormat)
 	}
 }
+
+func TestPipelineExecution_BillionContext_ChatAndMessages(t *testing.T) {
+	builtin.ResetBillionContextHealthCache()
+	mockBili := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__bili/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mockBili.Close()
+
+	plg := Plugin{
+		ID:            "billion-context",
+		Kind:          KindBuiltin,
+		PipelineOrder: 15,
+		FailurePolicy: PolicyOpen,
+	}
+	binding := Binding{
+		PluginID:  "billion-context",
+		ScopeType: ScopeGlobal,
+		State:     StateOn,
+		Settings:  fmt.Sprintf(`{"url":"%s"}`, mockBili.URL),
+	}
+	executor := NewPipelineExecutor(mockBili.Client())
+
+	// Test chat format
+	initBodyChat := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+	resChat, _, err := executor.Execute(context.Background(), []Plugin{plg}, []Binding{binding}, nil, "k1", "Key 1", "gpt-4o", "p1", "http", "chat", false, "", initBodyChat)
+	if err != nil {
+		t.Fatalf("chat format error: %v", err)
+	}
+	if resChat.UpstreamProxyURL != mockBili.URL {
+		t.Fatalf("expected UpstreamProxyURL %s, got %s", mockBili.URL, resChat.UpstreamProxyURL)
+	}
+	if len(resChat.PluginsApplied) != 1 || resChat.PluginsApplied[0] != "billion-context" {
+		t.Fatalf("expected plugins applied [billion-context], got %v", resChat.PluginsApplied)
+	}
+
+	// Test messages format
+	initBodyMsg := []byte(`{"model":"claude-3-7-sonnet","messages":[{"role":"user","content":"hi"}]}`)
+	resMsg, _, err := executor.Execute(context.Background(), []Plugin{plg}, []Binding{binding}, nil, "k1", "Key 1", "claude-3-7-sonnet", "p-anthropic", "http", "messages", false, "", initBodyMsg)
+	if err != nil {
+		t.Fatalf("messages format error: %v", err)
+	}
+	if resMsg.UpstreamProxyURL != mockBili.URL {
+		t.Fatalf("expected UpstreamProxyURL %s, got %s", mockBili.URL, resMsg.UpstreamProxyURL)
+	}
+	if len(resMsg.PluginsApplied) != 1 || resMsg.PluginsApplied[0] != "billion-context" {
+		t.Fatalf("expected plugins applied [billion-context], got %v", resMsg.PluginsApplied)
+	}
+}
+
+func TestPipelineExecution_BillionContext_CliproxyBackend(t *testing.T) {
+	builtin.ResetBillionContextHealthCache()
+	plg := Plugin{
+		ID:            "billion-context",
+		Kind:          KindBuiltin,
+		PipelineOrder: 15,
+		FailurePolicy: PolicyOpen,
+	}
+	binding := Binding{
+		PluginID:  "billion-context",
+		ScopeType: ScopeGlobal,
+		State:     StateOn,
+		Settings:  `{"url":"http://127.0.0.1:8788"}`,
+	}
+	executor := NewPipelineExecutor(nil)
+	initBody := []byte(`{"model":"claude-3-7-sonnet","messages":[{"role":"user","content":"hi"}]}`)
+
+	res, _, err := executor.Execute(context.Background(), []Plugin{plg}, []Binding{binding}, nil, "k1", "Key 1", "claude-3-7-sonnet", "p-oauth", "cliproxy", "messages", false, "", initBody)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.UpstreamProxyURL != "" {
+		t.Fatalf("expected empty UpstreamProxyURL for cliproxy, got %s", res.UpstreamProxyURL)
+	}
+	if len(res.PluginsSkipped) != 1 || res.PluginsSkipped[0] != "billion-context:unsupported_backend" {
+		t.Fatalf("expected billion-context:unsupported_backend in PluginsSkipped, got %v", res.PluginsSkipped)
+	}
+}
+
+func TestPipelineExecution_BillionContext_FailurePolicy(t *testing.T) {
+	builtin.ResetBillionContextHealthCache()
+	failingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failingSrv.Close()
+
+	initBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+
+	// Fail open: continues direct
+	openPlg := Plugin{ID: "billion-context", Kind: KindBuiltin, PipelineOrder: 15, FailurePolicy: PolicyOpen}
+	openBinding := Binding{PluginID: "billion-context", ScopeType: ScopeGlobal, State: StateOn, Settings: fmt.Sprintf(`{"url":"%s"}`, failingSrv.URL)}
+	executor := NewPipelineExecutor(failingSrv.Client())
+
+	resOpen, _, errOpen := executor.Execute(context.Background(), []Plugin{openPlg}, []Binding{openBinding}, nil, "k1", "Key 1", "gpt-4o", "p1", "http", "chat", false, "", initBody)
+	if errOpen != nil || resOpen.Rejected {
+		t.Fatalf("fail-open should not reject: res=%v, err=%v", resOpen, errOpen)
+	}
+	if resOpen.UpstreamProxyURL != "" {
+		t.Fatalf("expected empty UpstreamProxyURL on fail-open, got %s", resOpen.UpstreamProxyURL)
+	}
+	if len(resOpen.PluginErrors) != 1 || resOpen.PluginErrors[0] != "billion-context" {
+		t.Fatalf("expected billion-context in PluginErrors, got %v", resOpen.PluginErrors)
+	}
+
+	// Fail closed: rejects 503
+	builtin.ResetBillionContextHealthCache()
+	closedPlg := Plugin{ID: "billion-context", Kind: KindBuiltin, PipelineOrder: 15, FailurePolicy: PolicyClosed}
+	closedBinding := Binding{PluginID: "billion-context", ScopeType: ScopeGlobal, State: StateOn, Settings: fmt.Sprintf(`{"url":"%s"}`, failingSrv.URL)}
+
+	resClosed, _, errClosed := executor.Execute(context.Background(), []Plugin{closedPlg}, []Binding{closedBinding}, nil, "k1", "Key 1", "gpt-4o", "p1", "http", "chat", false, "", initBody)
+	if errClosed != nil {
+		t.Fatalf("unexpected execution err: %v", errClosed)
+	}
+	if !resClosed.Rejected || resClosed.RejectCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 rejection for fail-closed, got %v", resClosed)
+	}
+}
+

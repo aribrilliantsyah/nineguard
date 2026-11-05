@@ -257,6 +257,9 @@ export function mount(root) {
       )
     );
 
+    const freshTokens = Math.max(0, (reportData.prompt_tokens || 0) - (reportData.cache_read_tokens || 0) - (reportData.cache_write_tokens || 0));
+    const cacheReadTokens = reportData.cache_read_tokens || 0;
+
     // 2. Executive KPI Grid (4 cards)
     const kpiGrid = h('div', { class: 'print-kpi-grid' },
       h('div', { class: 'print-kpi-card' },
@@ -267,7 +270,7 @@ export function mount(root) {
       h('div', { class: 'print-kpi-card' },
         h('div', { class: 'label' }, 'Total Tokens'),
         h('div', { class: 'value' }, fmtCompact(reportData.total_tokens || 0)),
-        h('div', { class: 'sub' }, `↓ ${fmtCompact(reportData.prompt_tokens || 0)} in · ↑ ${fmtCompact(reportData.completion_tokens || 0)} out`)
+        h('div', { class: 'sub' }, `↓ ${fmtCompact(freshTokens)} fresh · ${fmtCompact(cacheReadTokens)} cache · ↑ ${fmtCompact(reportData.completion_tokens || 0)} out`)
       ),
       h('div', { class: 'print-kpi-card' },
         h('div', { class: 'label' }, 'Total Requests'),
@@ -285,11 +288,13 @@ export function mount(root) {
     const keyRows = (reportData.keys_breakdown || []).map(k => {
       const shareStr = typeof k.token_share === 'number' ? `${k.token_share.toFixed(1)}%` : '-';
       const costStr = formatCost(k.estimated_cost_usd, cur, rate, k.unpriced_requests);
+      const freshK = Math.max(0, (k.prompt_tokens || 0) - (k.cache_read_tokens || 0) - (k.cache_write_tokens || 0));
       return h('tr', null,
         h('td', { class: 'strong wrap' }, k.key_name),
         h('td', { class: 'muted nowrap' }, k.key || '-'),
         h('td', { class: 'num' }, fmtNum(k.total_requests)),
-        h('td', { class: 'num' }, fmtNum(k.prompt_tokens)),
+        h('td', { class: 'num' }, fmtNum(freshK)),
+        h('td', { class: 'num' }, fmtNum(k.cache_read_tokens || 0)),
         h('td', { class: 'num' }, fmtNum(k.completion_tokens)),
         h('td', { class: 'num strong' }, fmtNum(k.total_tokens)),
         h('td', { class: 'num strong' }, costStr),
@@ -305,7 +310,8 @@ export function mount(root) {
             h('th', null, 'Client Key'),
             h('th', null, 'Masked Key'),
             h('th', { class: 'num' }, 'Requests'),
-            h('th', { class: 'num' }, 'Input Tokens'),
+            h('th', { class: 'num' }, 'Fresh Input'),
+            h('th', { class: 'num' }, 'Cache Read'),
             h('th', { class: 'num' }, 'Output Tokens'),
             h('th', { class: 'num' }, 'Total Tokens'),
             h('th', { class: 'num' }, 'Est. Spend'),
@@ -313,17 +319,20 @@ export function mount(root) {
           )
         ),
         h('tbody', null, ...keyRows)
-      )
+      ),
+      h('p', { class: 'print-note' }, "Cache reads are prompt tokens served from the provider's cache and are billed at a reduced rate.")
     );
 
     // 4. Model Utilization Table
     const modelRows = (reportData.models_breakdown || []).map(m => {
       const shareStr = typeof m.token_share === 'number' ? `${m.token_share.toFixed(1)}%` : '-';
       const costStr = formatCost(m.estimated_cost_usd, cur, rate, m.unpriced_requests);
+      const freshM = Math.max(0, (m.prompt_tokens || 0) - (m.cache_read_tokens || 0) - (m.cache_write_tokens || 0));
       return h('tr', null,
         h('td', { class: 'strong' }, m.model),
         h('td', { class: 'num' }, fmtNum(m.total_requests)),
-        h('td', { class: 'num' }, fmtNum(m.prompt_tokens)),
+        h('td', { class: 'num' }, fmtNum(freshM)),
+        h('td', { class: 'num' }, fmtNum(m.cache_read_tokens || 0)),
         h('td', { class: 'num' }, fmtNum(m.completion_tokens)),
         h('td', { class: 'num strong' }, fmtNum(m.total_tokens)),
         h('td', { class: 'num strong' }, costStr),
@@ -338,7 +347,8 @@ export function mount(root) {
           h('tr', null,
             h('th', null, 'Target Model'),
             h('th', { class: 'num' }, 'Requests'),
-            h('th', { class: 'num' }, 'Input Tokens'),
+            h('th', { class: 'num' }, 'Fresh Input'),
+            h('th', { class: 'num' }, 'Cache Read'),
             h('th', { class: 'num' }, 'Output Tokens'),
             h('th', { class: 'num' }, 'Total Tokens'),
             h('th', { class: 'num' }, 'Est. Spend'),
@@ -346,7 +356,8 @@ export function mount(root) {
           )
         ),
         h('tbody', null, ...modelRows)
-      )
+      ),
+      h('p', { class: 'print-note' }, "Cache reads are prompt tokens served from the provider's cache and are billed at a reduced rate.")
     );
 
     // 5. Footer
@@ -476,9 +487,9 @@ export function mount(root) {
     const totToks = reportData.total_tokens || 0;
     const promptToks = reportData.prompt_tokens || 0;
     const compToks = reportData.completion_tokens || 0;
-
-    const promptPct = totToks > 0 ? ((promptToks / totToks) * 100) : 0;
-    const compPct = totToks > 0 ? ((compToks / totToks) * 100) : 0;
+    const cacheReadToks = reportData.cache_read_tokens || 0;
+    const cacheWriteToks = reportData.cache_write_tokens || 0;
+    const freshToks = Math.max(0, promptToks - cacheReadToks - cacheWriteToks);
 
     const totalReq = reportData.total_requests || 0;
     let totalSuccess = 0;
@@ -519,10 +530,12 @@ export function mount(root) {
 
     // Sub-content for Total Tokens Card
     const tokensSub = h('div', null,
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', marginBottom: '5px' } },
-        h('span', { class: 'tok-in', title: `Input Prompt: ${fmtNum(promptToks)}` }, `↓ ${fmtCompact(promptToks)} in (${promptPct.toFixed(0)}%)`),
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', marginBottom: '5px' } },
+        h('span', { class: 'tok-in', title: `Fresh Input: ${fmtNum(freshToks)} tokens` }, `↓ ${fmtCompact(freshToks)} fresh`),
         h('span', { class: 'muted' }, '·'),
-        h('span', { class: 'tok-out', title: `Output Response: ${fmtNum(compToks)}` }, `↑ ${fmtCompact(compToks)} out (${compPct.toFixed(0)}%)`)
+        h('span', { class: 'muted', title: `Cache Read: ${fmtNum(cacheReadToks)} tokens` }, `${fmtCompact(cacheReadToks)} cache`),
+        h('span', { class: 'muted' }, '·'),
+        h('span', { class: 'tok-out', title: `Output Response: ${fmtNum(compToks)} tokens` }, `↑ ${fmtCompact(compToks)} out`)
       ),
       totToks > 0 ? renderRatioBar(promptToks, compToks) : null
     );
@@ -612,7 +625,7 @@ export function mount(root) {
       h('div', { class: 'breakdown-metrics' },
         h('div', { class: 'metric-col-tokens', style: { textAlign: 'right' } },
           h('span', null, 'Total Tokens'),
-          h('div', { class: 'sub-hdr' }, '↓ Input · ↑ Output')
+          h('div', { class: 'sub-hdr' }, '↓ Fresh · Cache · ↑ Out')
         ),
         h('div', { class: 'metric-col-cost', style: { textAlign: 'right', minWidth: '85px' } },
           h('span', null, 'Est. Cost')
@@ -654,6 +667,7 @@ export function mount(root) {
 
       const chevron = icon(isExpanded ? 'chevron-down' : 'chevron-right');
       const shareVal = typeof k.token_share === 'number' ? `${k.token_share.toFixed(1)}%` : '0%';
+      const freshK = Math.max(0, (k.prompt_tokens || 0) - (k.cache_read_tokens || 0) - (k.cache_write_tokens || 0));
 
       const itemCard = h('div', { class: 'breakdown-card', style: { marginBottom: '10px', overflow: 'hidden' } },
         h('div', {
@@ -690,8 +704,10 @@ export function mount(root) {
             // Tokens Column
             h('div', { class: 'metric-col-tokens', style: { textAlign: 'right' } },
               h('div', { style: { fontSize: '14px', fontWeight: 'bold' } }, fmtNum(k.total_tokens)),
-              h('div', { style: { fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '4px' } },
-                h('span', { class: 'tok-in', title: `Input Prompt: ${fmtNum(k.prompt_tokens)} tokens` }, `↓ ${fmtCompact(k.prompt_tokens)}`),
+              h('div', { style: { fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '3px' } },
+                h('span', { class: 'tok-in', title: `Fresh Input: ${fmtNum(freshK)} tokens` }, `↓ ${fmtCompact(freshK)}`),
+                h('span', { class: 'muted' }, '·'),
+                h('span', { class: 'muted', title: `Cache Read: ${fmtNum(k.cache_read_tokens || 0)} tokens` }, `${fmtCompact(k.cache_read_tokens || 0)}c`),
                 h('span', { class: 'muted' }, '/'),
                 h('span', { class: 'tok-out', title: `Output Response: ${fmtNum(k.completion_tokens)} tokens` }, `↑ ${fmtCompact(k.completion_tokens)}`)
               ),
@@ -752,13 +768,15 @@ export function mount(root) {
         const modelRows = models.map((m) => {
           const modShare = typeof m.share === 'number' ? `${m.share.toFixed(1)}%` : '-';
           const costStr = formatCost(m.estimated_cost_usd, costSettings.effective_currency, costSettings.effective_rate, m.unpriced_requests);
+          const freshM = Math.max(0, (m.prompt_tokens || 0) - (m.cache_read_tokens || 0) - (m.cache_write_tokens || 0));
           return h('tr', null,
             h('td', { class: 'strong' },
               h('span', { class: 'swatch', style: { display: 'inline-block', width: '8px', height: '8px', borderRadius: '2px', background: 'var(--lv-info)', marginRight: '6px' } }),
               m.model
             ),
             h('td', { class: 'num' }, fmtNum(m.requests)),
-            h('td', { class: 'num tok-in' }, fmtNum(m.prompt_tokens)),
+            h('td', { class: 'num tok-in' }, fmtNum(freshM)),
+            h('td', { class: 'num muted' }, fmtNum(m.cache_read_tokens || 0)),
             h('td', { class: 'num tok-out' }, fmtNum(m.comp_tokens)),
             h('td', null, renderRatioBar(m.prompt_tokens, m.comp_tokens)),
             h('td', { class: 'num strong' }, fmtNum(m.total_tokens)),
@@ -785,10 +803,13 @@ export function mount(root) {
                 h('tr', null,
                   h('th', null, 'Model'),
                   h('th', { class: 'num' }, 'Requests'),
-                  h('th', { class: 'num', style: { minWidth: '110px' } },
-                    h('span', { class: 'tok-in' }, 'Input')
+                  h('th', { class: 'num', style: { minWidth: '100px' } },
+                    h('span', { class: 'tok-in' }, 'Fresh Input')
                   ),
-                  h('th', { class: 'num', style: { minWidth: '110px' } },
+                  h('th', { class: 'num', style: { minWidth: '95px' } },
+                    h('span', { class: 'muted' }, 'Cache Read')
+                  ),
+                  h('th', { class: 'num', style: { minWidth: '100px' } },
                     h('span', { class: 'tok-out' }, 'Output')
                   ),
                   h('th', { style: { width: '90px' } }, 'In / Out Ratio'),
@@ -798,7 +819,7 @@ export function mount(root) {
                 )
               ),
               h('tbody', null,
-                modelRows.length ? modelRows : h('tr', null, h('td', { colspan: 8, class: 'muted' }, 'No model breakdown available.'))
+                modelRows.length ? modelRows : h('tr', null, h('td', { colspan: 9, class: 'muted' }, 'No model breakdown available.'))
               )
             )
           )
@@ -838,6 +859,7 @@ export function mount(root) {
       const isExpanded = expandedModels.has(m.model);
       const chevron = icon(isExpanded ? 'chevron-down' : 'chevron-right');
       const shareVal = typeof m.token_share === 'number' ? `${m.token_share.toFixed(1)}%` : '0%';
+      const freshM = Math.max(0, (m.prompt_tokens || 0) - (m.cache_read_tokens || 0) - (m.cache_write_tokens || 0));
 
       const itemCard = h('div', { class: 'breakdown-card', style: { marginBottom: '10px', overflow: 'hidden' } },
         h('div', {
@@ -874,8 +896,10 @@ export function mount(root) {
             // Tokens Column
             h('div', { class: 'metric-col-tokens', style: { textAlign: 'right' } },
               h('div', { style: { fontSize: '14px', fontWeight: 'bold' } }, fmtNum(m.total_tokens)),
-              h('div', { style: { fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '4px' } },
-                h('span', { class: 'tok-in', title: `Input Prompt: ${fmtNum(m.prompt_tokens)} tokens` }, `↓ ${fmtCompact(m.prompt_tokens)}`),
+              h('div', { style: { fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '3px' } },
+                h('span', { class: 'tok-in', title: `Fresh Input: ${fmtNum(freshM)} tokens` }, `↓ ${fmtCompact(freshM)}`),
+                h('span', { class: 'muted' }, '·'),
+                h('span', { class: 'muted', title: `Cache Read: ${fmtNum(m.cache_read_tokens || 0)} tokens` }, `${fmtCompact(m.cache_read_tokens || 0)}c`),
                 h('span', { class: 'muted' }, '/'),
                 h('span', { class: 'tok-out', title: `Output Response: ${fmtNum(m.completion_tokens)} tokens` }, `↑ ${fmtCompact(m.completion_tokens)}`)
               ),
@@ -936,6 +960,7 @@ export function mount(root) {
         const consumerRows = consumers.map((c) => {
           const cShare = typeof c.share === 'number' ? `${c.share.toFixed(1)}%` : '-';
           const costStr = formatCost(c.estimated_cost_usd, costSettings.effective_currency, costSettings.effective_rate, c.unpriced_requests);
+          const freshC = Math.max(0, (c.prompt_tokens || 0) - (c.cache_read_tokens || 0) - (c.cache_write_tokens || 0));
           return h('tr', null,
             h('td', { class: 'strong' },
               h('span', { class: 'badge', style: { background: 'var(--hover)', marginRight: '6px' } }, icon('key')),
@@ -944,7 +969,8 @@ export function mount(root) {
             ),
             h('td', null, h('code', { class: 'muted' }, c.key)),
             h('td', { class: 'num' }, fmtNum(c.requests)),
-            h('td', { class: 'num tok-in' }, fmtNum(c.prompt_tokens)),
+            h('td', { class: 'num tok-in' }, fmtNum(freshC)),
+            h('td', { class: 'num muted' }, fmtNum(c.cache_read_tokens || 0)),
             h('td', { class: 'num tok-out' }, fmtNum(c.comp_tokens)),
             h('td', null, renderRatioBar(c.prompt_tokens, c.comp_tokens)),
             h('td', { class: 'num strong' }, fmtNum(c.total_tokens)),
@@ -972,10 +998,13 @@ export function mount(root) {
                   h('th', null, 'Client Key Name'),
                   h('th', null, 'Masked Key'),
                   h('th', { class: 'num' }, 'Requests'),
-                  h('th', { class: 'num', style: { minWidth: '110px' } },
-                    h('span', { class: 'tok-in' }, 'Input')
+                  h('th', { class: 'num', style: { minWidth: '100px' } },
+                    h('span', { class: 'tok-in' }, 'Fresh Input')
                   ),
-                  h('th', { class: 'num', style: { minWidth: '110px' } },
+                  h('th', { class: 'num', style: { minWidth: '95px' } },
+                    h('span', { class: 'muted' }, 'Cache Read')
+                  ),
+                  h('th', { class: 'num', style: { minWidth: '100px' } },
                     h('span', { class: 'tok-out' }, 'Output')
                   ),
                   h('th', { style: { width: '90px' } }, 'In / Out Ratio'),
@@ -985,7 +1014,7 @@ export function mount(root) {
                 )
               ),
               h('tbody', null,
-                consumerRows.length ? consumerRows : h('tr', null, h('td', { colspan: 9, class: 'muted' }, 'No consumer breakdown available.'))
+                consumerRows.length ? consumerRows : h('tr', null, h('td', { colspan: 10, class: 'muted' }, 'No consumer breakdown available.'))
               )
             )
           )

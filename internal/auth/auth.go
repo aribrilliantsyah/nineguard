@@ -3,7 +3,9 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"log/slog"
@@ -20,6 +22,39 @@ type contextKey string
 const userContextKey contextKey = "user"
 const SessionCookieName = "nineguard_session"
 const bcryptCost = 12
+
+var dummyHash string
+
+func init() {
+	h, err := bcrypt.GenerateFromPassword([]byte("dummy-password-for-constant-timing"), bcryptCost)
+	if err != nil {
+		panic(err)
+	}
+	dummyHash = string(h)
+}
+
+var PresetRecoveryQuestions = []string{
+	"What was the name of your first pet?",
+	"In what city were you born?",
+	"What was your childhood nickname?",
+	"What was the make and model of your first car?",
+	"What is your mother's maiden name?",
+	"What was the name of your first elementary school?",
+}
+
+func DecoyRecoveryQuestion(username string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(username))))
+	idx := binary.BigEndian.Uint32(sum[:4]) % uint32(len(PresetRecoveryQuestions))
+	return PresetRecoveryQuestions[idx]
+}
+
+type RecoveryError struct {
+	InternalReason string
+}
+
+func (e *RecoveryError) Error() string {
+	return "Invalid username or recovery answer"
+}
 
 type User struct {
 	ID               int64      `json:"id"`
@@ -115,6 +150,7 @@ func (m *Manager) Login(username, password string) (*User, string, error) {
 
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(password))
 			slog.Warn("login failure: user not found", "source", "audit", "username", username, "action", "auth.login.failure")
 			return nil, "", errors.New("invalid username or password")
 		}
@@ -392,28 +428,35 @@ func (m *Manager) RecoverPassword(username, answer, newPassword string) error {
 	if len(newPassword) < 6 {
 		return errors.New("password must be at least 6 characters")
 	}
+	trimmedUser := strings.TrimSpace(username)
+	trimmedAns := strings.TrimSpace(strings.ToLower(answer))
+
 	var id int64
 	var ansHash string
-	err := m.db.QueryRow("SELECT id, recovery_answer_hash FROM users WHERE username = ?", strings.TrimSpace(username)).Scan(&id, &ansHash)
+	err := m.db.QueryRow("SELECT id, recovery_answer_hash FROM users WHERE username = ?", trimmedUser).Scan(&id, &ansHash)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return errors.New("invalid username or recovery answer")
+			_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(trimmedAns))
+			slog.Warn("password recovery failure: user not found", "source", "audit", "username", trimmedUser, "action", "auth.password.recover.failure")
+			return &RecoveryError{InternalReason: "user not found"}
 		}
 		return err
 	}
 	if strings.TrimSpace(ansHash) == "" {
-		return errors.New("no recovery question configured for this account")
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(trimmedAns))
+		slog.Warn("password recovery failure: no recovery question configured", "source", "audit", "actor_id", id, "username", trimmedUser, "action", "auth.password.recover.failure")
+		return &RecoveryError{InternalReason: "no recovery question configured"}
 	}
 
-	trimmedAns := strings.TrimSpace(strings.ToLower(answer))
 	if err := bcrypt.CompareHashAndPassword([]byte(ansHash), []byte(trimmedAns)); err != nil {
-		slog.Warn("password recovery failure: incorrect answer", "source", "audit", "username", username, "action", "auth.password.recover.failure")
-		return errors.New("incorrect recovery answer")
+		slog.Warn("password recovery failure: incorrect answer", "source", "audit", "actor_id", id, "username", trimmedUser, "action", "auth.password.recover.failure")
+		return &RecoveryError{InternalReason: "incorrect recovery answer"}
 	}
 
 	err = m.ChangePassword(id, newPassword)
 	if err == nil {
-		slog.Info("password recovered successfully", "source", "audit", "actor_id", id, "username", username, "action", "auth.password.recover.success")
+		_, _ = m.db.Exec("DELETE FROM sessions WHERE user_id = ?", id)
+		slog.Info("password recovered successfully", "source", "audit", "actor_id", id, "username", trimmedUser, "action", "auth.password.recover.success")
 	}
 	return err
 }

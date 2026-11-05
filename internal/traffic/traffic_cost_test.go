@@ -42,6 +42,8 @@ func TestTrafficCostAggregations(t *testing.T) {
 		PromptTokens:     1000,
 		CompletionTokens: 500,
 		TotalTokens:      1500,
+		CacheReadTokens:  100,
+		CacheWriteTokens: 50,
 		StatusCode:       200,
 		CostUSD:          &cost1,
 	})
@@ -58,6 +60,8 @@ func TestTrafficCostAggregations(t *testing.T) {
 		PromptTokens:     2000,
 		CompletionTokens: 1000,
 		TotalTokens:      3000,
+		CacheReadTokens:  250,
+		CacheWriteTokens: 100,
 		StatusCode:       200,
 		CostUSD:          &cost2,
 	})
@@ -124,6 +128,12 @@ func TestTrafficCostAggregations(t *testing.T) {
 	if !floatClose(report.EstimatedCostUSD, expectedCost) {
 		t.Fatalf("expected report EstimatedCostUSD %v, got %v", expectedCost, report.EstimatedCostUSD)
 	}
+	if report.CacheReadTokens != 350 {
+		t.Fatalf("expected report CacheReadTokens 350, got %d", report.CacheReadTokens)
+	}
+	if report.CacheWriteTokens != 150 {
+		t.Fatalf("expected report CacheWriteTokens 150, got %d", report.CacheWriteTokens)
+	}
 	if report.UnpricedRequests != 1 {
 		t.Fatalf("expected report unpriced requests 1, got %d", report.UnpricedRequests)
 	}
@@ -136,10 +146,74 @@ func TestTrafficCostAggregations(t *testing.T) {
 			if !floatClose(kb.EstimatedCostUSD, expectedCost) {
 				t.Fatalf("expected kb key-1 cost %v, got %v", expectedCost, kb.EstimatedCostUSD)
 			}
+			if kb.CacheReadTokens != 350 {
+				t.Fatalf("expected kb key-1 CacheReadTokens 350, got %d", kb.CacheReadTokens)
+			}
+			if kb.CacheWriteTokens != 150 {
+				t.Fatalf("expected kb key-1 CacheWriteTokens 150, got %d", kb.CacheWriteTokens)
+			}
+			if len(kb.ModelUsage) > 0 {
+				for _, mu := range kb.ModelUsage {
+					if mu.Model == "claude-3-5-sonnet" && mu.CacheReadTokens != 100 {
+						t.Fatalf("expected mu claude-3-5-sonnet CacheReadTokens 100, got %d", mu.CacheReadTokens)
+					}
+				}
+			}
 		}
 	}
 	if !reportKey1Found {
 		t.Fatalf("key-1 not found in report KeysBreakdown")
 	}
 	_ = now
+}
+
+func TestDashboardStats_ComparisonCostDelta(t *testing.T) {
+	d, err := db.InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer d.Close()
+
+	mgr := traffic.NewManager(d)
+
+	now := time.Now().UTC()
+	yesterday := now.AddDate(0, 0, -1)
+
+	curCost := 15.0
+	prevCost := 10.0
+
+	// Current period row (today)
+	_, err = d.Exec(`
+		INSERT INTO traffic_logs (
+			timestamp, api_key, api_key_name, model, status_code, client_ip,
+			prompt_tokens, completion_tokens, total_tokens, duration_ms, cost_usd
+		) VALUES (?, 'sk-curr', 'key-curr', 'gpt-4o', 200, '127.0.0.1', 100, 50, 150, 20, ?)
+	`, now.Format("2006-01-02 15:04:05"), curCost)
+	if err != nil {
+		t.Fatalf("insert current row: %v", err)
+	}
+
+	// Previous period row (yesterday)
+	_, err = d.Exec(`
+		INSERT INTO traffic_logs (
+			timestamp, api_key, api_key_name, model, status_code, client_ip,
+			prompt_tokens, completion_tokens, total_tokens, duration_ms, cost_usd
+		) VALUES (?, 'sk-prev', 'key-prev', 'gpt-4o', 200, '127.0.0.1', 100, 50, 150, 20, ?)
+	`, yesterday.Format("2006-01-02 15:04:05"), prevCost)
+	if err != nil {
+		t.Fatalf("insert prev row: %v", err)
+	}
+
+	stats, err := mgr.GetDashboardStats("today", "", "", time.UTC)
+	if err != nil {
+		t.Fatalf("GetDashboardStats failed: %v", err)
+	}
+
+	if !floatClose(stats.Comparison.PrevEstimatedCost, prevCost) {
+		t.Fatalf("expected PrevEstimatedCost %v, got %v", prevCost, stats.Comparison.PrevEstimatedCost)
+	}
+	expectedDelta := (curCost - prevCost) / prevCost * 100.0 // 50.0%
+	if !floatClose(stats.Comparison.CostDeltaPct, expectedDelta) {
+		t.Fatalf("expected CostDeltaPct %v, got %v", expectedDelta, stats.Comparison.CostDeltaPct)
+	}
 }

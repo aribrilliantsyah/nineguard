@@ -1,4 +1,5 @@
 // Client Portal helpers for key validation, masking, and storage
+import { fmtNum, fmtCompact } from './ui.js';
 
 const STORAGE_KEY = 'nineguard_client_key';
 
@@ -110,4 +111,97 @@ export function budgetSummary(quota) {
 // "daily" -> "daily", "total" -> "lifetime"; used in "of your 1M daily budget".
 export function periodWord(period) {
   return period === 'total' ? 'lifetime' : (period || '');
+}
+
+// Summary sentence under activity header: range, tokens, requests, and top 1-2 models.
+export function activitySentence(s, range = '30d') {
+  if (!s || !s.requests) return '';
+  const rangeWord = range === '7d' ? 'Last 7 days' : range === 'all' ? 'All time' : 'Last 30 days';
+  const prefix = `${rangeWord}: ${fmtCompact(s.tokens?.total || 0)} tokens over ${fmtNum(s.requests)} requests.`;
+
+  const models = (s.models || []).filter((m) => (m.total || 0) > 0);
+  if (!models.length) return prefix;
+
+  const top1 = models[0];
+  const pct1 = Math.round(top1.pct_tokens != null ? top1.pct_tokens : (s.tokens?.total ? (top1.total / s.tokens.total) * 100 : 0));
+  if (models.length === 1) {
+    return `${prefix} Mostly ${top1.model_id} (${pct1}%).`;
+  }
+  const top2 = models[1];
+  const pct2 = Math.round(top2.pct_tokens != null ? top2.pct_tokens : (s.tokens?.total ? (top2.total / s.tokens.total) * 100 : 0));
+  return `${prefix} Mostly ${top1.model_id} (${pct1}%), then ${top2.model_id} (${pct2}%).`;
+}
+
+// Adapt usage data into the shape volumeChart expects for stacked daily tokens by model.
+export function adaptDailyTokens(s) {
+  const days = (s?.daily || []).slice(-60);
+  if (!days.length) return null;
+
+  const allModels = (s?.models || []).slice().sort((a, b) => (b.total || 0) - (a.total || 0));
+  const hasOther = allModels.length > 4;
+  const topModels = hasOther ? allModels.slice(0, 4) : allModels;
+  const otherModels = hasOther ? allModels.slice(4) : [];
+
+  const COLORS = ['var(--lv-info)', 'var(--lv-debug)', 'var(--lv-warn)', 'var(--lv-fatal)'];
+
+  // Series ordered bottom-to-top so volumeChart's order (reverse) reads top-to-bottom
+  const series = [];
+  if (hasOther) {
+    series.push({
+      label: 'Other',
+      levels: ['m_other'],
+      color: 'var(--spark)',
+    });
+  }
+  for (let j = topModels.length - 1; j >= 0; j--) {
+    series.push({
+      label: topModels[j].model_id,
+      levels: [`m_${j}`],
+      color: COLORS[j],
+    });
+  }
+
+  const topDailyMaps = topModels.map((m) => {
+    const map = new Map();
+    (m.daily || []).forEach((d) => map.set(d.date, d.total || 0));
+    return map;
+  });
+  const otherDailyMap = new Map();
+  if (hasOther) {
+    otherModels.forEach((m) => {
+      (m.daily || []).forEach((d) => {
+        otherDailyMap.set(d.date, (otherDailyMap.get(d.date) || 0) + (d.total || 0));
+      });
+    });
+  }
+
+  const bucket_nanos = 86400 * 1e9;
+  const totals = {};
+  topModels.forEach((m, j) => {
+    totals[`m_${j}`] = m.total || 0;
+  });
+  if (hasOther) {
+    totals['m_other'] = otherModels.reduce((acc, m) => acc + (m.total || 0), 0);
+  }
+
+  const buckets = days.map((d) => {
+    const start = Date.parse(d.date + 'T00:00:00Z') * 1e6;
+    const counts = {};
+    topModels.forEach((_, j) => {
+      counts[`m_${j}`] = topDailyMaps[j].get(d.date) || 0;
+    });
+    if (hasOther) {
+      counts['m_other'] = otherDailyMap.get(d.date) || 0;
+    }
+    return { start, counts };
+  });
+
+  const from = buckets[0].start;
+  const to = buckets[buckets.length - 1].start + bucket_nanos;
+
+  return {
+    chartData: { buckets, totals, from, to, bucket_nanos },
+    series,
+    days,
+  };
 }

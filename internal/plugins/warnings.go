@@ -10,6 +10,7 @@ func ComputeWarnings(effective []ResolvedPlugin, providerIsTokenSaving bool, pro
 	var warnings []Warning
 
 	var outputStylePlugins []string
+	var inputCompressionPlugins []string
 	var tokenSavers []string
 
 	for _, ep := range effective {
@@ -23,6 +24,9 @@ func ComputeWarnings(effective []ResolvedPlugin, providerIsTokenSaving bool, pro
 
 		if ep.Plugin.Category == CategoryOutputStyle {
 			outputStylePlugins = append(outputStylePlugins, name)
+		}
+		if ep.Plugin.Category == CategoryInputCompression {
+			inputCompressionPlugins = append(inputCompressionPlugins, name)
 		}
 		if ep.Plugin.Category == CategoryInputCompression || ep.Plugin.Category == CategoryOutputStyle {
 			tokenSavers = append(tokenSavers, name)
@@ -39,6 +43,20 @@ func ComputeWarnings(effective []ResolvedPlugin, providerIsTokenSaving bool, pro
 		warnings = append(warnings, Warning{
 			Code:    "output_style_overlap",
 			Plugins: outputStylePlugins,
+			Message: msg,
+		})
+	}
+
+	// 2. Input compression overlap
+	if len(inputCompressionPlugins) >= 2 {
+		joined := strings.Join(inputCompressionPlugins[:2], " and ")
+		if len(inputCompressionPlugins) > 2 {
+			joined = strings.Join(inputCompressionPlugins, ", ")
+		}
+		msg := fmt.Sprintf("%s both compress message history. Stacking them causes double compression and degrades context quality. Enable only one.", joined)
+		warnings = append(warnings, Warning{
+			Code:    "input_compression_overlap",
+			Plugins: inputCompressionPlugins,
 			Message: msg,
 		})
 	}

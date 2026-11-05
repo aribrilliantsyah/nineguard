@@ -224,7 +224,8 @@ export function mount(root) {
           }))
         )
       );
-    } catch {
+    } catch (err) {
+      console.warn('loadUpstreamQuotaCard error:', err);
       // Optional card: never let it break the dashboard.
       if (alive) {
         upstreamQuotaCard.style.display = 'none';
@@ -1239,7 +1240,7 @@ export function mount(root) {
 
     const costDelta = comp.cost_delta_pct || 0;
     const costDeltaStr = costDelta >= 0 ? `+${costDelta.toFixed(0)}%` : `${costDelta.toFixed(0)}%`;
-    const costDeltaText = comp.prev_estimated_cost > 0 ? `${costDeltaStr} vs prev ${periodLabel}` : (stats.estimated_cost_usd > 0 ? 'API list price' : 'No cost yet');
+    const costDeltaText = comp.prev_estimated_cost > 0 ? `${costDeltaStr} vs ${currentPeriod === 'today' ? 'yesterday' : 'prev'}` : (stats.estimated_cost_usd > 0 ? 'API list price' : 'No cost yet');
     const costDeltaClass = costDelta > 0 ? 'delta-bad' : (costDelta < 0 ? 'delta-good' : '');
 
     // 1. Top KPI Row (Focusing on Success, Tokens, Est. Cost, Latency & Guard)

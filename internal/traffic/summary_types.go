@@ -47,6 +47,8 @@ type ModelUsagePoint struct {
 	Prompt     int64             `json:"prompt"`
 	Completion int64             `json:"completion"`
 	Total      int64             `json:"total"`
+	CacheRead  int64             `json:"cache_read"`
+	CacheWrite int64             `json:"cache_write"`
 	Cost       *float64          `json:"cost,omitempty"`
 	PctTokens  float64           `json:"pct_tokens"`
 	Daily      []ModelDailyUsage `json:"daily"`

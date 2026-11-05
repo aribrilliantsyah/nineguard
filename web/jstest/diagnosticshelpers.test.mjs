@@ -39,33 +39,23 @@ test('thinkingBadge returns badge descriptor or null', () => {
   const b4 = thinkingBadge(false, false, 0);
   assert.equal(b4, null);
 
-  // Unverifiable: Claude over chat format (requested, not delivered)
-  const b5 = thinkingBadge(true, false, 0, 'chat', 'claude-3-7-sonnet');
-  assert.equal(b5?.text, '?');
+  // Unverified: upstream did not report whether it reasoned (thinkingUnverified = true)
+  const b5 = thinkingBadge(true, false, 0, 'chat', 'deepseek-chat', true);
+  assert.equal(b5?.text, 'Unverified');
   assert.equal(b5?.icon, 'brain');
-  assert.equal(b5?.cls, 'thinking-unknown');
+  assert.equal(b5?.cls, 'thinking-unverified');
   assert.equal(
     b5?.title,
-    'Thinking was requested. Claude over the OpenAI chat format returns no observable reasoning text, so delivery cannot be verified.'
+    'Thinking was requested but the upstream did not report whether it reasoned'
   );
 
-  // Unverifiable case-insensitive check
-  const b6 = thinkingBadge(true, false, 0, 'chat', 'Anthropic/Claude-3-5-Sonnet');
-  assert.equal(b6?.text, '?');
-  assert.equal(b6?.cls, 'thinking-unknown');
-
-  // Non-Claude chat model requested but not delivered still returns lost
-  const b7 = thinkingBadge(true, false, 0, 'chat', 'gpt-4o');
+  // Non-Claude chat model requested but not delivered (thinkingUnverified = false) returns lost
+  const b7 = thinkingBadge(true, false, 0, 'chat', 'gpt-4o', false);
   assert.equal(b7?.text, 'Lost');
   assert.equal(b7?.cls, 'thinking-lost');
 
-  // Claude messages-format request requested but not delivered still returns lost
-  const b8 = thinkingBadge(true, false, 0, 'messages', 'claude-3-7-sonnet');
-  assert.equal(b8?.text, 'Lost');
-  assert.equal(b8?.cls, 'thinking-lost');
-
   // Delivered Claude chat request still returns delivered
-  const b9 = thinkingBadge(true, true, 2100, 'chat', 'claude-3-7-sonnet');
+  const b9 = thinkingBadge(true, true, 2100, 'chat', 'claude-3-7-sonnet', false);
   assert.equal(b9?.text, '2.1k');
   assert.equal(b9?.cls, 'thinking-delivered');
 });

@@ -246,6 +246,13 @@ export function mount(root) {
     onclick: () => patch({ thinking: p.thinking === 'lost' ? '' : 'lost' }),
   }, icon('brain'), 'Lost thinking');
 
+  const thinkingUnverifiedChip = h('button', {
+    class: `chip tf-chip-unverified ${p.thinking === 'unverified' ? 'active' : ''}`,
+    type: 'button',
+    title: 'Filter requests where thinking was requested but unverified upstream',
+    onclick: () => patch({ thinking: p.thinking === 'unverified' ? '' : 'unverified' }),
+  }, icon('brain'), 'Unverified thinking');
+
   const thinkingDeliveredChip = h('button', {
     class: `chip tf-chip-thinking ${p.thinking === 'delivered' ? 'active' : ''}`,
     type: 'button',
@@ -271,7 +278,7 @@ export function mount(root) {
   root.append(h('div', { class: 'page-fill' },
     h('div', { class: 'toolbar' },
       searchBox, range.el, h('span', { class: 'sep' }), keySel, modelSel, providerSel, clearBtn,
-      h('span', { class: 'spacer' }), h('span', { class: 'chips' }, ...chips, protoMessagesChip, protoChatChip, protoResponsesChip, imgChip, fallbackChip, thinkingLostChip, thinkingDeliveredChip),
+      h('span', { class: 'spacer' }), h('span', { class: 'chips' }, ...chips, protoMessagesChip, protoChatChip, protoResponsesChip, imgChip, fallbackChip, thinkingLostChip, thinkingUnverifiedChip, thinkingDeliveredChip),
       h('div', { class: 'tf-actions' }, liveBtn, alertBtn, exportBtn)),
     chartBox,
     h('div', { class: 'log-table traffic-table' },
@@ -638,7 +645,7 @@ export function mount(root) {
           return h('span', { class: `badge tf-badge ${pb.cls}`, title: pb.title }, pb.text);
         })(),
         (() => {
-          const tb = thinkingBadge(e.thinking_requested, e.thinking_delivered, e.reasoning_tokens, e.api_format, e.model);
+          const tb = thinkingBadge(e.thinking_requested, e.thinking_delivered, e.reasoning_tokens, e.api_format, e.model, e.thinking_unverified);
           if (!tb) return null;
           return h('span', { class: `badge tf-badge ${tb.cls}`, title: tb.title }, icon(tb.icon), tb.text);
         })(),
@@ -740,11 +747,8 @@ export function mount(root) {
           return `Delivered (${e.reasoning_tokens > 0 ? fmtNum(e.reasoning_tokens) + ' reasoning tokens' : 'observed in response'})`;
         }
         if (e.thinking_requested) {
-          const isUnverifiable = (e.api_format === 'chat' || (typeof e.api_format === 'string' && e.api_format.toLowerCase() === 'chat')) &&
-            typeof e.model === 'string' &&
-            e.model.toLowerCase().includes('claude');
-          if (isUnverifiable) {
-            return 'Unverifiable (Claude via OpenAI chat format does not expose reasoning text)';
+          if (e.thinking_unverified) {
+            return 'Unverified (thinking was requested but upstream did not report whether it reasoned)';
           }
           return 'Lost (requested by client, but no reasoning returned upstream)';
         }

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,11 +19,16 @@ import (
 	"nineguard/internal/keys"
 	"nineguard/internal/models"
 	"nineguard/internal/plugins"
+	"nineguard/internal/plugins/builtin"
 	"nineguard/internal/pricing"
 	"nineguard/internal/providers"
 	"nineguard/internal/traffic"
 	"nineguard/internal/upstream"
 )
+
+// StreamIdleTimeout is the maximum duration to wait for bytes from an upstream response body before canceling.
+// Default is 5 minutes.
+var StreamIdleTimeout = 5 * time.Minute
 
 type Proxy struct {
 	models     *models.Manager
@@ -71,7 +77,6 @@ func NewProxy(mm *models.Manager, tm *traffic.Manager, km *keys.Manager, pm *pro
 	}
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   15 * time.Minute, // Upper bound protection for long streaming
 	}
 	return &Proxy{
 		models:     mm,
@@ -498,6 +503,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var pluginsApplied, pluginsSkipped, pluginErrors string
 	var tokensSaved, tokensOverhead, pluginMs int
 	var upstreamAppliedHeader string
+	var upstreamProxyURL string
 
 	if isChatOrMessages && p.plugins != nil {
 		isBypass := strings.EqualFold(r.Header.Get("X-NineGuard-Plugins"), "off")
@@ -515,6 +521,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			keyName,
 			actualModel,
 			provider.ID,
+			provider.Backend,
 			apiFormat,
 			isBypass,
 			incomingApplied,
@@ -530,6 +537,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			tokensOverhead = pipeRes.TokensOverhead
 			pluginMs = int(pipeRes.DurationMs)
 			upstreamAppliedHeader = appliedHdr
+			upstreamProxyURL = pipeRes.UpstreamProxyURL
 
 			if pipeRes.Rejected {
 				errType := "permission_error"
@@ -611,6 +619,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		targetURL += "?" + r.URL.RawQuery
 	}
 
+	if upstreamProxyURL != "" && provider.Backend != "cliproxy" {
+		targetURL = builtin.WrapBillionContextURL(upstreamProxyURL, targetURL)
+	}
+
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(forwardBody))
 	if err != nil {
 		http.Error(w, `{"error":"failed to construct forward request"}`, http.StatusInternalServerError)
@@ -631,7 +643,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		outReq.Header.Del("X-NineGuard-Plugins-Applied")
 	}
-	if parsedU, err := url.Parse(targetBase); err == nil {
+	if upstreamProxyURL != "" && provider.Backend != "cliproxy" {
+		if parsedBiliURL, err := url.Parse(upstreamProxyURL); err == nil && parsedBiliURL.Host != "" {
+			outReq.Host = parsedBiliURL.Host
+		}
+	} else if parsedU, err := url.Parse(targetBase); err == nil {
 		outReq.Host = parsedU.Host
 	}
 	if provider.APIKey != "" {
@@ -672,7 +688,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		client = &http.Client{
 			Transport: transport,
-			Timeout:   15 * time.Minute,
 		}
 	}
 	var resp *http.Response
@@ -703,6 +718,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	idleBody, idleCtx := newIdleTimeoutReader(resp.Body, StreamIdleTimeout)
+	resp.Body = idleBody
 	defer resp.Body.Close()
 
 	// A Removed Model that upstream rejects as unknown gets a clear 404 instead of the
@@ -753,6 +770,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var promptTokens, completionTokens, totalTokens int
 	var cacheReadTokens, cacheWriteTokens, reasoningTokens int
 	var thinkingDelivered bool
+	var thinkingVerifiable bool
 	var servedModel string
 	var usageEstimated bool
 	var responseErrMsg *string
@@ -799,6 +817,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if err != nil {
+				if errors.Is(err, ErrUpstreamIdleTimeout) || errors.Is(idleCtx.Err(), context.Canceled) && context.Cause(idleCtx) == ErrUpstreamIdleTimeout {
+					idleErrStr := "upstream idle timeout: no data received for " + StreamIdleTimeout.String()
+					responseErrMsg = &idleErrStr
+				}
 				if eventBuf.Len() > 0 {
 					rawEvent := eventBuf.Bytes()
 					isUsageOnly, dataPayload := IsUsageOnlySSEEvent(rawEvent)
@@ -829,11 +851,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		cacheWriteTokens = diag.CacheWriteTokens
 		reasoningTokens = diag.ReasoningTokens
 		thinkingDelivered = diag.ThinkingDelivered
+		thinkingVerifiable = diag.ThinkingVerifiable
 		servedModel = diag.ServedModel
 		usageEstimated = diag.UsageEstimated
 		capturedRespBody = diagParser.BuildStreamSummary(chunkCount, diag)
 	} else {
 		respBody, err := io.ReadAll(resp.Body)
+		if errors.Is(err, ErrUpstreamIdleTimeout) || errors.Is(idleCtx.Err(), context.Canceled) && context.Cause(idleCtx) == ErrUpstreamIdleTimeout {
+			idleErrStr := "upstream idle timeout: no data received for " + StreamIdleTimeout.String()
+			responseErrMsg = &idleErrStr
+		}
 		if err == nil {
 			if len(offeredTools) > 0 {
 				decloakedResp := DecloakResponseBody(apiFormat, respBody, offeredTools)
@@ -853,8 +880,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			cacheWriteTokens = diag.CacheWriteTokens
 			reasoningTokens = diag.ReasoningTokens
 			thinkingDelivered = diag.ThinkingDelivered
+			thinkingVerifiable = diag.ThinkingVerifiable
 			servedModel = diag.ServedModel
 			if resp.StatusCode < 400 && totalTokens == 0 {
+				promptTokens = len(bodyBytes) / 4
+				completionTokens = len(respBody) / 4
+				if completionTokens < 1 {
+					completionTokens = 1
+				}
+				totalTokens = promptTokens + completionTokens
 				usageEstimated = true
 			}
 			if diag.ErrorMessage != nil {
@@ -894,10 +928,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ApiFormat:         apiFormat,
 			CacheReadTokens:   cacheReadTokens,
 			CacheWriteTokens:  cacheWriteTokens,
-			ReasoningTokens:   reasoningTokens,
-			ThinkingRequested: thinkingRequested,
-			ThinkingDelivered: thinkingDelivered,
-			ServedModel:       servedModel,
+			ReasoningTokens:    reasoningTokens,
+			ThinkingRequested:  thinkingRequested,
+			ThinkingDelivered:  thinkingDelivered,
+			ThinkingUnverified: thinkingRequested && !thinkingDelivered && !thinkingVerifiable,
+			ServedModel:        servedModel,
 			ModelFallback:     models.IsModelFallback(modelID, servedModel),
 			UsageEstimated:    usageEstimated,
 		}

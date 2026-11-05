@@ -91,7 +91,7 @@ func (m *Manager) GetUsageSummary(keyID string, rng string, loc *time.Location, 
 			COALESCE(SUM(CASE WHEN status_code < 400 AND cost_usd IS NULL THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN thinking_requested = 1 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN thinking_delivered = 1 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN thinking_requested = 1 AND thinking_delivered = 0 AND NOT (api_format = 'chat' AND LOWER(model) LIKE '%%claude%%') THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN thinking_requested = 1 AND thinking_delivered = 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN model_fallback = 1 THEN 1 ELSE 0 END), 0),
 			MIN(timestamp)
 		FROM traffic_logs
@@ -304,6 +304,8 @@ func (m *Manager) GetUsageSummary(keyID string, rng string, loc *time.Location, 
 			COALESCE(SUM(prompt_tokens), 0),
 			COALESCE(SUM(completion_tokens), 0),
 			COALESCE(SUM(total_tokens), 0),
+			COALESCE(SUM(cache_read_tokens), 0),
+			COALESCE(SUM(cache_write_tokens), 0),
 			SUM(cost_usd)
 		FROM traffic_logs
 		%s AND status_code < 400
@@ -317,9 +319,9 @@ func (m *Manager) GetUsageSummary(keyID string, rng string, loc *time.Location, 
 		var otherPoint *ModelUsagePoint
 		for mRows.Next() {
 			var mdl string
-			var pToks, cToks, tToks int64
+			var pToks, cToks, tToks, crToks, cwToks int64
 			var mCost *float64
-			if err := mRows.Scan(&mdl, &pToks, &cToks, &tToks, &mCost); err == nil {
+			if err := mRows.Scan(&mdl, &pToks, &cToks, &tToks, &crToks, &cwToks, &mCost); err == nil {
 				pct := 0.0
 				if totalToks > 0 {
 					pct = math.Round(float64(tToks)/float64(totalToks)*1000) / 10
@@ -331,6 +333,8 @@ func (m *Manager) GetUsageSummary(keyID string, rng string, loc *time.Location, 
 						Prompt:     pToks,
 						Completion: cToks,
 						Total:      tToks,
+						CacheRead:  crToks,
+						CacheWrite: cwToks,
 						Cost:       mCost,
 						PctTokens:  pct,
 						Daily:      []ModelDailyUsage{},
@@ -345,6 +349,8 @@ func (m *Manager) GetUsageSummary(keyID string, rng string, loc *time.Location, 
 					otherPoint.Prompt += pToks
 					otherPoint.Completion += cToks
 					otherPoint.Total += tToks
+					otherPoint.CacheRead += crToks
+					otherPoint.CacheWrite += cwToks
 					if mCost != nil {
 						if otherPoint.Cost == nil {
 							c := *mCost

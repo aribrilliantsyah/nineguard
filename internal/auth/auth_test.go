@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -225,5 +226,162 @@ func TestRequireAuthMiddleware(t *testing.T) {
 	protected.ServeHTTP(rec6, req6)
 	if rec6.Code != http.StatusOK {
 		t.Fatalf("expected 200 for exempt proxy endpoint, got %d", rec6.Code)
+	}
+}
+
+func TestLoginUnknownUserDummyBcrypt(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_login_unknown.db")
+
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	mgr := auth.NewManager(database, true)
+	if _, _, err := mgr.Setup("admin", "admin123"); err != nil {
+		t.Fatalf("Setup failed: %v", err)
+	}
+
+	u, tok, err := mgr.Login("nonexistent_user", "password123")
+	if err == nil {
+		t.Fatalf("Expected error for nonexistent user, got user=%v, token=%q", u, tok)
+	}
+	if err.Error() != "invalid username or password" {
+		t.Fatalf("Expected 'invalid username or password', got: %v", err)
+	}
+}
+
+func TestDecoyRecoveryQuestion(t *testing.T) {
+	q1 := auth.DecoyRecoveryQuestion("Alice")
+	q2 := auth.DecoyRecoveryQuestion("Alice")
+	q3 := auth.DecoyRecoveryQuestion("alice")
+	q4 := auth.DecoyRecoveryQuestion("  alice  ")
+
+	if q1 != q2 {
+		t.Fatalf("Expected identical decoy questions for identical usernames: %q vs %q", q1, q2)
+	}
+	if q1 != q3 {
+		t.Fatalf("Expected case-insensitive decoy questions: %q vs %q", q1, q3)
+	}
+	if q1 != q4 {
+		t.Fatalf("Expected trimmed decoy questions: %q vs %q", q1, q4)
+	}
+
+	found := false
+	for _, preset := range auth.PresetRecoveryQuestions {
+		if q1 == preset {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("Decoy question %q not in PresetRecoveryQuestions", q1)
+	}
+}
+
+func TestRecoverPasswordDeletesSessions(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_recover_sessions.db")
+
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	mgr := auth.NewManager(database, true)
+	user, sessionToken, err := mgr.Setup("admin", "admin123")
+	if err != nil {
+		t.Fatalf("Setup failed: %v", err)
+	}
+
+	if err := mgr.SetRecoveryQuestion(user.ID, "What is your childhood nickname?", "Ace"); err != nil {
+		t.Fatalf("SetRecoveryQuestion failed: %v", err)
+	}
+
+	// Verify session token is valid
+	sessUser, err := mgr.ValidateSession(sessionToken)
+	if err != nil || sessUser == nil {
+		t.Fatalf("Expected session to be valid before recovery: %v", err)
+	}
+
+	// Perform recovery
+	if err := mgr.RecoverPassword("admin", "Ace", "newsecret123"); err != nil {
+		t.Fatalf("RecoverPassword failed: %v", err)
+	}
+
+	// Verify session was deleted
+	sessUserAfter, err := mgr.ValidateSession(sessionToken)
+	if err == nil || sessUserAfter != nil {
+		t.Fatalf("Expected session to be invalidated after recovery, but session was still valid")
+	}
+
+	var sessionCount int
+	if err := database.QueryRow("SELECT COUNT(*) FROM sessions WHERE user_id = ?", user.ID).Scan(&sessionCount); err != nil {
+		t.Fatalf("Failed to count sessions: %v", err)
+	}
+	if sessionCount != 0 {
+		t.Fatalf("Expected 0 sessions after password recovery, found %d", sessionCount)
+	}
+}
+
+func TestRecoverPasswordErrorReasons(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_recover_reasons.db")
+
+	database, err := db.InitDB(dbPath)
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+	defer database.Close()
+
+	mgr := auth.NewManager(database, true)
+	user, _, err := mgr.Setup("admin", "admin123")
+	if err != nil {
+		t.Fatalf("Setup failed: %v", err)
+	}
+
+	// 1. Unknown user
+	err = mgr.RecoverPassword("unknown_user", "someanswer", "newsecret123")
+	if err == nil {
+		t.Fatalf("Expected error for unknown user")
+	}
+	if err.Error() != "Invalid username or recovery answer" {
+		t.Fatalf("Expected generic error message, got %q", err.Error())
+	}
+	var recErr *auth.RecoveryError
+	if !errors.As(err, &recErr) || recErr.InternalReason != "user not found" {
+		t.Fatalf("Expected internal reason 'user not found', got %v", recErr)
+	}
+
+	// 2. Existing user without recovery question
+	err = mgr.RecoverPassword("admin", "someanswer", "newsecret123")
+	if err == nil {
+		t.Fatalf("Expected error for user without recovery question")
+	}
+	if err.Error() != "Invalid username or recovery answer" {
+		t.Fatalf("Expected generic error message, got %q", err.Error())
+	}
+	if !errors.As(err, &recErr) || recErr.InternalReason != "no recovery question configured" {
+		t.Fatalf("Expected internal reason 'no recovery question configured', got %v", recErr)
+	}
+
+	// Configure recovery question
+	if err := mgr.SetRecoveryQuestion(user.ID, "What is your childhood nickname?", "Ace"); err != nil {
+		t.Fatalf("SetRecoveryQuestion failed: %v", err)
+	}
+
+	// 3. Existing user with wrong answer
+	err = mgr.RecoverPassword("admin", "wronganswer", "newsecret123")
+	if err == nil {
+		t.Fatalf("Expected error for wrong answer")
+	}
+	if err.Error() != "Invalid username or recovery answer" {
+		t.Fatalf("Expected generic error message, got %q", err.Error())
+	}
+	if !errors.As(err, &recErr) || recErr.InternalReason != "incorrect recovery answer" {
+		t.Fatalf("Expected internal reason 'incorrect recovery answer', got %v", recErr)
 	}
 }

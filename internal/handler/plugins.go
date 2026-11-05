@@ -330,6 +330,47 @@ func (h *Handler) TestPlugin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if id == "billion-context" {
+		url := "http://127.0.0.1:8788"
+		var sMap map[string]any
+		_ = json.Unmarshal([]byte(pRaw.DefaultSettings), &sMap)
+		if u, ok := sMap["url"].(string); ok && strings.TrimSpace(u) != "" {
+			url = strings.TrimRight(strings.TrimSpace(u), "/")
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/__bili/health", nil)
+		if err != nil {
+			jsonResponse(w, http.StatusBadGateway, map[string]any{"status": "error", "error": err.Error(), "latency_ms": 0})
+			return
+		}
+
+		start := time.Now()
+		resp, err := http.DefaultClient.Do(req)
+		latencyMs := time.Since(start).Milliseconds()
+		if err != nil {
+			jsonResponse(w, http.StatusBadGateway, map[string]any{
+				"status":     "error",
+				"error":      fmt.Sprintf("Cannot reach Billion Context at %s: %v", url, err),
+				"latency_ms": latencyMs,
+			})
+			return
+		}
+		defer resp.Body.Close()
+		if (resp.StatusCode < 200 || resp.StatusCode >= 300) && resp.StatusCode != http.StatusForbidden {
+			jsonResponse(w, http.StatusBadGateway, map[string]any{
+				"status":     "error",
+				"error":      fmt.Sprintf("Billion Context at %s returned HTTP %d", url, resp.StatusCode),
+				"latency_ms": latencyMs,
+			})
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "latency_ms": latencyMs})
+		return
+	}
+
 	if pRaw.Kind == plugins.KindBuiltin {
 		jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "latency_ms": 0, "in_process": true})
 		return

@@ -30,10 +30,11 @@ func NewPipelineExecutor(client *http.Client) *PipelineExecutor {
 func ComputeAppliedHeader(incoming string, executedBuiltins []string) string {
 	set := make(map[string]bool)
 	validBuiltins := map[string]bool{
-		"secretguard": true,
-		"headroom":    true,
-		"caveman":     true,
-		"ponytail":    true,
+		"secretguard":     true,
+		"headroom":        true,
+		"billion-context": true,
+		"caveman":         true,
+		"ponytail":        true,
 	}
 
 	for _, id := range strings.Split(incoming, ",") {
@@ -100,6 +101,7 @@ func (pe *PipelineExecutor) Execute(
 	groups []models.ModelGroup,
 	apiKeyID, apiKeyName string,
 	model, providerID string,
+	providerBackend string,
 	apiFormat string,
 	isBypassRequested bool,
 	incomingAppliedHeader string,
@@ -137,6 +139,7 @@ func (pe *PipelineExecutor) Execute(
 	var pluginsSkipped []string
 	var pluginErrors []string
 	var executedBuiltins []string
+	var upstreamProxyURL string
 	totalTokensSaved := 0
 	totalTokensOverhead := 0
 
@@ -181,6 +184,7 @@ func (pe *PipelineExecutor) Execute(
 			skipped        bool
 			skipReason     string
 			rejected       bool
+			rejectCode     int
 			rejectMsg      string
 			err            error
 		)
@@ -190,19 +194,27 @@ func (pe *PipelineExecutor) Execute(
 			if apiFormat == "messages" {
 				modifiedBody, skipped, rejected, rejectMsg, err = builtin.ApplySecretGuardToMessages(currentBody, item.MergedSettings)
 			} else {
-				msgs, ok := toMapSlice(currentBody["messages"])
-				if !ok {
-					err = fmt.Errorf("invalid messages format")
+				rawMsgs, hasMessages := currentBody["messages"]
+				if !hasMessages {
+					skipped = true
+					skipReason = "no_messages"
 				} else {
-					var newMsgs []map[string]any
-					newMsgs, skipped, rejected, rejectMsg, err = builtin.ApplySecretGuard(msgs, item.MergedSettings)
-					if err == nil && !skipped && !rejected {
-						cloned := make(map[string]any, len(currentBody))
-						for k, v := range currentBody {
-							cloned[k] = v
+					msgs, ok := toMapSlice(rawMsgs)
+					if !ok {
+						rejected = true
+						rejectCode = http.StatusBadRequest
+						rejectMsg = "Invalid request: messages must be an array of message objects"
+					} else {
+						var newMsgs []map[string]any
+						newMsgs, skipped, rejected, rejectMsg, err = builtin.ApplySecretGuard(msgs, item.MergedSettings)
+						if err == nil && !skipped && !rejected {
+							cloned := make(map[string]any, len(currentBody))
+							for k, v := range currentBody {
+								cloned[k] = v
+							}
+							cloned["messages"] = toAnySlice(newMsgs)
+							modifiedBody = cloned
 						}
-						cloned["messages"] = toAnySlice(newMsgs)
-						modifiedBody = cloned
 					}
 				}
 			}
@@ -211,25 +223,49 @@ func (pe *PipelineExecutor) Execute(
 				skipped = true
 				skipReason = "unsupported_format"
 			} else {
-				modifiedBody, tokensSaved, skipped, skipReason, err = builtin.ApplyHeadroom(pCtx, pe.httpClient, currentBody, item.MergedSettings)
+				rawMsgs, hasMessages := currentBody["messages"]
+				if !hasMessages {
+					skipped = true
+					skipReason = "no_messages"
+				} else if _, ok := toMapSlice(rawMsgs); !ok {
+					rejected = true
+					rejectCode = http.StatusBadRequest
+					rejectMsg = "Invalid request: messages must be an array of message objects"
+				} else {
+					modifiedBody, tokensSaved, skipped, skipReason, err = builtin.ApplyHeadroom(pCtx, pe.httpClient, currentBody, item.MergedSettings)
+				}
+			}
+		case "billion-context":
+			var proxyURL string
+			proxyURL, skipped, skipReason, err = builtin.ApplyBillionContext(pCtx, pe.httpClient, item.MergedSettings, providerBackend)
+			if err == nil && !skipped {
+				upstreamProxyURL = proxyURL
 			}
 		case "caveman":
 			if apiFormat == "messages" {
 				modifiedBody, skipped, skipReason, tokensOverhead, err = builtin.ApplyCavemanToMessages(currentBody, item.MergedSettings)
 			} else {
-				msgs, ok := toMapSlice(currentBody["messages"])
-				if !ok {
-					err = fmt.Errorf("invalid messages format")
+				rawMsgs, hasMessages := currentBody["messages"]
+				if !hasMessages {
+					skipped = true
+					skipReason = "no_messages"
 				} else {
-					var newMsgs []map[string]any
-					newMsgs, skipped, skipReason, tokensOverhead, err = builtin.ApplyCaveman(msgs, item.MergedSettings)
-					if err == nil && !skipped {
-						cloned := make(map[string]any, len(currentBody))
-						for k, v := range currentBody {
-							cloned[k] = v
+					msgs, ok := toMapSlice(rawMsgs)
+					if !ok {
+						rejected = true
+						rejectCode = http.StatusBadRequest
+						rejectMsg = "Invalid request: messages must be an array of message objects"
+					} else {
+						var newMsgs []map[string]any
+						newMsgs, skipped, skipReason, tokensOverhead, err = builtin.ApplyCaveman(msgs, item.MergedSettings)
+						if err == nil && !skipped {
+							cloned := make(map[string]any, len(currentBody))
+							for k, v := range currentBody {
+								cloned[k] = v
+							}
+							cloned["messages"] = toAnySlice(newMsgs)
+							modifiedBody = cloned
 						}
-						cloned["messages"] = toAnySlice(newMsgs)
-						modifiedBody = cloned
 					}
 				}
 			}
@@ -237,19 +273,27 @@ func (pe *PipelineExecutor) Execute(
 			if apiFormat == "messages" {
 				modifiedBody, skipped, skipReason, tokensOverhead, err = builtin.ApplyPonytailToMessages(currentBody, item.MergedSettings)
 			} else {
-				msgs, ok := toMapSlice(currentBody["messages"])
-				if !ok {
-					err = fmt.Errorf("invalid messages format")
+				rawMsgs, hasMessages := currentBody["messages"]
+				if !hasMessages {
+					skipped = true
+					skipReason = "no_messages"
 				} else {
-					var newMsgs []map[string]any
-					newMsgs, skipped, skipReason, tokensOverhead, err = builtin.ApplyPonytail(msgs, item.MergedSettings)
-					if err == nil && !skipped {
-						cloned := make(map[string]any, len(currentBody))
-						for k, v := range currentBody {
-							cloned[k] = v
+					msgs, ok := toMapSlice(rawMsgs)
+					if !ok {
+						rejected = true
+						rejectCode = http.StatusBadRequest
+						rejectMsg = "Invalid request: messages must be an array of message objects"
+					} else {
+						var newMsgs []map[string]any
+						newMsgs, skipped, skipReason, tokensOverhead, err = builtin.ApplyPonytail(msgs, item.MergedSettings)
+						if err == nil && !skipped {
+							cloned := make(map[string]any, len(currentBody))
+							for k, v := range currentBody {
+								cloned[k] = v
+							}
+							cloned["messages"] = toAnySlice(newMsgs)
+							modifiedBody = cloned
 						}
-						cloned["messages"] = toAnySlice(newMsgs)
-						modifiedBody = cloned
 					}
 				}
 			}
@@ -269,10 +313,14 @@ func (pe *PipelineExecutor) Execute(
 		cancel()
 
 		if rejected {
+			status := http.StatusForbidden
+			if rejectCode != 0 {
+				status = rejectCode
+			}
 			return &PipelineResult{
 				Body:           nil,
 				Rejected:       true,
-				RejectCode:     http.StatusForbidden,
+				RejectCode:     status,
 				RejectMessage:  rejectMsg,
 				DurationMs:     time.Since(start).Milliseconds(),
 				PluginsApplied: pluginsApplied,
@@ -324,12 +372,13 @@ func (pe *PipelineExecutor) Execute(
 	upstreamAppliedHeader := ComputeAppliedHeader(incomingAppliedHeader, executedBuiltins)
 
 	return &PipelineResult{
-		Body:           finalBytes,
-		PluginsApplied: pluginsApplied,
-		PluginsSkipped: pluginsSkipped,
-		TokensSaved:    totalTokensSaved,
-		TokensOverhead: totalTokensOverhead,
-		PluginErrors:   pluginErrors,
-		DurationMs:     time.Since(start).Milliseconds(),
+		Body:             finalBytes,
+		UpstreamProxyURL: upstreamProxyURL,
+		PluginsApplied:   pluginsApplied,
+		PluginsSkipped:   pluginsSkipped,
+		TokensSaved:      totalTokensSaved,
+		TokensOverhead:   totalTokensOverhead,
+		PluginErrors:     pluginErrors,
+		DurationMs:       time.Since(start).Milliseconds(),
 	}, upstreamAppliedHeader, nil
 }

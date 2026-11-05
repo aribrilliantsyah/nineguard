@@ -159,15 +159,15 @@ func TestThinkingLostFilterUnverifiableClaudeChat(t *testing.T) {
 
 	mgr := traffic.NewManager(d)
 
-	// 1. Claude chat, requested=1, delivered=0 (UNVERIFIABLE -> MUST BE EXCLUDED FROM LOST)
+	// 1. Claude chat, requested=1, delivered=NULL (UNVERIFIABLE -> MUST BE EXCLUDED FROM LOST)
 	_ = mgr.Record(&traffic.LogEntry{
 		APIKey: "sk-1", Model: "claude-3-7-sonnet", StatusCode: 200,
-		ApiFormat: "chat", ThinkingRequested: true, ThinkingDelivered: false,
+		ApiFormat: "chat", ThinkingRequested: true, ThinkingDelivered: false, ThinkingUnverified: true,
 	})
-	// 2. Claude chat uppercase, requested=1, delivered=0 (UNVERIFIABLE CASE-INSENSITIVE -> MUST BE EXCLUDED)
+	// 2. Claude chat uppercase, requested=1, delivered=NULL (UNVERIFIABLE -> MUST BE EXCLUDED)
 	_ = mgr.Record(&traffic.LogEntry{
 		APIKey: "sk-2", Model: "Anthropic/Claude-3-5-Sonnet", StatusCode: 200,
-		ApiFormat: "chat", ThinkingRequested: true, ThinkingDelivered: false,
+		ApiFormat: "chat", ThinkingRequested: true, ThinkingDelivered: false, ThinkingUnverified: true,
 	})
 	// 3. Claude messages format, requested=1, delivered=0 (REAL LOSS -> MUST BE INCLUDED)
 	_ = mgr.Record(&traffic.LogEntry{

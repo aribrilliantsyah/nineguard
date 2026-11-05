@@ -9,11 +9,15 @@ import {
   maskKey,
   buildHeaders,
   budgetSummary,
-  periodWord
+  periodWord,
+  activitySentence,
+  adaptDailyTokens
 } from './portalhelpers.js';
+import { volumeChart } from './chart.js';
 import { formatCost } from './costhelpers.js';
 import { formatTokensCompact } from './quotahelpers.js';
-import { isPercentBucket, remainingLabel, observationLabel, telemetryStateLabel, sdkMeter } from './upstreamtelemetry.js';
+import { isPercentBucket, remainingLabel, observationLabel, telemetryStateLabel, sdkMeter, remainingTone, splitPoolBuckets } from './upstreamtelemetry.js';
+import { iconTile, subProviderIconURL } from './providericons.js';
 import { formatResetIn, shortModel } from './modelquotas.js';
 
 const root = document.getElementById('portal-app');
@@ -30,6 +34,7 @@ let loading = false;
 let errorMsg = '';
 let modelFilter = '';
 let showAllModels = false;
+const expandedPools = new Set();
 
 async function fetchJSON(url, key) {
   const resp = await fetch(url, { headers: { ...buildHeaders(key), 'Accept': 'application/json' } });
@@ -354,6 +359,8 @@ function rangeSwitch() {
   );
 }
 
+let activityChart = null;
+
 function renderActivity() {
   const s = usageData;
   const pdfBtn = h('button', {
@@ -374,9 +381,16 @@ function renderActivity() {
 
   const cur = s.cost?.currency || 'USD';
   const rate = s.cost?.rate || 1;
+  const fresh = Math.max(0, (s.tokens.prompt || 0) - (s.tokens.cache_read || 0) - (s.tokens.cache_write || 0));
+
+  const summary = activitySentence(s, activeRange);
+  if (summary) {
+    section.append(h('p', { class: 'pt-sub' }, summary));
+  }
+
   const stats = [
     ['Requests', fmtNum(s.requests), s.errors ? `${fmtNum(s.errors)} failed (${s.error_rate_pct}%)` : 'none failed'],
-    ['Tokens', fmtCompact(s.tokens.total), `${fmtCompact(s.tokens.prompt)} in, ${fmtCompact(s.tokens.completion)} out`],
+    ['Tokens', fmtCompact(s.tokens.total), `${fmtCompact(fresh)} fresh · ${fmtCompact(s.tokens.cache_read || 0)} cache · ${fmtCompact(s.tokens.completion)} out`],
     ['Cache hits', `${s.cache_hit_pct}%`, `${fmtCompact(s.tokens.cache_read)} tokens read from cache`],
   ];
   if (s.cost) {
@@ -385,41 +399,39 @@ function renderActivity() {
     stats.push(['Active days', fmtNum(s.active_days), `busiest hour ${s.peak_hour_formatted}`]);
   }
 
-  section.append(
-    h('dl', { class: 'pt-stats' }, ...stats.map(([k, v, sub]) => h('div', null,
-      h('dt', null, k), h('dd', null, v), h('small', null, sub)
-    ))),
-    renderDailyBars(s, cur, rate),
-    renderModelShare(s, cur, rate),
-    renderExtras(s)
-  );
+  const statsEl = h('dl', { class: 'pt-stats' }, ...stats.map(([k, v, sub]) => h('div', null,
+    h('dt', null, k), h('dd', null, v), h('small', null, sub)
+  )));
+
+  const dailyEl = renderDailyBars(s, cur, rate);
+  const shareEl = renderModelShare(s, cur, rate);
+  const extrasEl = renderExtras(s, cur, rate);
+  const howEl = renderHowCounted(s);
+
+  [statsEl, dailyEl, shareEl, extrasEl, howEl].filter(Boolean).forEach((el) => section.append(el));
   return section;
 }
 
 function renderDailyBars(s, cur, rate) {
-  // "All time" can hold a year of days; the last 60 stay readable as bars on a phone.
-  const days = (s.daily || []).slice(-60);
-  if (!days.length) return null;
-  const max = Math.max(...days.map((d) => d.tokens || 0), 1);
-  const busiest = days.reduce((a, d) => ((d.tokens || 0) > (a.tokens || 0) ? d : a), days[0]);
-  const fmtDay = (ds) => new Date(ds + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const adapted = adaptDailyTokens(s);
+  if (!adapted) return null;
 
-  return h('figure', { class: 'pt-daily' },
-    h('figcaption', null,
-      h('span', null, 'Tokens per day'),
-      h('span', { class: 'pt-faint' }, `busiest ${fmtDay(busiest.date)}: ${fmtCompact(busiest.tokens)}`)
-    ),
-    h('div', { class: 'pt-bars', role: 'img', 'aria-label': `Daily tokens, ${days.length} days. Busiest ${fmtDay(busiest.date)} with ${fmtNum(busiest.tokens)} tokens.` },
-      ...days.map((d) => {
-        const cost = (d.cost != null && s.cost) ? `, ${formatCost(d.cost, cur, rate, 0)}` : '';
-        return h('span', {
-          class: d.tokens ? '' : 'zero',
-          style: { height: `${d.tokens ? Math.max(4, (d.tokens / max) * 100) : 2}%` },
-          title: `${fmtDay(d.date)}: ${fmtNum(d.tokens)} tokens, ${fmtNum(d.requests)} requests${cost}`
-        });
-      })
-    ),
-    h('div', { class: 'pt-axis' }, h('span', null, fmtDay(days[0].date)), h('span', null, fmtDay(days[days.length - 1].date)))
+  activityChart?.destroy();
+  activityChart = volumeChart(adapted.chartData, {
+    series: adapted.series,
+    height: 160,
+    daily: true,
+    table: true,
+    segmentHover: true,
+    format: fmtCompact,
+    unit: 'tokens',
+    errorRate: false,
+    dayLabel: (i) => adapted.days[i]?.date,
+  });
+
+  return h('div', { class: 'pt-daily' },
+    h('h3', null, 'Daily tokens by model'),
+    activityChart.el
   );
 }
 
@@ -428,28 +440,59 @@ function renderModelShare(s, cur, rate) {
   if (!models.length) return null;
   return h('div', { class: 'pt-share' },
     h('h3', null, 'Tokens by model'),
-    h('ul', null, ...models.map((m) => h('li', null,
-      h('div', { class: 'pt-share-head' },
-        h('span', { class: 'pt-mono', title: m.model_id }, m.model_id),
-        h('span', { class: 'pt-num' },
-          fmtCompact(m.total),
-          (m.cost != null && s.cost) ? h('span', { class: 'pt-faint' }, ` ${formatCost(m.cost, cur, rate, 0)}`) : null
-        )
-      ),
-      h('div', { class: 'pt-share-bar' }, h('i', { style: { width: `${Math.max(1, Math.min(100, m.pct_tokens))}%` } }), h('b', null, `${m.pct_tokens.toFixed(0)}%`))
-    )))
+    h('ul', null, ...models.map((m) => {
+      const freshM = Math.max(0, (m.prompt || 0) - (m.cache_read || 0) - (m.cache_write || 0));
+      return h('li', null,
+        h('div', { class: 'pt-share-head' },
+          h('span', { class: 'pt-mono', title: m.model_id }, m.model_id),
+          h('span', { class: 'pt-num' },
+            fmtCompact(m.total),
+            (m.cost != null && s.cost) ? h('span', { class: 'pt-faint' }, ` ${formatCost(m.cost, cur, rate, 0)}`) : null
+          )
+        ),
+        h('div', { class: 'pt-share-bar' }, h('i', { style: { width: `${Math.max(1, Math.min(100, m.pct_tokens))}%` } }), h('b', null, `${m.pct_tokens.toFixed(0)}%`)),
+        h('div', { class: 'pt-faint', style: { fontSize: '11px', marginTop: '2px' } }, `${fmtCompact(freshM)} fresh · ${fmtCompact(m.cache_read || 0)} cache · ${fmtCompact(m.completion)} out`)
+      );
+    }))
   );
 }
 
 // Facts that only matter when non-zero, as one quiet line instead of more stat cards.
-function renderExtras(s) {
+function renderExtras(s, cur, rate) {
+  const parts = [];
+  if (s.requests) {
+    const reqToks = fmtCompact(Math.round(s.tokens.total / s.requests));
+    const reqCost = s.cost ? `, ${formatCost(s.cost.usd / s.requests, cur, rate, 0)}` : '';
+    let line = `Per request: ${reqToks} tokens${reqCost}`;
+    if (s.sessions > 0) {
+      const sessToks = fmtCompact(Math.round(s.tokens.total / s.sessions));
+      const sessCost = s.cost ? `, ${formatCost(s.cost.usd / s.sessions, cur, rate, 0)}` : '';
+      line += ` · Per session: ${sessToks} tokens${sessCost} · ${fmtNum(s.sessions)} sessions`;
+    }
+    parts.push(line);
+  }
+
   const bits = [];
-  if (s.sessions) bits.push(`${fmtNum(s.sessions)} sessions`);
   if (s.thinking?.requested) bits.push(`thinking delivered on ${fmtNum(s.thinking.delivered)} of ${fmtNum(s.thinking.requested)} requests`);
   if (s.fallbacks) bits.push(`${fmtNum(s.fallbacks)} fallbacks to another model`);
   if (s.estimated_requests) bits.push(`${fmtNum(s.estimated_requests)} requests with estimated usage`);
-  if (!bits.length) return null;
-  return h('p', { class: 'pt-extras' }, bits.join('; ') + '.');
+  if (bits.length) parts.push(bits.join('; ') + '.');
+
+  if (!parts.length) return null;
+  return h('p', { class: 'pt-extras' }, parts.join(' · '));
+}
+
+function renderHowCounted(s) {
+  const tz = s.timezone || 'UTC';
+  return h('details', { class: 'pt-how' },
+    h('summary', null, 'How these numbers are counted'),
+    h('ul', null,
+      h('li', null, `Dates and times use your time zone (${tz}).`),
+      h('li', null, 'Tokens = input + output. Input includes cache reads; "fresh" input excludes them.'),
+      h('li', null, 'Cost is an estimate at list price; requests without a known price are not included.'),
+      h('li', null, 'Failed requests are not counted in tokens or cost.')
+    )
+  );
 }
 
 // ── Print / PDF summary ──
@@ -529,11 +572,12 @@ function renderPortalPrint() {
   } else if (!s.requests) {
     parts.push(printSection('Usage', h('p', { class: 'print-text' }, 'No requests from this key in this range.')));
   } else {
+    const freshTotal = Math.max(0, (s.tokens.prompt || 0) - (s.tokens.cache_read || 0) - (s.tokens.cache_write || 0));
     const kpi = (label, value, sub) => h('div', { class: 'print-kpi-card' },
       h('div', { class: 'label' }, label), h('div', { class: 'value' }, value), h('div', { class: 'sub' }, sub));
     parts.push(h('div', { class: 'print-kpi-grid' },
       kpi('Requests', fmtNum(s.requests), s.errors ? `${fmtNum(s.errors)} failed (${s.error_rate_pct}%)` : 'none failed'),
-      kpi('Tokens', fmtNum(s.tokens.total), `${fmtNum(s.tokens.prompt)} in · ${fmtNum(s.tokens.completion)} out`),
+      kpi('Tokens', fmtNum(s.tokens.total), `${fmtNum(freshTotal)} fresh in, ${fmtNum(s.tokens.cache_read || 0)} from cache, ${fmtNum(s.tokens.completion)} out`),
       kpi('Cache hits', `${s.cache_hit_pct}%`, `${fmtNum(s.tokens.cache_read)} tokens read from cache`),
       s.cost
         ? kpi('Est. cost', s.cost.display_formatted, s.cost.unpriced_requests ? `${fmtNum(s.cost.unpriced_requests)} requests unpriced` : 'at list price')
@@ -544,13 +588,17 @@ function renderPortalPrint() {
 
     const models = s.models || [];
     if (models.length) {
-      const cols = [['Model'], ['Input', true], ['Output', true], ['Total', true], ['Share', true]];
+      const cols = [['Model'], ['Fresh input', true], ['Cache read', true], ['Output', true], ['Total', true], ['Share', true]];
       if (s.cost) cols.push(['Est. cost', true]);
-      parts.push(printSection('Tokens by model', printTable(cols, models.map((m) => {
-        const row = [m.model_id, fmtNum(m.prompt), fmtNum(m.completion), fmtNum(m.total), `${(m.pct_tokens || 0).toFixed(1)}%`];
-        if (s.cost) row.push(m.cost != null ? formatCost(m.cost, cur, rate, 0) : '-');
-        return row;
-      }))));
+      parts.push(printSection('Tokens by model',
+        printTable(cols, models.map((m) => {
+          const freshM = Math.max(0, (m.prompt || 0) - (m.cache_read || 0) - (m.cache_write || 0));
+          const row = [m.model_id, fmtNum(freshM), fmtNum(m.cache_read || 0), fmtNum(m.completion), fmtNum(m.total), `${(m.pct_tokens || 0).toFixed(1)}%`];
+          if (s.cost) row.push(m.cost != null ? formatCost(m.cost, cur, rate, 0) : '-');
+          return row;
+        })),
+        h('p', { class: 'print-note' }, "Cache reads are prompt tokens served from the provider's cache and are billed at a reduced rate.")
+      ));
     }
 
     const days = (s.daily || []).filter((d) => d.requests || d.tokens);
@@ -616,6 +664,38 @@ function renderConnect() {
   );
 }
 
+function renderSharedBucket(b) {
+  if (isPercentBucket(b)) {
+    const m = sdkMeter(b);
+    return h('li', { class: m.dim ? 'is-dim' : null },
+      h('div', { class: 'pt-mq-head' },
+        h('span', null, b.name),
+        h('span', { class: `pt-num tone-${m.tone}` },
+          remainingLabel(b),
+          b.reset_at ? h('span', { class: 'pt-reset', title: `resets in ${formatResetIn(b.reset_at)}` }, ` · ${formatResetIn(b.reset_at)}`) : null
+        )
+      ),
+      meter(m.pct, m.known ? m.tone : 'muted', `${b.name}: ${remainingLabel(b)}`),
+      m.dim ? h('p', { class: 'pt-fine' }, `${observationLabel(b.observed_at, b.observation_state)}${b.incomplete ? ' · incomplete observations' : ''}`) : null
+    );
+  }
+  if (b.is_credit_balance) {
+    return h('li', null, h('div', { class: 'pt-mq-head' }, h('span', null, b.name), h('span', { class: 'pt-num' }, `$${(b.remaining / 100).toFixed(2)} credit`)));
+  }
+  const left = Math.max(0, Math.min(100, b.remaining_percentage || 0));
+  const tone = remainingTone(left);
+  return h('li', null,
+    h('div', { class: 'pt-mq-head' },
+      h('span', null, b.name),
+      h('span', { class: `pt-num tone-${tone}` },
+        left ? `${left}% left` : 'Limit reached',
+        b.reset_at ? h('span', { class: 'pt-reset', title: `resets in ${formatResetIn(b.reset_at)}` }, ` · ${formatResetIn(b.reset_at)}`) : null
+      )
+    ),
+    meter(left, tone, `${b.name}: ${left}% left`)
+  );
+}
+
 function renderSharedCapacity() {
   const pools = (quotaData && quotaData.upstream_pools) || [];
   if (!pools.length) return null;
@@ -625,38 +705,62 @@ function renderSharedCapacity() {
     h('p', { class: 'pt-sub' }, 'Upstream limits shared by every key. When one runs out, requests fail even if your own budget is left.'),
     h('ul', { class: 'pt-pools' }, ...pools.map((pool) => {
       const buckets = (pool.buckets || []).filter((b) => isPercentBucket(b) || b.is_credit_balance || b.total > 0);
-      return h('li', null,
+      const name = pool.family || pool.provider;
+      const poolKey = `${pool.provider}|${pool.sub_provider}|${pool.family}`;
+
+      if (!buckets.length) {
+        return h('li', { class: `pt-pool${pool.status === 'error' ? ' is-err' : pool.status === 'degraded' ? ' is-warn' : ''}` },
+          h('div', { class: 'pt-pool-head' },
+            h('span', { class: 'pt-pool-name' }, iconTile({ img: subProviderIconURL(pool.sub_provider) }, name, 'sm'), h('strong', null, name)),
+            pool.status && pool.status !== 'ok' ? h('span', { class: `badge ${pool.status === 'degraded' ? 'warn' : 'err'}` }, pool.status) : null
+          ),
+          pool.source === 'sdk' ? h('p', { class: 'pt-fine' }, 'Most constrained observed account; not pooled capacity. Other connected accounts may still have room.') : null,
+          h('p', { class: 'pt-fine' }, pool.source === 'sdk' ? telemetryStateLabel(pool.observation_state) : 'No limits reported.')
+        );
+      }
+
+      const { shown, hidden, minHiddenLeft } = splitPoolBuckets(buckets);
+      const allBuckets = [...shown, ...hidden];
+      const listEl = h('ul', { class: 'pt-buckets' });
+      let moreBtn = null;
+
+      function paintBuckets() {
+        const isExpanded = expandedPools.has(poolKey);
+        const displayBuckets = isExpanded ? allBuckets : shown;
+        listEl.replaceChildren(...displayBuckets.map(renderSharedBucket));
+        if (moreBtn) {
+          const suffix = minHiddenLeft === 0
+            ? ' · some at limit'
+            : minHiddenLeft != null
+              ? ` · all ≥${minHiddenLeft}% left`
+              : '';
+          const collapsedText = `+${hidden.length} more${suffix}`;
+          moreBtn.textContent = isExpanded ? 'Show fewer' : collapsedText;
+        }
+      }
+
+      if (hidden.length > 0) {
+        moreBtn = h('button', { class: 'btn btn-sm pt-more', type: 'button' });
+        moreBtn.addEventListener('click', () => {
+          if (expandedPools.has(poolKey)) {
+            expandedPools.delete(poolKey);
+          } else {
+            expandedPools.add(poolKey);
+          }
+          paintBuckets();
+        });
+      }
+
+      paintBuckets();
+
+      return h('li', { class: `pt-pool${pool.status === 'error' ? ' is-err' : pool.status === 'degraded' ? ' is-warn' : ''}` },
         h('div', { class: 'pt-pool-head' },
-          h('strong', null, pool.family || pool.provider),
+          h('span', { class: 'pt-pool-name' }, iconTile({ img: subProviderIconURL(pool.sub_provider) }, name, 'sm'), h('strong', null, name)),
           pool.status && pool.status !== 'ok' ? h('span', { class: `badge ${pool.status === 'degraded' ? 'warn' : 'err'}` }, pool.status) : null
         ),
         pool.source === 'sdk' ? h('p', { class: 'pt-fine' }, 'Most constrained observed account; not pooled capacity. Other connected accounts may still have room.') : null,
-        buckets.length
-          ? h('ul', { class: 'pt-buckets' }, ...buckets.map((b) => {
-              if (isPercentBucket(b)) {
-                const m = sdkMeter(b);
-                return h('li', { class: m.dim ? 'is-dim' : null },
-                  h('div', { class: 'pt-mq-head' }, h('span', null, b.name), h('span', { class: `pt-num tone-${m.tone}` }, remainingLabel(b))),
-                  meter(m.pct, m.known ? m.tone : 'muted', `${b.name}: ${remainingLabel(b)}`),
-                  h('p', { class: 'pt-fine' }, `${observationLabel(b.observed_at, b.observation_state)}${b.incomplete ? ' · incomplete observations' : ''}`),
-                  b.reset_at ? h('div', { class: 'pt-mq-foot' }, `resets in ${formatResetIn(b.reset_at)}`) : null
-                );
-              }
-              if (b.is_credit_balance) {
-                return h('li', null, h('div', { class: 'pt-mq-head' }, h('span', null, b.name), h('span', { class: 'pt-num' }, `$${(b.remaining / 100).toFixed(2)} credit`)));
-              }
-              const left = Math.max(0, Math.min(100, b.remaining_percentage || 0));
-              const tone = left < 30 ? 'err' : left <= 70 ? 'warn' : 'ok';
-              return h('li', null,
-                h('div', { class: 'pt-mq-head' },
-                  h('span', null, b.name),
-                  h('span', { class: 'pt-num' }, `${left}% left`)
-                ),
-                meter(100 - left, tone, `${b.name}: ${left}% left`),
-                b.reset_at ? h('div', { class: 'pt-mq-foot' }, h('span', null, `resets in ${formatResetIn(b.reset_at)}`)) : null
-              );
-            }))
-          : h('p', { class: 'pt-fine' }, pool.source === 'sdk' ? telemetryStateLabel(pool.observation_state) : 'No limits reported.')
+        listEl,
+        moreBtn
       );
     }))
   );

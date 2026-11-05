@@ -32,3 +32,39 @@ export function sdkMeter(b, now = Date.now()) {
   const left = Math.max(0, Math.min(100, pct));
   return { known: true, pct: left, tone: remainingTone(left), dim: !freshPercent(b, now) };
 }
+
+function bucketSortKey(b) {
+  if (isPercentBucket(b)) {
+    const p = b?.remaining_percent;
+    if (p != null && Number.isFinite(p)) return p;
+    return b?.limit_reached ? 0 : null;
+  }
+  if (b?.is_credit_balance) return b?.limit_reached ? 0 : null;
+  return b?.remaining_percentage || 0;
+}
+
+export function splitPoolBuckets(buckets, limit = 3) {
+  const list = Array.isArray(buckets) ? buckets.slice() : [];
+  list.sort((a, b) => {
+    const keyA = bucketSortKey(a);
+    const keyB = bucketSortKey(b);
+    if (keyA === null && keyB === null) return 0;
+    if (keyA === null) return 1;
+    if (keyB === null) return -1;
+    return keyA - keyB;
+  });
+
+  if (list.length <= limit + 1) {
+    return { shown: list, hidden: [], minHiddenLeft: null };
+  }
+
+  const shown = list.slice(0, limit);
+  const hidden = list.slice(limit);
+  const knownHidden = hidden
+    .map(bucketSortKey)
+    .filter((r) => r !== null);
+  const minHiddenLeft = knownHidden.length ? Math.round(Math.min(...knownHidden)) : null;
+
+  return { shown, hidden, minHiddenLeft };
+}
+

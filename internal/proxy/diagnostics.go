@@ -8,18 +8,19 @@ import (
 
 // UsageDiagnostics captures normalized token, caching, thinking, and model facts.
 type UsageDiagnostics struct {
-	ApiFormat         string
-	PromptTokens      int
-	CompletionTokens  int
-	TotalTokens       int
-	CacheReadTokens   int
-	CacheWriteTokens  int
-	ReasoningTokens   int
-	ThinkingRequested bool
-	ThinkingDelivered bool
-	ServedModel       string
-	UsageEstimated    bool
-	ErrorMessage      *string
+	ApiFormat          string
+	PromptTokens       int
+	CompletionTokens   int
+	TotalTokens        int
+	CacheReadTokens    int
+	CacheWriteTokens   int
+	ReasoningTokens    int
+	ThinkingRequested  bool
+	ThinkingDelivered  bool
+	ThinkingVerifiable bool
+	ServedModel        string
+	UsageEstimated     bool
+	ErrorMessage       *string
 }
 
 // StreamToolCall captures an accumulated tool call from a stream.
@@ -132,6 +133,7 @@ func ParseNonStreamDiagnostics(format string, body []byte) UsageDiagnostics {
 
 	switch format {
 	case "messages":
+		diag.ThinkingVerifiable = true
 		var anthropicResp struct {
 			Model   string `json:"model"`
 			Content []struct {
@@ -197,11 +199,29 @@ func ParseNonStreamDiagnostics(format string, body []byte) UsageDiagnostics {
 			if diag.ReasoningTokens > 0 {
 				diag.ThinkingDelivered = true
 			}
-			for _, o := range responsesResp.Output {
-				if o.Type == "reasoning" {
-					diag.ThinkingDelivered = true
-					break
+			if responsesResp.Usage.OutputTokensDetails.ReasoningTokens > 0 || len(responsesResp.Output) > 0 {
+				for _, o := range responsesResp.Output {
+					if o.Type == "reasoning" {
+						diag.ThinkingDelivered = true
+						diag.ThinkingVerifiable = true
+						break
+					}
 				}
+			}
+			// Check if output_tokens_details is present in json
+			var rawMap map[string]json.RawMessage
+			if err := json.Unmarshal(body, &rawMap); err == nil {
+				if usageRaw, ok := rawMap["usage"]; ok {
+					var usageMap map[string]json.RawMessage
+					if err := json.Unmarshal(usageRaw, &usageMap); err == nil {
+						if _, ok := usageMap["output_tokens_details"]; ok {
+							diag.ThinkingVerifiable = true
+						}
+					}
+				}
+			}
+			if diag.ThinkingDelivered {
+				diag.ThinkingVerifiable = true
 			}
 			if responsesResp.Error != nil && responsesResp.Error.Message != "" {
 				diag.ErrorMessage = &responsesResp.Error.Message
@@ -250,6 +270,21 @@ func ParseNonStreamDiagnostics(format string, body []byte) UsageDiagnostics {
 					break
 				}
 			}
+			// Check if completion_tokens_details is present in json
+			var rawMap map[string]json.RawMessage
+			if err := json.Unmarshal(body, &rawMap); err == nil {
+				if usageRaw, ok := rawMap["usage"]; ok {
+					var usageMap map[string]json.RawMessage
+					if err := json.Unmarshal(usageRaw, &usageMap); err == nil {
+						if _, ok := usageMap["completion_tokens_details"]; ok {
+							diag.ThinkingVerifiable = true
+						}
+					}
+				}
+			}
+			if diag.ThinkingDelivered {
+				diag.ThinkingVerifiable = true
+			}
 			if chatResp.Error != nil && chatResp.Error.Message != "" {
 				diag.ErrorMessage = &chatResp.Error.Message
 			}
@@ -267,10 +302,11 @@ type StreamDiagnosticsParser struct {
 	completionTokens  int
 	totalTokens       int
 	cacheReadTokens   int
-	cacheWriteTokens  int
-	reasoningTokens   int
-	thinkingDelivered bool
-	hasRealUsage      bool
+	cacheWriteTokens   int
+	reasoningTokens    int
+	thinkingDelivered  bool
+	thinkingVerifiable bool
+	hasRealUsage       bool
 	anthropicInput    int
 
 	contentBuilder  strings.Builder
@@ -286,11 +322,15 @@ type StreamDiagnosticsParser struct {
 
 // NewStreamDiagnosticsParser creates an accumulator for the given API format.
 func NewStreamDiagnosticsParser(format string) *StreamDiagnosticsParser {
-	return &StreamDiagnosticsParser{
+	p := &StreamDiagnosticsParser{
 		format:        format,
 		msgToolBlocks: make(map[int]*StreamToolCall),
 		chatToolCalls: make(map[int]*StreamToolCall),
 	}
+	if format == "messages" {
+		p.thinkingVerifiable = true
+	}
+	return p
 }
 
 func appendWithCap(sb *strings.Builder, s string, maxBytes int) {
@@ -364,7 +404,10 @@ func (p *StreamDiagnosticsParser) FeedSSEEvent(eventRaw []byte, dataPayload []by
 				StopReason  string `json:"stop_reason"`
 			} `json:"delta"`
 			Usage struct {
-				OutputTokens int `json:"output_tokens"`
+				OutputTokens             int `json:"output_tokens"`
+				InputTokens              int `json:"input_tokens"`
+				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 			} `json:"usage"`
 		}
 
@@ -417,13 +460,24 @@ func (p *StreamDiagnosticsParser) FeedSSEEvent(eventRaw []byte, dataPayload []by
 					p.completionTokens = anthropicEvent.Usage.OutputTokens
 					p.hasRealUsage = true
 				}
+				if p.anthropicInput == 0 && p.cacheReadTokens == 0 && p.cacheWriteTokens == 0 {
+					if anthropicEvent.Usage.InputTokens > 0 || anthropicEvent.Usage.CacheReadInputTokens > 0 || anthropicEvent.Usage.CacheCreationInputTokens > 0 {
+						p.anthropicInput = anthropicEvent.Usage.InputTokens
+						p.cacheReadTokens = anthropicEvent.Usage.CacheReadInputTokens
+						p.cacheWriteTokens = anthropicEvent.Usage.CacheCreationInputTokens
+						p.hasRealUsage = true
+					}
+				}
 			}
 		}
 
 	case "responses":
 		var respEvent struct {
-			Type     string `json:"type"`
-			Delta    string `json:"delta"`
+			Type  string `json:"type"`
+			Delta string `json:"delta"`
+			Item  struct {
+				Type string `json:"type"`
+			} `json:"item"`
 			Response struct {
 				Model      string `json:"model"`
 				OutputText struct {
@@ -446,11 +500,33 @@ func (p *StreamDiagnosticsParser) FeedSSEEvent(eventRaw []byte, dataPayload []by
 			if respEvent.Response.Model != "" && p.servedModel == "" {
 				p.servedModel = respEvent.Response.Model
 			}
-			if respEvent.Response.OutputText.Delta != "" {
-				appendWithCap(&p.contentBuilder, respEvent.Response.OutputText.Delta, 64*1024)
-			} else if respEvent.Delta != "" {
-				appendWithCap(&p.contentBuilder, respEvent.Delta, 64*1024)
+
+			// (a) Reasoning item added or done
+			if respEvent.Item.Type == "reasoning" {
+				p.thinkingDelivered = true
+				p.thinkingVerifiable = true
 			}
+
+			// (b) Reasoning text or summary deltas vs output text deltas
+			switch respEvent.Type {
+			case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+				p.thinkingDelivered = true
+				p.thinkingVerifiable = true
+				if respEvent.Delta != "" {
+					appendWithCap(&p.thinkingBuilder, respEvent.Delta, 32*1024)
+				}
+			case "response.output_text.delta":
+				if respEvent.Delta != "" {
+					appendWithCap(&p.contentBuilder, respEvent.Delta, 64*1024)
+				}
+			default:
+				if respEvent.Response.OutputText.Delta != "" {
+					appendWithCap(&p.contentBuilder, respEvent.Response.OutputText.Delta, 64*1024)
+				} else if respEvent.Delta != "" && (strings.HasSuffix(respEvent.Type, "output_text.delta") || strings.HasSuffix(respEvent.Type, "refusal.delta")) {
+					appendWithCap(&p.contentBuilder, respEvent.Delta, 64*1024)
+				}
+			}
+
 			if respEvent.Response.Usage.TotalTokens > 0 {
 				p.promptTokens = respEvent.Response.Usage.InputTokens
 				p.completionTokens = respEvent.Response.Usage.OutputTokens
@@ -461,6 +537,23 @@ func (p *StreamDiagnosticsParser) FeedSSEEvent(eventRaw []byte, dataPayload []by
 					p.thinkingDelivered = true
 				}
 				p.hasRealUsage = true
+				// Check if output_tokens_details is present in JSON
+				var rawMap map[string]json.RawMessage
+				if err := json.Unmarshal(dataPayload, &rawMap); err == nil {
+					if respRaw, ok := rawMap["response"]; ok {
+						var respMap map[string]json.RawMessage
+						if err := json.Unmarshal(respRaw, &respMap); err == nil {
+							if usageRaw, ok := respMap["usage"]; ok {
+								var usageMap map[string]json.RawMessage
+								if err := json.Unmarshal(usageRaw, &usageMap); err == nil {
+									if _, ok := usageMap["output_tokens_details"]; ok {
+										p.thinkingVerifiable = true
+									}
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 
@@ -512,9 +605,11 @@ func (p *StreamDiagnosticsParser) FeedSSEEvent(eventRaw []byte, dataPayload []by
 				}
 				if choice.Delta.ReasoningContent != "" {
 					p.thinkingDelivered = true
+					p.thinkingVerifiable = true
 					appendWithCap(&p.thinkingBuilder, choice.Delta.ReasoningContent, 32*1024)
 				} else if len(choice.Delta.Reasoning) > 0 {
 					p.thinkingDelivered = true
+					p.thinkingVerifiable = true
 					var rStr string
 					if err := json.Unmarshal(choice.Delta.Reasoning, &rStr); err == nil && rStr != "" {
 						appendWithCap(&p.thinkingBuilder, rStr, 32*1024)
@@ -546,10 +641,13 @@ func (p *StreamDiagnosticsParser) FeedSSEEvent(eventRaw []byte, dataPayload []by
 					}
 				}
 			}
-			if chunk.Usage != nil && chunk.Usage.TotalTokens > 0 {
+			if chunk.Usage != nil && (chunk.Usage.TotalTokens > 0 || chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
 				p.promptTokens = chunk.Usage.PromptTokens
 				p.completionTokens = chunk.Usage.CompletionTokens
 				p.totalTokens = chunk.Usage.TotalTokens
+				if p.totalTokens == 0 {
+					p.totalTokens = p.promptTokens + p.completionTokens
+				}
 				p.cacheReadTokens = chunk.Usage.PromptTokensDetails.CachedTokens
 				p.cacheWriteTokens = chunk.Usage.PromptTokensDetails.CacheWriteTokens
 				p.reasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
@@ -557,6 +655,19 @@ func (p *StreamDiagnosticsParser) FeedSSEEvent(eventRaw []byte, dataPayload []by
 					p.thinkingDelivered = true
 				}
 				p.hasRealUsage = true
+
+				// Check if completion_tokens_details is present in chunk.Usage
+				var rawMap map[string]json.RawMessage
+				if err := json.Unmarshal(dataPayload, &rawMap); err == nil {
+					if usageRaw, ok := rawMap["usage"]; ok {
+						var usageMap map[string]json.RawMessage
+						if err := json.Unmarshal(usageRaw, &usageMap); err == nil {
+							if _, ok := usageMap["completion_tokens_details"]; ok {
+								p.thinkingVerifiable = true
+							}
+						}
+					}
+				}
 			}
 		}
 	}
@@ -615,12 +726,13 @@ func (p *StreamDiagnosticsParser) BuildStreamSummary(chunkCount int, diag UsageD
 // Finalize produces the final UsageDiagnostics for a stream.
 func (p *StreamDiagnosticsParser) Finalize(chunkCount int, bodyLen int, statusCode int) UsageDiagnostics {
 	diag := UsageDiagnostics{
-		ApiFormat:         p.format,
-		ServedModel:       p.servedModel,
-		CacheReadTokens:   p.cacheReadTokens,
-		CacheWriteTokens:  p.cacheWriteTokens,
-		ReasoningTokens:   p.reasoningTokens,
-		ThinkingDelivered: p.thinkingDelivered,
+		ApiFormat:          p.format,
+		ServedModel:        p.servedModel,
+		CacheReadTokens:    p.cacheReadTokens,
+		CacheWriteTokens:   p.cacheWriteTokens,
+		ReasoningTokens:    p.reasoningTokens,
+		ThinkingDelivered:  p.thinkingDelivered,
+		ThinkingVerifiable: p.thinkingVerifiable || p.thinkingDelivered,
 	}
 
 	if p.format == "messages" {

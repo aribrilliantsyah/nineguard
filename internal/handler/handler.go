@@ -3,8 +3,10 @@ package handler
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -39,6 +41,18 @@ type Handler struct {
 	quotaAlerter *upstream.QuotaAlerter
 	syncReset    chan struct{}
 	routerTarget string
+	limiter      *RateLimiter
+}
+
+func (h *Handler) SetRateLimiter(l *RateLimiter) {
+	h.limiter = l
+}
+
+func (h *Handler) getLimiter() *RateLimiter {
+	if h.limiter == nil {
+		h.limiter = NewRateLimiter()
+	}
+	return h.limiter
 }
 
 func (h *Handler) SetPlugins(plm *plugins.Manager) {
@@ -64,6 +78,7 @@ func New(am *auth.Manager, mm *models.Manager, tm *traffic.Manager, sm *syslog.M
 		quotaAlerter: upstream.NewQuotaAlerter(),
 		syncReset:    make(chan struct{}, 1),
 		routerTarget: target,
+		limiter:      NewRateLimiter(),
 	}
 }
 
@@ -79,11 +94,33 @@ func jsonError(w http.ResponseWriter, status int, msg string) {
 	jsonResponse(w, status, map[string]string{"error": msg})
 }
 
+// Note: X-Forwarded-For is spoofable unless a trusted reverse proxy sets it,
+// which is why per-username lockout exists alongside per-IP rate limiting.
 func getClientIP(r *http.Request) string {
 	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		return strings.TrimSpace(strings.Split(forwarded, ",")[0])
+		ip := strings.TrimSpace(strings.Split(forwarded, ",")[0])
+		if ip != "" {
+			return ip
+		}
 	}
-	return r.RemoteAddr
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
+func (h *Handler) checkIPLimit(w http.ResponseWriter, r *http.Request) bool {
+	ip := getClientIP(r)
+	allowed, retryAfter := h.getLimiter().AllowIP(ip)
+	if !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		h.logAudit(r, 0, "", "auth.ratelimit", "ip:"+ip, "blocked", "IP rate limit exceeded")
+		slog.Warn("auth request rejected: IP rate limit exceeded", "client_ip", ip)
+		jsonError(w, http.StatusTooManyRequests, "Too many attempts, try again later")
+		return false
+	}
+	return true
 }
 
 func (h *Handler) logAudit(r *http.Request, actorID int64, username, action, target, status, details string) {
@@ -170,6 +207,10 @@ func (h *Handler) AuthSetup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) AuthLogin(w http.ResponseWriter, r *http.Request) {
+	if !h.checkIPLimit(w, r) {
+		return
+	}
+
 	var body struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -179,12 +220,33 @@ func (h *Handler) AuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, token, err := h.auth.Login(body.Username, body.Password)
+	trimmedUser := strings.TrimSpace(body.Username)
+	if trimmedUser == "" {
+		jsonError(w, http.StatusBadRequest, "Username is required")
+		return
+	}
+
+	if locked, retryAfter := h.getLimiter().IsUserLocked("login", trimmedUser); locked {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		h.logAudit(r, 0, trimmedUser, "auth.login.lockout", "user:"+trimmedUser, "blocked", "attempt rejected: account locked")
+		slog.Warn("login attempt rejected: account locked", "username", trimmedUser, "client_ip", getClientIP(r))
+		jsonError(w, http.StatusTooManyRequests, "Too many attempts, try again later")
+		return
+	}
+
+	user, token, err := h.auth.Login(trimmedUser, body.Password)
 	if err != nil {
-		h.logAudit(r, 0, body.Username, "auth.login", "user:"+body.Username, "failure", "invalid credentials")
+		justLocked, _ := h.getLimiter().RecordUserFailure("login", trimmedUser)
+		if justLocked {
+			h.logAudit(r, 0, trimmedUser, "auth.login.lockout", "user:"+trimmedUser, "locked", "account locked for 15 minutes after 5 failed attempts")
+			slog.Warn("account locked due to repeated login failures", "username", trimmedUser, "duration", "15m", "client_ip", getClientIP(r))
+		}
+		h.logAudit(r, 0, trimmedUser, "auth.login", "user:"+trimmedUser, "failure", "invalid credentials")
 		jsonError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
+
+	h.getLimiter().RecordUserSuccess("login", trimmedUser)
 
 	isSecure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 
@@ -321,24 +383,32 @@ func (h *Handler) SetRecoveryQuestion(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetRecoveryQuestion(w http.ResponseWriter, r *http.Request) {
-	username := strings.TrimSpace(r.URL.Query().Get("username"))
-	if username == "" {
+	if !h.checkIPLimit(w, r) {
+		return
+	}
+
+	rawUsername := r.URL.Query().Get("username")
+	trimmedUser := strings.TrimSpace(rawUsername)
+	if trimmedUser == "" {
 		jsonError(w, http.StatusBadRequest, "Username is required")
 		return
 	}
-	q, err := h.auth.GetRecoveryQuestion(username)
+	q, err := h.auth.GetRecoveryQuestion(trimmedUser)
 	if err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
-		return
+		q = auth.DecoyRecoveryQuestion(trimmedUser)
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"status":   "ok",
-		"username": username,
+		"username": rawUsername,
 		"question": q,
 	})
 }
 
 func (h *Handler) RecoverPassword(w http.ResponseWriter, r *http.Request) {
+	if !h.checkIPLimit(w, r) {
+		return
+	}
+
 	var body struct {
 		Username    string `json:"username"`
 		Answer      string `json:"answer"`
@@ -348,7 +418,8 @@ func (h *Handler) RecoverPassword(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
-	if strings.TrimSpace(body.Username) == "" || strings.TrimSpace(body.Answer) == "" {
+	trimmedUser := strings.TrimSpace(body.Username)
+	if trimmedUser == "" || strings.TrimSpace(body.Answer) == "" {
 		jsonError(w, http.StatusBadRequest, "Username and recovery answer are required")
 		return
 	}
@@ -356,12 +427,33 @@ func (h *Handler) RecoverPassword(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "New password must be at least 6 characters")
 		return
 	}
-	if err := h.auth.RecoverPassword(body.Username, body.Answer, body.NewPassword); err != nil {
-		h.logAudit(r, 0, body.Username, "auth.password.recover", "user:"+body.Username, "failure", err.Error())
-		jsonError(w, http.StatusBadRequest, err.Error())
+
+	if locked, retryAfter := h.getLimiter().IsUserLocked("recovery", trimmedUser); locked {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		h.logAudit(r, 0, trimmedUser, "auth.password.recover.lockout", "user:"+trimmedUser, "blocked", "attempt rejected: account locked")
+		slog.Warn("recovery attempt rejected: account locked", "username", trimmedUser, "client_ip", getClientIP(r))
+		jsonError(w, http.StatusTooManyRequests, "Too many attempts, try again later")
 		return
 	}
-	h.logAudit(r, 0, body.Username, "auth.password.recover", "user:"+body.Username, "success", "")
+
+	if err := h.auth.RecoverPassword(trimmedUser, body.Answer, body.NewPassword); err != nil {
+		justLocked, _ := h.getLimiter().RecordUserFailure("recovery", trimmedUser)
+		if justLocked {
+			h.logAudit(r, 0, trimmedUser, "auth.password.recover.lockout", "user:"+trimmedUser, "locked", "account locked for 15 minutes after 5 failed attempts")
+			slog.Warn("account locked due to repeated recovery failures", "username", trimmedUser, "duration", "15m", "client_ip", getClientIP(r))
+		}
+		var recErr *auth.RecoveryError
+		reason := err.Error()
+		if errors.As(err, &recErr) {
+			reason = recErr.InternalReason
+		}
+		h.logAudit(r, 0, trimmedUser, "auth.password.recover", "user:"+trimmedUser, "failure", reason)
+		jsonError(w, http.StatusBadRequest, "Invalid username or recovery answer")
+		return
+	}
+
+	h.getLimiter().RecordUserSuccess("recovery", trimmedUser)
+	h.logAudit(r, 0, trimmedUser, "auth.password.recover", "user:"+trimmedUser, "success", "")
 	jsonResponse(w, http.StatusOK, map[string]string{
 		"status":  "ok",
 		"message": "Password updated successfully. You can now log in.",
@@ -1210,7 +1302,7 @@ func (h *Handler) ExportUsageReport(w http.ResponseWriter, r *http.Request) {
 
 	// 1. Executive Summary
 	_ = cw.Write([]string{"# EXECUTIVE SUMMARY"})
-	_ = cw.Write([]string{"period", "start_date", "end_date", "total_requests", "total_tokens", "prompt_tokens", "completion_tokens", "estimated_cost_usd", "unpriced_requests", "top_key", "top_model"})
+	_ = cw.Write([]string{"period", "start_date", "end_date", "total_requests", "total_tokens", "prompt_tokens", "cache_read_tokens", "cache_write_tokens", "completion_tokens", "estimated_cost_usd", "unpriced_requests", "top_key", "top_model"})
 	_ = cw.Write([]string{
 		report.Period,
 		report.StartDate,
@@ -1218,6 +1310,8 @@ func (h *Handler) ExportUsageReport(w http.ResponseWriter, r *http.Request) {
 		strconv.Itoa(report.TotalRequests),
 		strconv.Itoa(report.TotalTokens),
 		strconv.Itoa(report.PromptTokens),
+		strconv.Itoa(report.CacheReadTokens),
+		strconv.Itoa(report.CacheWriteTokens),
 		strconv.Itoa(report.CompletionTokens),
 		fmt.Sprintf("%.4f", report.EstimatedCostUSD),
 		strconv.FormatInt(report.UnpricedRequests, 10),
@@ -1228,13 +1322,15 @@ func (h *Handler) ExportUsageReport(w http.ResponseWriter, r *http.Request) {
 
 	// 2. Client Keys Breakdown
 	_ = cw.Write([]string{"# CLIENT KEYS BREAKDOWN"})
-	_ = cw.Write([]string{"key_name", "key_masked", "requests", "prompt_tokens", "completion_tokens", "total_tokens", "estimated_cost_usd", "token_share_pct"})
+	_ = cw.Write([]string{"key_name", "key_masked", "requests", "prompt_tokens", "cache_read_tokens", "cache_write_tokens", "completion_tokens", "total_tokens", "estimated_cost_usd", "token_share_pct"})
 	for _, k := range report.KeysBreakdown {
 		_ = cw.Write([]string{
 			k.KeyName,
 			k.Key,
 			strconv.Itoa(k.TotalRequests),
 			strconv.Itoa(k.PromptTokens),
+			strconv.Itoa(k.CacheReadTokens),
+			strconv.Itoa(k.CacheWriteTokens),
 			strconv.Itoa(k.CompletionTokens),
 			strconv.Itoa(k.TotalTokens),
 			fmt.Sprintf("%.4f", k.EstimatedCostUSD),
@@ -1245,12 +1341,14 @@ func (h *Handler) ExportUsageReport(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Models Breakdown
 	_ = cw.Write([]string{"# MODELS BREAKDOWN"})
-	_ = cw.Write([]string{"model_id", "requests", "prompt_tokens", "completion_tokens", "total_tokens", "estimated_cost_usd", "token_share_pct"})
+	_ = cw.Write([]string{"model_id", "requests", "prompt_tokens", "cache_read_tokens", "cache_write_tokens", "completion_tokens", "total_tokens", "estimated_cost_usd", "token_share_pct"})
 	for _, m := range report.ModelsBreakdown {
 		_ = cw.Write([]string{
 			m.Model,
 			strconv.Itoa(m.TotalRequests),
 			strconv.Itoa(m.PromptTokens),
+			strconv.Itoa(m.CacheReadTokens),
+			strconv.Itoa(m.CacheWriteTokens),
 			strconv.Itoa(m.CompletionTokens),
 			strconv.Itoa(m.TotalTokens),
 			fmt.Sprintf("%.4f", m.EstimatedCostUSD),
@@ -1261,7 +1359,7 @@ func (h *Handler) ExportUsageReport(w http.ResponseWriter, r *http.Request) {
 
 	// 4. Key-to-Model Attribution Matrix
 	_ = cw.Write([]string{"# KEY TO MODEL ATTRIBUTION MATRIX"})
-	_ = cw.Write([]string{"key_name", "key_masked", "model_id", "requests", "prompt_tokens", "completion_tokens", "total_tokens", "estimated_cost_usd", "share_of_key_pct"})
+	_ = cw.Write([]string{"key_name", "key_masked", "model_id", "requests", "prompt_tokens", "cache_read_tokens", "cache_write_tokens", "completion_tokens", "total_tokens", "estimated_cost_usd", "share_of_key_pct"})
 	for _, k := range report.KeysBreakdown {
 		for _, m := range k.ModelUsage {
 			_ = cw.Write([]string{
@@ -1270,6 +1368,8 @@ func (h *Handler) ExportUsageReport(w http.ResponseWriter, r *http.Request) {
 				m.Model,
 				strconv.Itoa(m.Requests),
 				strconv.Itoa(m.PromptTokens),
+				strconv.Itoa(m.CacheReadTokens),
+				strconv.Itoa(m.CacheWriteTokens),
 				strconv.Itoa(m.CompTokens),
 				strconv.Itoa(m.TotalTokens),
 				fmt.Sprintf("%.4f", m.EstimatedCostUSD),

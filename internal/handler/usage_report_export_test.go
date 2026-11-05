@@ -69,6 +69,14 @@ func TestExportUsageReportAndTrafficLogs(t *testing.T) {
 	if !strings.Contains(body, "test-key") || !strings.Contains(body, "gemini-3.8-flash-high") {
 		t.Errorf("missing key or model in: %s", body)
 	}
+	for _, col := range []string{"cache_read_tokens", "cache_write_tokens"} {
+		if !strings.Contains(body, col) {
+			t.Errorf("missing column %s in aggregated CSV: %s", col, body)
+		}
+	}
+	if !strings.Contains(body, "256") || !strings.Contains(body, "64") {
+		t.Errorf("missing cache token values (256, 64) in aggregated CSV: %s", body)
+	}
 
 	// 2. Test Raw Traffic Logs Export (CSV with new cost and diagnostics columns)
 	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/traffic/export?period=all&format=csv", nil)

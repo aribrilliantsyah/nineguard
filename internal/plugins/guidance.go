@@ -12,6 +12,11 @@ var BuiltinGuidance = map[string]Guidance{
 		RecommendedFor:    "Long agent sessions, large tool outputs, expensive models.",
 		NotRecommendedFor: "Short chats (little to compress); providers that already compress input.",
 	},
+	"billion-context": {
+		Summary:           "Routes requests through a billion-context proxy for incremental, prefix-cache friendly history compression. Supports OpenAI chat and Anthropic messages.",
+		RecommendedFor:    "OpenAI chat and Anthropic messages endpoints; long sessions with prefix caching.",
+		NotRecommendedFor: "cliproxy embedded OAuth; stacking with Headroom or RTK.",
+	},
 	"caveman": {
 		Summary:           "Instructs the model to answer tersely, dropping filler. Reduces output tokens.",
 		RecommendedFor:    "Coding agents, CLI tools.",

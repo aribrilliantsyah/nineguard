@@ -23,6 +23,25 @@ func TestComputeWarnings_OutputStyleOverlap(t *testing.T) {
 	}
 }
 
+func TestComputeWarnings_InputCompressionOverlap(t *testing.T) {
+	effective := []ResolvedPlugin{
+		{Plugin: Plugin{ID: "headroom", Name: "Headroom", Category: CategoryInputCompression}, EffectiveState: StateOn},
+		{Plugin: Plugin{ID: "billion-context", Name: "Billion Context", Category: CategoryInputCompression}, EffectiveState: StateOn},
+	}
+
+	w := ComputeWarnings(effective, false, "", "")
+	if len(w) != 1 {
+		t.Fatalf("expected 1 warning, got %d", len(w))
+	}
+	if w[0].Code != "input_compression_overlap" {
+		t.Fatalf("expected code input_compression_overlap, got %s", w[0].Code)
+	}
+	expectedMsg := "Headroom and Billion Context both compress message history. Stacking them causes double compression and degrades context quality. Enable only one."
+	if w[0].Message != expectedMsg {
+		t.Errorf("expected warning message %q, got %q", expectedMsg, w[0].Message)
+	}
+}
+
 func TestComputeWarnings_InputAndOutputNoOverlap(t *testing.T) {
 	effective := []ResolvedPlugin{
 		{Plugin: Plugin{ID: "headroom", Name: "Headroom", Category: CategoryInputCompression}, EffectiveState: StateOn},
