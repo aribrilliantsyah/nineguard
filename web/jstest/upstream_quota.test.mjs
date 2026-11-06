@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { upstreamBarTone, upstreamAlertRows, upstreamNeedsAttention, upstreamProviderSummary, bucketFamily, groupProviderByFamily, groupProviderBySubProvider, loadGroupBy, bucketMeter, splitPeriod, FAMILY_ORDER } from '../static/js/views/upstream_quotas.js';
+import { upstreamBarTone, upstreamAlertRows, upstreamNeedsAttention, upstreamProviderSummary, bucketFamily, groupProviderByFamily, groupProviderBySubProvider, loadGroupBy, bucketMeter, splitPeriod, FAMILY_ORDER, bentoSpan, layoutBento } from '../static/js/views/upstream_quotas.js';
 import { subProviderIconURL, initials } from '../static/js/providericons.js';
 
 test('upstreamBarTone assigns correct status color tones', () => {
@@ -501,3 +501,31 @@ test('loadGroupBy defaults to account and validates stored choices', () => {
     }
   }
 });
+
+test('bentoSpan calculates column span matching mockup algorithm', () => {
+  // (6, 4, true) -> 3
+  assert.equal(bentoSpan(6, 4, true), 3);
+  // (5, 4, true) -> 3
+  assert.equal(bentoSpan(5, 4, true), 3);
+  // (4, 4, false) -> 2
+  assert.equal(bentoSpan(4, 4, false), 2);
+  // (4, 4, true) -> 4
+  // In mockup's code: if (totalCols >= 4 && hasSmallGroups && n >= 4) { if (n === 6 || n === 5) span = 3; } else if ...
+  // When n=4 and hasSmallGroups=true, outer if branch enters, inner if is false, else-if is skipped, span remains 4.
+  assert.equal(bentoSpan(4, 4, true), 4);
+  // (1, 4, true) -> 1
+  assert.equal(bentoSpan(1, 4, true), 1);
+  // (6, 2, true) -> 2
+  assert.equal(bentoSpan(6, 2, true), 2);
+  // (3, 4, false) -> 3
+  assert.equal(bentoSpan(3, 4, false), 3);
+  // (6, 4, false) -> 4
+  assert.equal(bentoSpan(6, 4, false), 4);
+});
+
+test('layoutBento returns early without error when element is missing or collapsed', () => {
+  assert.equal(layoutBento(null), undefined);
+  assert.equal(layoutBento(undefined), undefined);
+  assert.equal(layoutBento({ clientWidth: 0 }), undefined);
+});
+
