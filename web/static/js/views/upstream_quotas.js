@@ -434,25 +434,37 @@ export function layoutBento(stageEl) {
   const wideGroups = groups.filter((g) => g.span > 1);
   const unitGroups = groups.filter((g) => g.span === 1);
 
+  function placeInColumns(targetGroups, colCount) {
+    const cols = [];
+    const colH = [];
+    for (let i = 0; i < colCount; i++) {
+      const col = document.createElement('div');
+      col.className = 'gb-board-col';
+      col.style.flex = '1 1 0%';
+      board.appendChild(col);
+      cols.push(col);
+      colH.push(0);
+    }
+
+    targetGroups.forEach((g) => {
+      let best = 0;
+      for (let k = 1; k < cols.length; k++) {
+        if (colH[k] < colH[best]) best = k;
+      }
+      cols[best].appendChild(g.box);
+      buildGroupInner(g);
+      colH[best] += (g.box.getBoundingClientRect?.()?.height || 0) + GAP;
+    });
+  }
+
   if (wideGroups.length && unitGroups.length && totalCols >= 3) {
     const maxWideSpan = Math.min(totalCols - 1, Math.max(...wideGroups.map((g) => g.span)));
-    const sideSpan = Math.max(1, totalCols - maxWideSpan);
+    const sideSpan = Math.max(1, Math.min(totalCols - maxWideSpan, unitGroups.length));
 
     const mainCol = document.createElement('div');
     mainCol.className = 'gb-board-col';
     mainCol.style.flex = `${maxWideSpan} 1 0%`;
     board.appendChild(mainCol);
-
-    const sideCols = [];
-    const sideH = [];
-    for (let sc = 0; sc < sideSpan; sc++) {
-      const sCol = document.createElement('div');
-      sCol.className = 'gb-board-col';
-      sCol.style.flex = '1 1 0%';
-      board.appendChild(sCol);
-      sideCols.push(sCol);
-      sideH.push(0);
-    }
 
     wideGroups.forEach((g) => {
       g.span = maxWideSpan;
@@ -460,15 +472,9 @@ export function layoutBento(stageEl) {
       buildGroupInner(g);
     });
 
-    unitGroups.forEach((g) => {
-      let best = 0;
-      for (let k = 1; k < sideCols.length; k++) {
-        if (sideH[k] < sideH[best]) best = k;
-      }
-      sideCols[best].appendChild(g.box);
-      buildGroupInner(g);
-      sideH[best] += (g.box.getBoundingClientRect?.()?.height || 0) + GAP;
-    });
+    placeInColumns(unitGroups, sideSpan);
+  } else if (wideGroups.length === 0 && totalCols > 1) {
+    placeInColumns(groups, Math.min(totalCols, groups.length));
   } else {
     const mainStack = document.createElement('div');
     mainStack.className = 'gb-board-col';
