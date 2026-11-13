@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { upstreamBarTone, upstreamAlertRows, upstreamNeedsAttention, upstreamProviderSummary, bucketFamily, groupProviderByFamily, groupProviderBySubProvider, loadGroupBy, bucketMeter, splitPeriod, FAMILY_ORDER } from '../static/js/views/upstream_quotas.js';
+import { upstreamBarTone, upstreamAlertRows, upstreamNeedsAttention, upstreamProviderSummary, bucketFamily, groupProviderByFamily, groupProviderBySubProvider, loadGroupBy, bucketMeter, splitPeriod, FAMILY_ORDER, bentoSpan, layoutBento } from '../static/js/views/upstream_quotas.js';
 import { subProviderIconURL, initials } from '../static/js/providericons.js';
 
 test('upstreamBarTone assigns correct status color tones', () => {
@@ -501,3 +501,133 @@ test('loadGroupBy defaults to account and validates stored choices', () => {
     }
   }
 });
+
+test('bentoSpan calculates column span matching mockup algorithm', () => {
+  // (6, 4, true) -> 3
+  assert.equal(bentoSpan(6, 4, true), 3);
+  // (5, 4, true) -> 3
+  assert.equal(bentoSpan(5, 4, true), 3);
+  // (4, 4, false) -> 2
+  assert.equal(bentoSpan(4, 4, false), 2);
+  // (4, 4, true) -> 4
+  // In mockup's code: if (totalCols >= 4 && hasSmallGroups && n >= 4) { if (n === 6 || n === 5) span = 3; } else if ...
+  // When n=4 and hasSmallGroups=true, outer if branch enters, inner if is false, else-if is skipped, span remains 4.
+  assert.equal(bentoSpan(4, 4, true), 4);
+  // (1, 4, true) -> 1
+  assert.equal(bentoSpan(1, 4, true), 1);
+  // (6, 2, true) -> 2
+  assert.equal(bentoSpan(6, 2, true), 2);
+  // (3, 4, false) -> 3
+  assert.equal(bentoSpan(3, 4, false), 3);
+  // (6, 4, false) -> 4
+  assert.equal(bentoSpan(6, 4, false), 4);
+});
+
+test('layoutBento returns early without error when element is missing or collapsed', () => {
+  assert.equal(layoutBento(null), undefined);
+  assert.equal(layoutBento(undefined), undefined);
+  assert.equal(layoutBento({ clientWidth: 0 }), undefined);
+});
+
+test('layoutBento distributes 1-card groups into multiple columns when totalCols > 1', () => {
+  const origDoc = globalThis.document;
+  try {
+    function el(tag, cls = '') {
+      const o = {
+        tagName: tag,
+        className: cls,
+        children: [],
+        style: {},
+        appendChild(c) { o.children.push(c); },
+        replaceChildren(...cs) { o.children = [...cs]; },
+        querySelector() { return o._body || null; },
+        getBoundingClientRect() { return { height: 100 }; }
+      };
+      return o;
+    }
+    globalThis.document = {
+      createElement(tag) { return el(tag); }
+    };
+
+    const box1 = el('div', 'gb-box');
+    const body1 = el('div', 'gb-body');
+    body1.appendChild(el('div', 'card1'));
+    box1._body = body1;
+
+    const box2 = el('div', 'gb-box');
+    const body2 = el('div', 'gb-body');
+    body2.appendChild(el('div', 'card2'));
+    box2._body = body2;
+
+    const stage = el('div', 'gb-stage');
+    stage.classList = { contains: () => false };
+    stage.clientWidth = 700; // totalCols = 2
+    stage.appendChild(box1);
+    stage.appendChild(box2);
+
+    layoutBento(stage);
+    const board = stage.children[0];
+    assert.equal(board.className, 'gb-board');
+    assert.equal(board.children.length, 2);
+    assert.equal(board.children[0].className, 'gb-board-col');
+    assert.equal(board.children[0].style.flex, '1 1 0%');
+    assert.equal(board.children[1].style.flex, '1 1 0%');
+    assert.equal(board.children[0].children[0], box1);
+    assert.equal(board.children[1].children[0], box2);
+  } finally {
+    globalThis.document = origDoc;
+  }
+});
+
+test('layoutBento caps side columns to unitGroups length when totalCols exceeds unit groups', () => {
+  const origDoc = globalThis.document;
+  try {
+    function el(tag, cls = '') {
+      const o = {
+        tagName: tag,
+        className: cls,
+        children: [],
+        style: {},
+        appendChild(c) { o.children.push(c); },
+        replaceChildren(...cs) { o.children = [...cs]; },
+        querySelector() { return o._body || null; },
+        getBoundingClientRect() { return { height: 100 }; }
+      };
+      return o;
+    }
+    globalThis.document = {
+      createElement(tag) { return el(tag); }
+    };
+
+    const box1 = el('div', 'gb-box');
+    const body1 = el('div', 'gb-body');
+    body1.appendChild(el('div', 'card1'));
+    body1.appendChild(el('div', 'card2'));
+    box1._body = body1;
+
+    const box2 = el('div', 'gb-box');
+    const body2 = el('div', 'gb-body');
+    body2.appendChild(el('div', 'card3'));
+    box2._body = body2;
+
+    const stage = el('div', 'gb-stage');
+    stage.classList = { contains: () => false };
+    stage.clientWidth = 1580; // totalCols = 5
+    stage.appendChild(box1);
+    stage.appendChild(box2);
+
+    layoutBento(stage);
+    const board = stage.children[0];
+    assert.equal(board.className, 'gb-board');
+    assert.equal(board.children.length, 2);
+    assert.equal(board.children[0].style.flex, '2 1 0%');
+    assert.equal(board.children[1].style.flex, '1 1 0%');
+    assert.equal(board.children[0].children[0], box1);
+    assert.equal(board.children[1].children[0], box2);
+  } finally {
+    globalThis.document = origDoc;
+  }
+});
+
+
+

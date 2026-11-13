@@ -285,6 +285,208 @@ const isAllowanceConn = (c) => (c.connection_id || '').includes('allowance');
 const isSharedPool = (c, p) => !isAllowanceConn(c) && (p.quota_type === 'nineguard' || c.plan === 'Shared Upstream Pool');
 const planOf = (c) => (c.plan && c.plan !== 'Shared Upstream Pool' ? c.plan : null);
 
+const MODEL_THEME = {
+  claude: 'th-claude',
+  gemini: 'th-gemini',
+  gpt: 'th-gpt',
+};
+
+const SUB_PROVIDER_THEME = {
+  claude: 'th-claude',
+  anthropic: 'th-claude',
+  gemini: 'th-gemini',
+  google: 'th-gemini',
+  'gemini-cli': 'th-gemini',
+  codex: 'th-gpt',
+  openai: 'th-gpt',
+  antigravity: 'th-ag',
+};
+
+export function bentoSpan(cardCount, totalCols, hasSmallGroups) {
+  const n = cardCount;
+  let span = Math.min(n, totalCols);
+  if (totalCols >= 4 && hasSmallGroups && n >= 4) {
+    if (n === 6 || n === 5) span = 3;
+  } else if (totalCols >= 4 && n === 4) {
+    span = 2;
+  }
+  return Math.max(1, span);
+}
+
+export function layoutBento(stageEl) {
+  if (!stageEl || !stageEl.clientWidth) return;
+
+  const MIN_COL = 300;
+  const GAP = 16;
+  const isNarrow = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(max-width: 560px)').matches;
+
+  if (stageEl.classList.contains('gb-acct-stage')) {
+    if (!stageEl._origCards) {
+      stageEl._origCards = Array.from(stageEl.children);
+    }
+    const cards = stageEl._origCards;
+    const W = stageEl.clientWidth;
+    let numCols = isNarrow ? 1 : Math.max(1, Math.floor((W + 14) / (MIN_COL + 14)));
+    numCols = Math.min(numCols, Math.max(1, cards.length));
+
+    stageEl.replaceChildren();
+    const wrap = document.createElement('div');
+    wrap.className = 'gb-acct-masonry';
+    const cols = [];
+    const colHeights = [];
+    for (let i = 0; i < numCols; i++) {
+      const c = document.createElement('div');
+      c.className = 'gb-acct-col';
+      wrap.appendChild(c);
+      cols.push(c);
+      colHeights.push(0);
+    }
+    stageEl.appendChild(wrap);
+
+    cards.forEach((card) => {
+      let best = 0;
+      for (let k = 1; k < numCols; k++) {
+        if (colHeights[k] < colHeights[best]) best = k;
+      }
+      cols[best].appendChild(card);
+      colHeights[best] += (card.getBoundingClientRect?.()?.height || 0) + 14;
+    });
+    return;
+  }
+
+  // Grouped views (.gb-stage)
+  if (!stageEl._origGroups) {
+    stageEl._origGroups = Array.from(stageEl.children).map((box) => {
+      const body = box.querySelector('.gb-body');
+      return {
+        box,
+        body,
+        cards: body ? Array.from(body.children) : []
+      };
+    });
+  }
+  const groups = stageEl._origGroups;
+  const W = stageEl.clientWidth;
+  const totalCols = isNarrow ? 1 : Math.max(1, Math.floor((W + GAP) / (MIN_COL + GAP)));
+
+  const hasSmallGroups = groups.some((g) => g.cards.length === 1);
+  groups.forEach((g) => {
+    g.span = bentoSpan(g.cards.length, totalCols, hasSmallGroups);
+  });
+
+  function buildGroupInner(g) {
+    if (!g.body) return;
+    const n = g.cards.length;
+    const s = Math.max(1, Math.min(g.span, n));
+    g.body.replaceChildren();
+
+    if (s === 1 || n === 1) {
+      const singleCol = document.createElement('div');
+      singleCol.className = 'gb-inner-cols';
+      const colEl = document.createElement('div');
+      colEl.className = 'gb-inner-col';
+      g.cards.forEach((c) => { colEl.appendChild(c); });
+      singleCol.appendChild(colEl);
+      g.body.appendChild(singleCol);
+      return;
+    }
+
+    const rem = n % s;
+    if (rem === 0) {
+      const colsWrap = document.createElement('div');
+      colsWrap.className = 'gb-inner-cols';
+      const innerCols = [];
+      const innerH = [];
+      for (let i = 0; i < s; i++) {
+        const ic = document.createElement('div');
+        ic.className = 'gb-inner-col';
+        colsWrap.appendChild(ic);
+        innerCols.push(ic);
+        innerH.push(0);
+      }
+      g.body.appendChild(colsWrap);
+      g.cards.forEach((c) => {
+        let best = 0;
+        for (let k = 1; k < s; k++) {
+          if (innerH[k] < innerH[best]) best = k;
+        }
+        innerCols[best].appendChild(c);
+        innerH[best] += (c.getBoundingClientRect?.()?.height || 0) + 14;
+      });
+    } else {
+      const gridWrap = document.createElement('div');
+      gridWrap.className = 'gb-inner-grid';
+      const fullRowsCount = n - rem;
+      g.cards.forEach((c, idx) => {
+        const span12 = idx < fullRowsCount ? Math.floor(12 / s) : Math.floor(12 / rem);
+        c.style.gridColumn = `span ${span12}`;
+        gridWrap.appendChild(c);
+      });
+      g.body.appendChild(gridWrap);
+    }
+  }
+
+  stageEl.replaceChildren();
+  const board = document.createElement('div');
+  board.className = 'gb-board';
+  stageEl.appendChild(board);
+
+  const wideGroups = groups.filter((g) => g.span > 1);
+  const unitGroups = groups.filter((g) => g.span === 1);
+
+  function placeInColumns(targetGroups, colCount) {
+    const cols = [];
+    const colH = [];
+    for (let i = 0; i < colCount; i++) {
+      const col = document.createElement('div');
+      col.className = 'gb-board-col';
+      col.style.flex = '1 1 0%';
+      board.appendChild(col);
+      cols.push(col);
+      colH.push(0);
+    }
+
+    targetGroups.forEach((g) => {
+      let best = 0;
+      for (let k = 1; k < cols.length; k++) {
+        if (colH[k] < colH[best]) best = k;
+      }
+      cols[best].appendChild(g.box);
+      buildGroupInner(g);
+      colH[best] += (g.box.getBoundingClientRect?.()?.height || 0) + GAP;
+    });
+  }
+
+  if (wideGroups.length && unitGroups.length && totalCols >= 3) {
+    const maxWideSpan = Math.min(totalCols - 1, Math.max(...wideGroups.map((g) => g.span)));
+    const sideSpan = Math.max(1, Math.min(totalCols - maxWideSpan, unitGroups.length));
+
+    const mainCol = document.createElement('div');
+    mainCol.className = 'gb-board-col';
+    mainCol.style.flex = `${maxWideSpan} 1 0%`;
+    board.appendChild(mainCol);
+
+    wideGroups.forEach((g) => {
+      g.span = maxWideSpan;
+      mainCol.appendChild(g.box);
+      buildGroupInner(g);
+    });
+
+    placeInColumns(unitGroups, sideSpan);
+  } else if (wideGroups.length === 0 && totalCols > 1) {
+    placeInColumns(groups, Math.min(totalCols, groups.length));
+  } else {
+    const mainStack = document.createElement('div');
+    mainStack.className = 'gb-board-col';
+    mainStack.style.flex = '1 1 100%';
+    board.appendChild(mainStack);
+    groups.forEach((g) => {
+      mainStack.appendChild(g.box);
+      buildGroupInner(g);
+    });
+  }
+}
+
 // ---- View -----------------------------------------------------------------
 export function renderUpstreamQuotas(container) {
   let alive = true;
@@ -294,6 +496,7 @@ export function renderUpstreamQuotas(container) {
   let groupBy = loadGroupBy();
   let cooldownUntil = 0;
   let cooldownTimer = null;
+  let stageObservers = [];
 
   const content = h('div', { class: 'mt' },
     h('div', { class: 'skel', style: { height: '140px', borderRadius: '8px' } })
@@ -508,7 +711,8 @@ export function renderUpstreamQuotas(container) {
     const w = worstOf(all);
     const chip = w.limit ? h('span', { class: 'badge err' }, icon('alert'), 'Limit reached')
       : w.low != null && w.low < 30 ? h('span', { class: 'badge warn' }, `lowest ${Math.round(w.low)}%`) : null;
-    return h('article', { class: `uq-card${cardState(w)}${family === 'allowance' ? ' is-allowance' : ''}` },
+    const th = MODEL_THEME[family] ? ` ${MODEL_THEME[family]}` : '';
+    return h('article', { class: `uq-card gb-group uq-group-box${th}${cardState(w)}${family === 'allowance' ? ' is-allowance' : ''}` },
       h('div', { class: 'uq-card-head' }, iconTile(meta.spec, meta.title),
         h('div', { class: 'uq-ttl' },
           h('h3', { title: meta.title }, meta.title),
@@ -516,18 +720,18 @@ export function renderUpstreamQuotas(container) {
             `${groups.length} ${groups.length === 1 ? 'account' : 'accounts'} · ${all.length} ${family === 'credit' ? 'balance' : 'limit'}${all.length === 1 ? '' : 's'}`,
             family === 'allowance' ? h('span', { class: 'badge sm ok' }, 'admin limit') : null)),
         h('div', { class: 'uq-side' }, chip)),
-      h('div', { class: 'uq-accts' }, groups.map((g) => accountGroup(g, provider, shownReset))));
+      h('div', { class: 'gb-body' }, groups.map((g) => accountGroup(g, provider, shownReset))));
   }
 
   function attentionCard(conns) {
     const errs = conns.some((c) => c.status === 'error' || c.status === 'degraded');
     const title = errs ? 'Needs attention' : 'Waiting for data';
-    return h('article', { class: `uq-card${errs ? ' is-err' : ''}` },
+    return h('article', { class: `uq-card gb-group uq-group-box${errs ? ' is-err' : ''}` },
       h('div', { class: 'uq-card-head' }, iconTile({ ic: 'circle-x' }, 'X'),
         h('div', { class: 'uq-ttl' },
           h('h3', { title }, title),
           h('div', { class: 'uq-sub' }, `${conns.length} ${conns.length === 1 ? 'account' : 'accounts'}`))),
-      h('div', { class: 'uq-accts' }, conns.map((c) => h('div', { class: 'uq-acct' },
+      h('div', { class: 'gb-body' }, conns.map((c) => h('div', { class: 'uq-acct' },
         h('div', { class: 'uq-acct-head' }, subProviderTile(c.provider, c.account_label, 'sm'),
           h('span', { class: 'uq-nm', title: c.account_label }, c.account_label),
           c.plan ? h('span', { class: 'badge sm' }, c.plan) : null,
@@ -549,7 +753,9 @@ export function renderUpstreamQuotas(container) {
       : w.low != null && w.low < 30 ? h('span', { class: 'badge warn' }, `lowest ${Math.round(w.low)}%`) : null;
     const allowance = groups.length > 0 && groups.every((g) => isAllowanceConn(g.conn));
     const cardIcon = allowance ? iconTile({ ic: 'shield' }, title) : subProviderTile(subProvider, title);
-    return h('article', { class: `uq-card${cardState(w)}${allowance ? ' is-allowance' : ''}` },
+    const key = String(groups[0]?.conn?.provider || subProvider || '').toLowerCase();
+    const th = SUB_PROVIDER_THEME[key] ? ` ${SUB_PROVIDER_THEME[key]}` : '';
+    return h('article', { class: `uq-card gb-group uq-group-box${th}${cardState(w)}${allowance ? ' is-allowance' : ''}` },
       h('div', { class: 'uq-card-head' }, cardIcon,
         h('div', { class: 'uq-ttl' },
           h('h3', { title }, title),
@@ -557,7 +763,7 @@ export function renderUpstreamQuotas(container) {
             `${groups.length} ${groups.length === 1 ? 'account' : 'accounts'} · ${all.length} ${all.length === 1 ? 'limit' : 'limits'}`,
             allowance ? h('span', { class: 'badge sm ok' }, 'admin limit') : null)),
         h('div', { class: 'uq-side' }, chip)),
-      h('div', { class: 'uq-accts' }, groups.map((g) => accountGroup(g, provider, shownReset))));
+      h('div', { class: 'gb-body' }, groups.map((g) => accountGroup(g, provider, shownReset))));
   }
 
   function cardsByProvider(p) {
@@ -647,7 +853,7 @@ export function renderUpstreamQuotas(container) {
       isUnsupported
         ? h('p', { class: 'uq-empty-note' }, 'This provider connects directly to an LLM without upstream limit telemetry. Switch protocol in Providers menu to enable.')
         : conns.length
-        ? h('div', { class: groupBy === 'account' ? 'uq-grid' : 'uq-grid is-grouped' },
+        ? h('div', { class: groupBy === 'account' ? 'uq-grid gb-acct-stage' : 'uq-grid gb-stage' },
             groupBy === 'account' ? conns.map((c) => connectionCard(c, p))
             : groupBy === 'provider' ? cardsByProvider(p)
             : cardsByModel(p))
@@ -678,6 +884,9 @@ export function renderUpstreamQuotas(container) {
   }
 
   function render() {
+    stageObservers.forEach((o) => o.disconnect());
+    stageObservers = [];
+
     const activeTrackers = providersData.filter((p) => p.quota_type && p.quota_type !== 'disabled');
 
     if (!providersData.length || !activeTrackers.length) {
@@ -698,6 +907,22 @@ export function renderUpstreamQuotas(container) {
     }
 
     content.replaceChildren(...providersData.map(providerSection));
+
+    content.querySelectorAll('.gb-stage, .gb-acct-stage').forEach((st) => {
+      layoutBento(st);
+      if (typeof ResizeObserver !== 'undefined') {
+        const ro = new ResizeObserver(() => {
+          if (!alive) return;
+          if (st.clientWidth !== st._gbW) {
+            st._gbW = st.clientWidth;
+            if (st.clientWidth > 0) layoutBento(st);
+          }
+        });
+        st._gbW = st.clientWidth;
+        ro.observe(st);
+        stageObservers.push(ro);
+      }
+    });
   }
 
   loadSyncSettings();
@@ -706,5 +931,7 @@ export function renderUpstreamQuotas(container) {
   return () => {
     alive = false;
     clearInterval(cooldownTimer);
+    stageObservers.forEach((o) => o.disconnect());
+    stageObservers = [];
   };
 }
