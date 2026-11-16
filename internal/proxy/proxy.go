@@ -638,6 +638,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	outReq.Close = false
 	outReq.Header.Del("X-NineGuard-Plugins") // Never forward bypass header upstream
 	outReq.Header.Del("X-App") // Strip client identity header; leaking it causes upstream SDK fingerprint mismatch (429)
+	// Browser-originated requests (dashboard probe) carry Origin; upstream treats it as a CORS call and rejects (401).
+	for _, h := range []string{"Origin", "Referer", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest"} {
+		outReq.Header.Del(h)
+	}
 	if upstreamAppliedHeader != "" {
 		outReq.Header.Set("X-NineGuard-Plugins-Applied", upstreamAppliedHeader)
 	} else {

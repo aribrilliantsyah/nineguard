@@ -61,6 +61,12 @@ func TestProxy_HopByHopHeaders_Integration(t *testing.T) {
 		if val := r.Header.Get("X-App"); val != "" {
 			t.Errorf("upstream received X-App header: %q", val)
 		}
+		// Browser headers make Anthropic demand the direct-browser-access opt-in (401); they must not reach upstream.
+		for _, name := range []string{"Origin", "Referer", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest"} {
+			if val := r.Header.Get(name); val != "" {
+				t.Errorf("upstream received %s header: %q", name, val)
+			}
+		}
 
 		// Verify upstream DOES receive end-to-end headers
 		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
@@ -111,6 +117,11 @@ func TestProxy_HopByHopHeaders_Integration(t *testing.T) {
 	req.Header.Set("Upgrade", "h2c")
 	req.Header.Set("X-Custom-Hop", "client-secret-token")
 	req.Header.Set("X-App", "cli")
+	req.Header.Set("Origin", "http://localhost:9000")
+	req.Header.Set("Referer", "http://localhost:9000/")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
 
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
