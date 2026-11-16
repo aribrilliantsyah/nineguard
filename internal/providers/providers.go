@@ -624,6 +624,7 @@ func (m *Manager) AggregateModels(ctx context.Context) ([]map[string]interface{}
 			if prov.APIKey != "" {
 				req.Header.Set("Authorization", "Bearer "+prov.APIKey)
 			}
+			setAnthropicVersion(req, prov.Route)
 
 			resp, err := client.Do(req)
 			if err != nil || resp.StatusCode != http.StatusOK {
@@ -634,6 +635,7 @@ func (m *Manager) AggregateModels(ctx context.Context) ([]map[string]interface{}
 					if prov.APIKey != "" {
 						req2.Header.Set("Authorization", "Bearer "+prov.APIKey)
 					}
+					setAnthropicVersion(req2, prov.Route)
 					resp2, err3 := client.Do(req2)
 					if err3 == nil && resp2.StatusCode == http.StatusOK {
 						resp = resp2
@@ -720,6 +722,7 @@ func (m *Manager) TestProvider(ctx context.Context, route, apiKey string) (map[s
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
+	setAnthropicVersion(req, route)
 
 	resp, err := client.Do(req)
 	latency := int(time.Since(start).Milliseconds())
