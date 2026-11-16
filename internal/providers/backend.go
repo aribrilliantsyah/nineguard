@@ -2,6 +2,7 @@ package providers
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 )
 
@@ -33,4 +34,12 @@ func normalizeBackend(backend, family, route, apiKey string) (string, string, er
 		return "", "", fmt.Errorf("unsupported provider backend")
 	}
 	return backend, family, nil
+}
+
+// setAnthropicVersion adds the header Anthropic's API requires on every call, including
+// GET /v1/models. Other upstreams ignore it, so it is only sent to api.anthropic.com.
+func setAnthropicVersion(req *http.Request, route string) {
+	if strings.Contains(strings.ToLower(route), "api.anthropic.com") {
+		req.Header.Set("anthropic-version", "2023-06-01")
+	}
 }
