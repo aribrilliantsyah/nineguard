@@ -36,10 +36,21 @@ func normalizeBackend(backend, family, route, apiKey string) (string, string, er
 	return backend, family, nil
 }
 
-// setAnthropicVersion adds the header Anthropic's API requires on every call, including
-// GET /v1/models. Other upstreams ignore it, so it is only sent to api.anthropic.com.
-func setAnthropicVersion(req *http.Request, route string) {
-	if strings.Contains(strings.ToLower(route), "api.anthropic.com") {
+// setUpstreamAuth mirrors the proxy's outbound auth on model probes and syncs: the key goes in
+// both Authorization: Bearer (OpenAI-compatible) and x-api-key (Anthropic accepts only this).
+// Anthropic's API also requires anthropic-version on every call, including GET /v1/models;
+// other upstreams ignore it, so it is only sent to api.anthropic.com.
+func setUpstreamAuth(req *http.Request, route, apiKey string) {
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("x-api-key", apiKey)
+	}
+	if IsAnthropicAPI(route) {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
+}
+
+// IsAnthropicAPI reports whether route points at Anthropic's first-party API.
+func IsAnthropicAPI(route string) bool {
+	return strings.Contains(strings.ToLower(route), "api.anthropic.com")
 }

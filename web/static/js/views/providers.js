@@ -5,6 +5,10 @@ import { PROVIDER_ICONS, providerMark } from '../providericons.js';
 import { openProviderLogin } from '../provideroauth.js';
 import { openCostSettingsModal } from '../costmodal.js';
 
+// Anthropic API keys expose no quota endpoint; usage lives in the Claude Console.
+export const ANTHROPIC_CONSOLE_USAGE_URL = 'https://platform.claude.com/settings/usage';
+export const isAnthropicAPI = (route) => String(route || '').toLowerCase().includes('api.anthropic.com');
+
 export function mount(root) {
   let alive = true;
   let providers = [];
@@ -70,7 +74,9 @@ export function mount(root) {
             h('button', { class: `badge badge-btn ${p.is_active ? 'ok' : 'muted'}`, type: 'button', onclick: () => action(() => api.post(`/providers/${p.id}/toggle`, { active: !p.is_active })) }, p.is_active ? 'Enabled' : 'Disabled'),
             !p.is_default ? h('button', { class: 'btn btn-sm', type: 'button', onclick: () => action(() => api.post(`/providers/${p.id}/default`)) }, 'Make default') : null,
             p.upstream_token_saving ? h('span', { class: 'badge warn', title: p.upstream_token_saving_note }, 'Upstream token saving') : null,
-            sdk ? h('span', { class: 'badge' }, 'Automatic SDK telemetry') : p.quota_type !== 'disabled' ? h('span', { class: 'badge' }, `${p.quota_type} capacity`) : null
+            sdk ? h('span', { class: 'badge' }, 'Automatic SDK telemetry')
+              : isAnthropicAPI(p.route) ? h('a', { class: 'badge', href: ANTHROPIC_CONSOLE_USAGE_URL, target: '_blank', rel: 'noopener noreferrer', title: 'Anthropic API keys expose no quota telemetry' }, 'Usage in Claude Console')
+              : p.quota_type !== 'disabled' ? h('span', { class: 'badge' }, `${p.quota_type} capacity`) : null
           )
         ), probe, accountsBody
       );
@@ -116,18 +122,19 @@ export function mount(root) {
     const field = (label, node, hint) => h('label', { class: 'field' }, h('span', null, label), node, hint ? h('small', { class: 'muted' }, hint) : null);
     const trackerFields = h('div', { class: 'provider-form-stack' }, field('Capacity tracker', quota), field('Router dashboard password', password.wrap));
     const sdkTelemetryHint = h('p', { class: 'note' }, 'Automatic SDK telemetry. Limit percentages and reset times come from upstream response headers; Refresh reads the latest snapshot without sending a prompt.');
+    const anthropicHint = h('p', { class: 'note' }, 'Anthropic API keys expose no quota telemetry, so no capacity tracker is used. Check usage, spend and rate limits in your own ', h('a', { href: ANTHROPIC_CONSOLE_USAGE_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Claude Console'), '.');
     const httpFields = h('div', { class: 'provider-form-stack' }, field('Upstream URL', route), field('Upstream API key', key.wrap));
     const oauthHint = h('p', { class: 'note', hidden: type.value === 'http' }, 'Save this provider, then use Connect account. OAuth tokens are encrypted and refreshed by NineGuard.');
-    const change = () => { const sdk = type.value !== 'http'; httpFields.hidden = sdk; oauthHint.hidden = !sdk; trackerFields.hidden = sdk; sdkTelemetryHint.hidden = !sdk; paint(); }; type.addEventListener('change', change);change();
+    const change = () => { const sdk = type.value !== 'http'; const anthropic = !sdk && isAnthropicAPI(route.value); httpFields.hidden = sdk; oauthHint.hidden = !sdk; trackerFields.hidden = sdk || anthropic; anthropicHint.hidden = !anthropic; sdkTelemetryHint.hidden = !sdk; paint(); }; type.addEventListener('change', change); route.addEventListener('input', change); change();
     formDialog({ title: existing ? `Edit ${existing.name}` : 'Add provider', submitText: existing ? 'Save changes' : 'Add provider', extraWide: true,
       fields: [{ node: h('div', { class: 'provider-form' },
         h('div', { class: 'provider-form-stack' }, field('Connection type', type), field('Provider name', name), field('Routing prefix', prefix, 'Models appear as prefix/model-id. Leave empty for the root provider.'), httpFields, oauthHint, h('label', { class: 'provider-check' }, def, 'Default for models without a prefix')),
         h('div', { class: 'provider-form-stack' }, field('Provider icon', h('div', null, h('div', { class: 'provider-icon-control' }, preview, iconSelect), iconURL), 'Custom image hosts receive browser requests; no referrer is sent.'),
-          h('details', { class: 'provider-advanced' }, h('summary', null, 'Advanced settings'), trackerFields, sdkTelemetryHint, h('label', { class: 'provider-check' }, saving, 'Upstream already saves tokens'), savingNote))
+          h('details', { class: 'provider-advanced' }, h('summary', null, 'Advanced settings'), trackerFields, anthropicHint, sdkTelemetryHint, h('label', { class: 'provider-check' }, saving, 'Upstream already saves tokens'), savingNote))
       ) }], onSubmit: async () => {
         if (!name.value.trim()) throw Error('Provider name is required');
         const sdk = type.value !== 'http';
-        const payload = { name:name.value.trim(),prefix:prefix.value.trim(),route:sdk ? '' : route.value.trim(),backend:sdk ? 'cliproxy' : 'http',family:sdk ? type.value : '',icon:iconSelect.value === 'custom' ? iconURL.value.trim() : iconSelect.value,is_default:def.checked,is_active:existing?.is_active ?? true,quota_type:quota.value,upstream_token_saving:saving.checked,upstream_token_saving_note:savingNote.value.trim() };
+        const payload = { name:name.value.trim(),prefix:prefix.value.trim(),route:sdk ? '' : route.value.trim(),backend:sdk ? 'cliproxy' : 'http',family:sdk ? type.value : '',icon:iconSelect.value === 'custom' ? iconURL.value.trim() : iconSelect.value,is_default:def.checked,is_active:existing?.is_active ?? true,quota_type:!sdk && isAnthropicAPI(route.value) ? 'disabled' : quota.value,upstream_token_saving:saving.checked,upstream_token_saving_note:savingNote.value.trim() };
         if (!sdk && (!existing || key.input.value.trim())) payload.api_key = key.input.value.trim();
         if (password.input.value.trim()) payload.quota_auth_secret = password.input.value.trim();
         if (existing) await api.put(`/providers/${existing.id}`, payload); else await api.post('/providers',payload);

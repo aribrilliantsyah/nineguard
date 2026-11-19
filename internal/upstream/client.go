@@ -103,15 +103,19 @@ func (m *Manager) GetProviderQuotas(ctx context.Context, p providers.Provider, f
 		if m.sdk != nil { return m.sdk.SDKQuotas(ctx, p, time.Now()) }
 		return &ProviderQuotaResult{ProviderID:p.ID,ProviderName:p.Name,QuotaType:"sdk",Source:"sdk",Status:"degraded",ObservationState:"waiting",ErrorMsg:"SDK quota source is not ready",Connections:[]ConnectionQuota{}}, nil
 	}
-	if p.QuotaType == "disabled" || p.QuotaType == "" {
-		return &ProviderQuotaResult{
+	if EffectiveQuotaType(p) == "disabled" {
+		res := &ProviderQuotaResult{
 			ProviderID:   p.ID,
 			ProviderName: p.Name,
 			QuotaType:    "disabled",
 			Status:       "unsupported",
 			LastUpdated:  time.Now(),
 			Connections:  make([]ConnectionQuota, 0),
-		}, nil
+		}
+		if providers.IsAnthropicAPI(p.Route) {
+			res.ConsoleURL = AnthropicConsoleUsageURL
+		}
+		return res, nil
 	}
 
 	// Check cache

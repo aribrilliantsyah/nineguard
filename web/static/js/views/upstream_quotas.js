@@ -830,7 +830,8 @@ export function renderUpstreamQuotas(container) {
     // Clicks anywhere on the header (including the chevron) bubble to the toggle; Refresh stops them.
     refreshBtn.addEventListener('click', (e) => e.stopPropagation());
 
-    const protocolLabel = p.quota_type === '9router' ? 'Router Protocol'
+    const protocolLabel = p.console_url ? 'Provider console'
+      : p.quota_type === '9router' ? 'Router Protocol'
       : p.quota_type === 'nineguard' ? 'NineGuard Cascaded'
       : sdk || p.quota_type === 'sdk' ? 'SDK account telemetry' : 'Direct LLM (No Tracker)';
     const statusText = sdk && p.status === 'ok' ? telemetryStateLabel(p.observation_state) : p.status;
@@ -850,7 +851,10 @@ export function renderUpstreamQuotas(container) {
     const summary = h('span', { class: 'muted uq-summary', hidden: open }, upstreamProviderSummary(p));
     const conns = (p.connections || []).filter(Boolean);
     const body = h('div', { id: bodyId, class: 'uq-body', hidden: !open },
-      isUnsupported
+      p.console_url
+        ? h('p', { class: 'uq-empty-note' }, 'Anthropic API keys expose no quota telemetry. Check usage, spend and rate limits in your own console: ',
+            h('a', { href: p.console_url, target: '_blank', rel: 'noopener noreferrer' }, 'Claude Console → Usage'), '.')
+        : isUnsupported
         ? h('p', { class: 'uq-empty-note' }, 'This provider connects directly to an LLM without upstream limit telemetry. Switch protocol in Providers menu to enable.')
         : conns.length
         ? h('div', { class: groupBy === 'account' ? 'uq-grid gb-acct-stage' : 'uq-grid gb-stage' },
@@ -887,7 +891,7 @@ export function renderUpstreamQuotas(container) {
     stageObservers.forEach((o) => o.disconnect());
     stageObservers = [];
 
-    const activeTrackers = providersData.filter((p) => p.quota_type && p.quota_type !== 'disabled');
+    const activeTrackers = providersData.filter((p) => (p.quota_type && p.quota_type !== 'disabled') || p.console_url);
 
     if (!providersData.length || !activeTrackers.length) {
       content.replaceChildren(

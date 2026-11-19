@@ -11,9 +11,16 @@ type SDKQuotaSource interface {
 	SDKQuotas(context.Context, providers.Provider, time.Time) (*ProviderQuotaResult, error)
 }
 
+// AnthropicConsoleUsageURL is where Anthropic API key holders read usage and rate limits.
+const AnthropicConsoleUsageURL = "https://platform.claude.com/settings/usage"
+
 func EffectiveQuotaType(p providers.Provider) string {
 	if p.Backend == "cliproxy" {
 		return "sdk"
+	}
+	// Anthropic API keys expose no quota endpoint; a 9router/NineGuard tracker there only fails.
+	if p.QuotaType == "" || providers.IsAnthropicAPI(p.Route) {
+		return "disabled"
 	}
 	return p.QuotaType
 }

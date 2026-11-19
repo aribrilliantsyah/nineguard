@@ -53,6 +53,9 @@ type ProviderQuotaResult struct {
 	Source string `json:"source,omitempty"`
 	ObservedAt *time.Time `json:"observed_at,omitempty"`
 	ObservationState string `json:"observation_state,omitempty"`
+	// ConsoleURL points admins at the provider's own usage console when NineGuard has no
+	// quota telemetry for it (Anthropic API keys expose no limits endpoint).
+	ConsoleURL string `json:"console_url,omitempty"`
 }
 
 // MergedPoolQuota represents client-facing aggregated quotas grouped by provider & family.

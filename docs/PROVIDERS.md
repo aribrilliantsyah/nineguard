@@ -1,6 +1,6 @@
 # Panduan Manajemen Upstream Providers
 
-NineGuard mendukung **Custom URL** untuk server kompatibel OpenAI REST API v1, serta akun **Claude** dan **OpenAI/Codex** melalui OAuth engine CLIProxyAPI tertanam. Tidak perlu menjalankan service CLIProxyAPI terpisah.
+NineGuard mendukung **Custom URL** untuk server kompatibel OpenAI REST API v1 maupun Anthropic Messages API (misalnya `https://api.anthropic.com`), serta akun **Claude** dan **OpenAI/Codex** melalui OAuth engine CLIProxyAPI tertanam. Tidak perlu menjalankan service CLIProxyAPI terpisah. Provider Custom URL diteruskan apa adanya tanpa translasi protokol: client `/v1/messages` hanya bisa memakai upstream yang melayani Anthropic Messages.
 
 ---
 
@@ -18,7 +18,8 @@ Buka antarmuka NineGuard pada browser di menu **Gateway $\rightarrow$ Providers*
      * Ollama: `http://localhost:11434`
      * vLLM / Local AI: `http://localhost:8000`
      * OpenRouter: `https://openrouter.ai/api/v1`
-   * **Upstream API Key:** Master API key yang dibutuhkan provider tersebut.
+     * Anthropic API: `https://api.anthropic.com`
+   * **Upstream API Key:** Master API key yang dibutuhkan provider tersebut. NineGuard mengirimnya sebagai `Authorization: Bearer` sekaligus `x-api-key`, untuk request proxy, **Check connection**, dan sinkronisasi model; ke `api.anthropic.com` juga ditambahkan `anthropic-version: 2023-06-01`.
    * **Set as Default Provider:** Centang opsi ini jika provider ini ingin dijadikan tujuan cadangan (*fallback*) untuk request tanpa prefix.
 3. Klik **Add Provider** (atau **Save Changes** jika mengedit provider yang sudah ada).
 4. Setelah provider tersimpan, klik **Check connection** untuk memvalidasi endpoint custom. Untuk provider OAuth, gunakan **Connect account**.
@@ -76,3 +77,7 @@ Data berasal dari header respons normal. Tombol **Refresh** hanya membaca snapsh
 
 Dashboard admin menampilkan per akun. Portal dan `/quota` hanya menerima ringkasan tanpa email/ID akun: **most constrained observed account**, bukan total kapasitas seluruh akun. Data parsial diberi label incomplete; akun lain mungkin masih memiliki kapasitas. Limit ini tidak ditambahkan ke budget key NineGuard dan tidak mengubah enforcement token client.
 
+
+## 7. Provider Anthropic API (`api.anthropic.com`)
+
+API key Anthropic tidak menyediakan endpoint kuota, jadi NineGuard tidak melacak kapasitas upstream untuk route `api.anthropic.com`. Pilihan **Capacity tracker** disembunyikan di form dan selalu disimpan `disabled`; tracker yang terlanjur di-set juga diabaikan. Halaman **Quotas** dan daftar provider menampilkan tautan ke [Claude Console → Usage](https://platform.claude.com/settings/usage); cek pemakaian, biaya, dan rate limit di console akun masing-masing. Budget key NineGuard (Key/Model Quota) tetap berlaku seperti biasa.

@@ -341,10 +341,26 @@ Masuk ke menu **Gateway $\rightarrow$ Endpoints & Keys** *(bukan di halaman Dash
 ---
 
 ### 4. Konfigurasikan pada AI Agent / IDE
-Atur pengaturan OpenAI-compatible pada agent atau IDE Anda:
+NineGuard melayani dua protokol client dengan key `sk-ng-...` yang sama.
+
+#### 4a. Client OpenAI-compatible (semua model)
 * **Base URL:** `http://localhost:8080/v1`
-* **API Key:** `sk-ng-...` (NineGuard Client API Key yang baru disalin pada Langkah 2)
+* **API Key:** `sk-ng-...` (NineGuard Client API Key yang baru disalin pada Langkah 2), dikirim sebagai `Authorization: Bearer`
 * **Model ID:** Pilih model yang telah diberi prefix provider (misal: `openrouter/anthropic/claude-3.5-sonnet` atau model lokal `local/llama3:8b`).
+
+#### 4b. Model Claude / Anthropic: endpoint native `/v1/messages` (Direkomendasikan)
+NineGuard meneruskan `POST /v1/messages` ke upstream **apa adanya, tanpa translasi protokol** (ADR 0014), sehingga extended thinking, prompt caching (`cache_control`), dan blok `tool_use`/`tool_result` tetap utuh. Izin key, Key/Model Quota, plugin (Billion Context, Caveman, Ponytail, SecretGuard; Headroom dilewati pada format ini), chat command `/quota` dan `/usage`, serta envelope error Anthropic tetap berlaku.
+* **Base URL:** `http://localhost:8080` (**tanpa `/v1`**: Anthropic SDK dan Claude Code menambahkan `/v1/messages` sendiri)
+* **API Key:** `sk-ng-...`, dikirim sebagai `x-api-key` (atau `Authorization: Bearer`; keduanya diterima). `anthropic-version: 2023-06-01` ditambahkan bila client tidak mengirimnya.
+* **Model ID:** ID berprefix yang sama seperti di dashboard (misal `claude/claude-sonnet-4-5` untuk akun Claude terhubung, atau `9router/cc/claude-sonnet-4-5`).
+* **Syarat upstream:** provider di balik prefix tersebut harus melayani Anthropic Messages (akun Claude via SDK tertanam, 9router, `https://api.anthropic.com`, atau gateway Anthropic-compatible lain). Custom URL yang hanya OpenAI chat completions akan menjawab `/v1/messages` dengan 404; gunakan 4a.
+
+```bash
+# Claude Code
+export ANTHROPIC_BASE_URL="http://localhost:8080"
+export ANTHROPIC_API_KEY="sk-ng-..."
+claude
+```
 
 ---
 

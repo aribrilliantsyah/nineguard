@@ -20,7 +20,7 @@ NineGuard dirancang berdasarkan prinsip:
 [1. Client Agent]
        │
        │ HTTP POST /v1/chat/completions (atau /v1/messages, /v1/responses)
-       │ Header: Authorization: Bearer sk-ng-...
+       │ Header: Authorization: Bearer sk-ng-... (atau x-api-key: sk-ng-... untuk /v1/messages, ADR 0014)
        ▼
 [2. NineGuard Security Interceptor]
        │
@@ -46,13 +46,15 @@ NineGuard dirancang berdasarkan prinsip:
        ├── Cek Model Quota (hanya mode "model", pakai Model ID hasil resolve)
        │     └── Jika limit tercapai ───────► 429 model_quota_exceeded
        │
-       ├── Pipeline Plugin (hanya format chat)
+       ├── Pipeline Plugin (format chat dan messages; plugin menyesuaikan skema masing-masing)
        │
        ├── Injeksi Stream Usage Core (ADR 0011, format chat streaming)
        │     └── Tambah stream_options.include_usage: true jika belum ada
        │
        ├── Rewrite Request Header:
-       │     └── Authorization: Bearer <Master_API_Key_Provider>
+       │     ├── Authorization: Bearer <Master_API_Key_Provider> dan x-api-key: <Master_API_Key_Provider>
+       │     ├── anthropic-version: 2023-06-01 bila format messages dan client tidak mengirimnya
+       │     └── Buang header hop-by-hop, X-App, Origin/Referer/Sec-Fetch-* (browser), header internal NineGuard
        ▼
 [3. Upstream Provider]
        │

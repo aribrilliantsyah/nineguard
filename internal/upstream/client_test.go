@@ -261,6 +261,27 @@ func TestDisabledQuotaType(t *testing.T) {
 	}
 }
 
+// Anthropic API keys have no limits endpoint: even a mis-set tracker must not be polled,
+// and the result points admins at the Claude Console instead.
+func TestAnthropicAPIQuotaPointsToConsole(t *testing.T) {
+	mgr := upstream.NewManager()
+	prov := providers.Provider{ID: "p-ant", Name: "Anthropic", Route: "https://api.anthropic.com", QuotaType: "9router", IsActive: true}
+
+	if upstream.SupportsQuotaTracking(prov) {
+		t.Fatal("Anthropic API provider must not be quota-tracked")
+	}
+	res, err := mgr.GetProviderQuotas(context.Background(), prov, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != "unsupported" || res.QuotaType != "disabled" {
+		t.Fatalf("status/type = %s/%s, want unsupported/disabled", res.Status, res.QuotaType)
+	}
+	if res.ConsoleURL != upstream.AnthropicConsoleUsageURL {
+		t.Fatalf("console_url = %q, want %q", res.ConsoleURL, upstream.AnthropicConsoleUsageURL)
+	}
+}
+
 func TestRouter9Adapter_ForceTimeoutFallbackToCache(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
